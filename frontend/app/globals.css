@@ -1,0 +1,464 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ========= 字体体系重构：Advent Pro 科技感 + Hacked 黑客字体 ========= */
+/* Advent Pro 字体族（100-700）- 全局科技感字体（来自 css2.css） */
+@import url('https://fonts.googleapis.com/css2?family=Advent+Pro:wght@100;200;300;400;500;600;700&display=swap');
+
+:root {
+  /* 现有项目配色 */
+  --cyber-yellow: #f9f002; /* 标志性明黄 */
+  --cyber-cyan: #00e6f6;   /* 霓虹青 */
+  --cyber-red: #ff013c;    /* 警告红 */
+  --cyber-bg: #000000;    /* 纯黑底色 */
+  --cyber-border: #8ae66e; /* 辅助绿 */
+
+  /* RGB 分量（供 Tailwind rgba(<alpha-value>) 机制使用） */
+  --cyber-cyan-rgb:   0, 230, 246;
+  --cyber-yellow-rgb: 249, 240, 2;
+  --cyber-red-rgb:    255, 1, 60;
+
+
+  /* ========= Z-Index 安全边界 ========= */
+  --z-base:       0;    /* 伪元素底层纹理 */
+  --z-content:    1;    /* 卡片内容层 */
+  --z-badge:      2;    /* 角标/徽章 */
+  --z-dropdown:   50;   /* 下拉菜单 */
+  --z-sidebar:    100;  /* 侧边面板主体 */
+  --z-sidebar-trigger: 110; /* 侧边面板触发轴 */
+  --z-modal:      200;  /* 模态框 */
+  --z-toast:      300;  /* 通知/Toast */
+  --z-overlay:    9999; /* 全屏覆盖层（CRT扫描线等） */
+
+  /* Cyberpunk-2077-theme-css 关键变量 */
+  --glitched-duration: 0.9s;
+  --glitched-long-duration: 3s;
+  --yellow-color: #f9f002;
+  --yellow-color-opacity: #f9f00242;
+  --orange-color: #ff9800;
+  --border-color: #8ae66e;
+  --red-color: #ff003c;
+  --blue-color: #0c5f74;
+  --green-color: #298d29;
+  --purple-color: purple;
+  --neon-color: #39ff14;
+  --black-color: #000000;
+}
+
+/* Hacked 字体嵌入（来自插件） */
+@font-face {
+  font-family: 'Hacked';
+  src: url(data:font/ttf;charset=utf-8;base64,AAEAAAAPAIAAAwBwR1NVQiCLJXoAAAD8AAAAVE9TLzJ2RIcFAAABUAAAAGBjbWFw18hFEgAAAbAAAAGGY3Z0IAAAAAAAAAk8AAAADmZwZ21iLvl6AAAJTAAADgxnYXNwAAAAEAAACTQAAAAIZ2x5ZtwCkboAAAM4AAACZGhlYWQepKJiAAAFnAAAADZoaGVhBzsDVAAABdQAAAAkaG10eAhg//4AAAX4AAAADGxvY2EApgEyAAAGBAAAAAhtYXhwARsOrgAABgwAAAAgbmFtZc2dGBkAAAYsAAACzXBvc3Rw/i1VAAAI/AAAADZwcmVwfrY7tgAAF1gAAACcAAEAAAAKADAAPgACREZMVAAObGF0bgAaAAQAAAAAAAAAAQAAAAQAAAAAAAAAAQAAAAFsaWdhAAgAAAABAAAAAQAEAAQAAAABAAgAAQAGAAAAAQAAAAQCywGQAAUAAAJ6ArwAAACMAnoCvAAAAeAAMQECAAACAAUDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFBmRWQAwCAiJc8DUv9qAFoDrACWAAAAAQAAAAAAAAAAAAAAAAACAAAABQAAAAMAAAAsAAAABAAAAV4AAQAAAAAAWAADAAEAAAAsAAMACgAAAV4ABAAsAAAABgAEAAEAAiAiJc///wAAICIlz///AAAAAAABAAYABgAAAAEAAgAAAQYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAAAAAAKAAAAAAAAAACAAAgIgAAICIAAAABAAAlzwAAJc8AAAACAAAAAQAA/2oCIwNTAGMANEAxPjY1AwMCDAsEAwQAAQJMAAIAAwECA2kAAQAAAVkAAQEAXwAAAQBPUlA6OR4cJgQGFyslFAYHFRQGKwEiJjc1LgQnJj8BPgEfARYXFjMyNjc0LgEvASYnLgEvAS4FNTQ2NzU0NhczMhYdAR4EFxYPAQ4BJyYvAS4CIyIGFxQeAh8BFhceBgIicFgKCEsHDAElRC4kEAIJCDoDEgUBP0gVFS1EARISGCUNIBUaFSMOJBYcDApuVwoISwgKIDwkJAYGCQYuBBAHAgcVDiYuGDVEAQgaEhYiDBseHjgcKBQQvVZ6EGEICgoIYQUaGBwOAwwLTAUCBgE3DwQwLBAcEgwSBgwJCgoRBxoWICAqF010EWQHDAEKCGIDFBIWDAELC1EJAgYCBQ4JEgwwJg4aFBAKDwUKCwwcFCQiNAAAAAAB//7/+AI/AwsAQwBgQF0iAQQFMjEUAwMEPDsKCQQBAkEBAAEETAYBBQQFhQsBAAEAhgcBBAgBAwIEA2cJAQIBAQJXCQECAgFfCgEBAgFPAQBAPjg3NjQuLSonHhsYFhAPDgwGBQBDAUMMBhYrBSMiJj0BIyImNzU0NjsBNSMiJjc1NDY7AQMmNjsBMh8BFhc+AT8BNjsBMhYHAzMyFgcVFAYrARUzMhYHFRQGKwEVFAYBUWAICqEHDAEKCKGhBwwBCgh3swQKCmwLBXgLFQUYA2sEDGoKCgSveAcMAQoIoqIHDAEKCKIKBwoIuAoIOQgKMAoHOggKAUMJEgruFTANMgnqCxEK/r0KCDoHCjAKCDkICrgHDAAAAQAAAAEAAIhLvj1fDzz1AA8D6AAAAADdza9gAAAAAN3Nr2D//v9qA+gDUwAAAAgAAgAAAAAAAAABAAADUv9qAAAD6P/+//4D6AABAAAAAAAAAAAAAAAAAAAAAwPoAAACOwAAAj3//gAAAAAApgEyAAEAAAADAGQAAQAAAAAAAgAYADwAjQAAAHEODAAAAAAAAAASAN4AAQAAAAAAAAA1AAAAAQAAAAAAAQAIADUAAQAAAAAAAgAHAD0AAQAAAAAAAwAIAEQAAQAAAAAABAAIAEwAAQAAAAAABQALAFQAAQAAAAAABgAIAF8AAQAAAAAACgArAGcAAQAAAAAACwATAJIAAwABBAkAAABqAKUAAwABBAkAAQAQAQ8AAwABBAkAAgAOAR8AAwABBAkAAwAQAS0AAwABBAkABAAQAT0AAwABBAkABQAWAU0AAwABBAkABgAQAWMAAwABBAkACgBWAXMAAwABBAkACwAmAclDb3B5cmlnaHQgKEMpIDIwMjEgYnkgb3JpZ2luYWwgYXV0aG9ycyBAIGZvbnRlbGxvLmNvbWZvbnRlbGxvUmVndWxhcmZvbnRlbGxvZm9udGVsbG9WZXJzaW9uIDEuMGZvbnRlbGxvR2VuZXJhdGVkIGJ5IHN2ZzJ0dGYgZnJvbSBGb250ZWxsbyBwcm9qZWN0Lmh0dHA6Ly9mb250ZWxsby5jb20AQwBvAHAAeQByAGkAZwBoAHQAIAAoAEMAKQAgADIAMAAyADEAIABiAHkAIABvAHIAaQBnAGkAbgBhAGwAIABhAHUAdABoAG8AcgBzACAAQAAgAGYAbwBuAHQAZQBsAGwAbwAuAGMAbwBtAGYAbwBuAHQAZQBsAGwAbwBSAGUAZwB1AGwAYQByAGYAbwBuAHQAZQBsAGwAbwBmAG8AbgB0AGUAbABsAG8AVgBlAHIAcwBpAG8AbgAgADEALgAwAGYAbwBuAHQAZQBsAGwAbwBHAGUAbgBlAHIAYQB0AGUAZAAgAGIAeQAgAHMAdgBnADIAdAB0AGYAIABmAHIAbwBtACAARgBvAG4AdABlAGwAbABvACAAcAByAG8AagBlAGMAdAAuAGgAdAB0AHAAOgAvAC8AZgBvAG4AdABlAGwAbABvAC4AYwBvAG0AAAAAAgAAAAAAAAAKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAQIBAwEEAAZkb2xsYXIDeWVuAAAAAAABAAH//wAPAAAAAAAAAAAAAAAAAAAAALAALCCwAFVYRVkgIEu4AA5RS7AGU1pYsDQbsChZYGYgilVYsAIlYbkIAAgAY2MjYhshIbAAWbAAQyNEsgABAENgQi2wASywIGBmLbACLCMhIyEtsAMsIGSzAxQVAEJDsBNDIGBgQrECFENCsSUDQ7ACQ1R4ILAMI7ACQ0NhZLAEUHiyAgICQ2BCsCFlHCGwAkNDsg4VAUIcILACQyNCshMBE0NgQiOwAFBYZVmyFgECQ2BCLbAELLADK7AVQ1gjISMhsBZDQyOwAFBYZVkbIGQgsMBQsAQmWrIoAQ1DRWNFsAZFWCGwAyVZUltYISMhG4pYILBQUFghsEBZGyCwOFBYIbA4WVkgsQENQ0VjRWFksChQWCGxAQ1DRWNFILAwUFghsDBZGyCwwFBYIGYgiophILAKUFhgGyCwIFBYIbAKYBsgsDZQWCGwNmAbYFlZWRuwAiWwDENjsABSWLAAS7AKUFghsAxDG0uwHlBYIbAeS2G4EABjsAxDY7gFAGJZWWRhWbABK1lZI7AAUFhlWVkgZLAWQyNCWS2wBSwgRSCwBCVhZCCwB0NQWLAHI0KwCCNCGyEhWbABYC2wBiwjISMhsAMrIGSxB2JCILAII0KwBkVYG7EBDUNFY7EBDUOwAGBFY7AFKiEgsAhDIIogirABK7EwBSWwBCZRWGBQG2FSWVgjWSFZILBAU1iwASsbIbBAWSOwAFBYZVktsAcssAlDK7IAAgBDYEItsAgssAkjQiMgsAAjQmGwAmJmsAFjsAFgsAcqLbAJLCAgRSCwDkNjuAQAYiCwAFBYsEBgWWawAWNgRLABYC2wDSwgIEUgsAErI7AAQ7AEJWAgRYojYSBkILAgUFghsAAbsDBQWLAgG7BAWVkjsABQWGVZsAMlI2FERLABYC2wDSwgIEUgsAErI7AAQ7AEJWAgRYojYSBksCRQWLAAG7BAWSOwAFBYZVmwAyUjYUREsAFgLbAOLCCwACNCsw0MAANFUFghGyMhWSohLbAPLLECAkWwZGFELbAQLLABYCAgsA9DSrAAUFggsA8jQlmwEENKsABSWCCwECNCWS2wESwgsBBiZrABYyC4BABjiiNhsBFDYCCKYCCwESNCIy2wEixLVFixBGREWSSwDWUjeC2wEyxLUVhLU1ixBGREWRshWSSwE2UjeC2wFCyxABJDVVixEhJDsAFhQrARK1mwAEOwAiVCsQ8CJUKxEAIlQrABFiMgsAMlUFixAQBDYLAEJUKKiiCKI2GwECohI7ABYSCKI2GwECohG7EBAENgsAIlQrACJWGwECohWbAPQ0ewEENHYLACYiCwAFBYsEBgWWawAWMgsA5DY7gEAGIgsABQWLBAYFlmsAFjYLEAABMjRLABQ7AAPrIBAQFDYEItsBUsALEAAkVUWLASI0IgRbAOI0KwDSOwAGBCIGC3GBgBABEAEwBCQkKKYCCwFCNCsAFhsRQIK7CLKxsiWS2wFiyxABUrLbAXLLEBFSstsBgssQIVKy2wGSyxAxUrLbAaLLEEFSstsBsssQUVKy2wHCyxBhUrLbAdLLEHFSstsB4ssQgVKy2wHyyxCRUrLbArLCMgsBBiZrABY7AGYEtUWCMgLrABXRshIVktsCwsIyCwEGJmsAFjsBZgS1RYIyAusAFxGyEhWS2wLSwjILAQYmawAWOwJmBLVFgjIC6wAXIbISFZLbAgLACwDyuxAAJFVFiwEiNCIEWwDiNCsA0jsABgQiBgsAFhtRgYAQARAEJCimCxFAgrsIsrGyJZLbAhLLEAICstsCIssQEgKy2wIyyxAiArLbAkLLEDICstsCUssQQgKy2wJiyxBSArLbAnLLEGICstsCgssQcgKy2wKSyxCCArLbAqLLEJICstsC4sIDywAWAtsC8sIGCwGGAgQyOwAWBDsAIlYbABYLAuKiEtsDAssC8rsC8qLbAxLCAgRyAgsA5DY7gEAGIgsABQWLBAYFlmsAFjYCNhOCMgilVYIEcgILAOQ2O4BABiILAAUFiwQGBZZrABY2AjYTgbIVktsDIsALEAAkVUWLEOBkVCsAEWsDEqsQUBFUVYMFkbIlktsDMsALAPK7EAAkVUWLEOBkVCsAEWsDEqsQUBFUVYMFkbIlktsDQsIDWwAWAtsDUsALEOBkVCsAFFY7gEAGIgsABQWLBAYFlmsAFjsAErsA5DY7gEAGIgsABQWLBAYFlmsAFjsAErsAAWtAAAAAAARD4jOLE0ARUqIS2wNiwgPCBHILAOQ2O4BABiILAAUFiwQGBZZrABY2CwAENhOC2wNywuFzwtsDgsIDwgRyCwDkNjuAQAYiCwAFBYsEBgWWawAWNgsABDYbABQ2M4LbA5LLECABYlIC4gR7AAI0KwAiVJiopHI0cjYSBYYhshWbABI0KyOAEBFRQqLbA6LLAAFrAXI0KwBCWwBCVHI0cjYbEMAEKwC0MrZYouIyAgPIo4LbA7LLAAFrAXI0KwBCWwBCUgLkcjRyNhILAGI0KxDABCsAtDKyCwYFBYILBAUVizBCAFIBuzBCYFGllCQiMgsApDIIojRyNHI2EjRmCwBkOwAmIgsABQWLBAYFlmsAFjYCCwASsgiophILAEQ2BkI7AFQ2FkUFiwBENhG7AFQ2BZsAMlsAJiILAAUFiwQGBZZrABY2EjICCwBCYjRmE4GyOwCkNGsAIlsApDRyNHI2FgILAGQ7ACYiCwAFBYsEBgWWawAWNgIyCwASsjsAZDYLABK7AFJWGwBSWwAmIgsABQWLBAYFlmsAFjsAQmYSCwBCVgZCOwAyVgZFBYIRsjIVkjICCwBCYjRmE4WS2wPCywABawFyNCICAgsAUmIC5HI0cjYSM8OC2wPSywABawFyNCILAKI0IgICBGI0ewASsjYTgtsD4ssAAWsBcjQrADJbACJUcjRyNhsABUWC4gPCMhG7ACJbACJUcjRyNhILAFJbAEJUcjRyNhsAYlsAUlSbACJWG5CAAIAGNjIyBYYhshWWO4BABiILAAUFiwQGBZZrABY2AjLiMgIDyKOCMhWS2wPyywABawFyNCILAKQyAuRyNHI2EgYLAgYGawAmIgsABQWLBAYFlmsAFjIyAgPIo4LbBALCMgLkawAiVGsBdDWFAbUllYIDxZLrEwARQrLbBBLCMgLkawAiVGsBdDWFIbUFlYIDxZLrEwARQrLbBCLCMgLkawAiVGsBdDWFAbUllYIDxZIyAuRrACJUawF0NYUhtQWVggPFkusTABFCstsEMssDorIyAuRrACJUawF0NYUBtSWVggPFkusTABFCstsEQssDsriiAgPLAGI0KKOCMgLkawAiVGsBdDWFAbUllYIDxZLrEwARQrsAZDLrAwKy2wRSywABawBCWwBCYgICBGI0dhsAwjQi5HI0cjYbALQysjIDwgLiM4sTABFCstsEYssQoEJUKwABawBCWwBCUgLkcjRyNhILAGI0KxDABCsAtDKyCwYFBYILBAUVizBCAFIBuzBCYFGllCQiMgR7AGQ7ACYiCwAFBYsEBgWWawAWNgILABKyCKimEgsARDYGQjsAVDYWRQWLAEQ2EbsAVDYFmwAyWwAmIgsABQWLBAYFlmsAFjYbACJUZhOCMgPCM4GyEgIEYjR7ABKyNhOCFZsTABFCstsEcssQA6Ky6xMAEUKy2wSCyxADsrISMgIDywBiNCIzixMAEUK7AGQy6wMCstsEkssAAVIEewACNCsgABARUUEy6wNiotsEossAAVIEewACNCsgABARUUEy6wNiotsEsssQABFBOwNyotsEwssDkqLbBNLLAAFkUjIC4gRoojYTixMAEUKy2wTiywCiNCsE0rLbBPLLIAAEYrLbBQLLIAAUYrLbBRLLIBAEYrLbBSLLIBAUYrLbBTLLIAAEcrLbBULLIAAUcrLbBVLLIBAEcrLbBWLLIBAUcrLbBXLLMAAABDKy2wWCyzAAEAQystsFksswEAAEMrLbBaLLMBAQBDKy2wWyyzAAABQystsFwsswABAUMrLbBdLLMBAAFDKy2wXiyzAQEBQystsF8ssgAARSstsGAssgABRSstsGEssgEARSstsGIssgEBRSstsGMssgAASCstsGQssgABSCstsGUssgEASCstsGYssgEBSCstsGcsswAAAEQrLbBoLLMAAQBEKy2waSyzAQAARCstsGosswEBAEQrLbBrLLMAAAFEKy2wbCyzAAEBRCstsG0sswEAAUQrLbBuLLMBAQFEKy2wbyyxADwrLrEwARQrLbBwLLEAPCuwQCstsHEssQA8K7BBKy2wciywABaxADwrsEIrLbBzLLEBPCuwQCstsHQssQE8K7BBKy2wdSywABaxATwrsEIrLbB2LLEAPSsusTABFCstsHcssQA9K7BAKy2weCyxAD0rsEErLbB5LLEAPSuwQistsHossQE9K7BAKy2weyyxAT0rsEErLbB8LLEBPSuwQistsH0ssQA+Ky6xMAEUKy2wfiyxAD4rsEArLbB/LLEAPiuwQSstsIAssQA+K7BCKy2wgSyxAT4rsEArLbCCLLEBPiuwQSstsIMssQE+K7BCKy2whCyxAD8rLrEwARQrLbCFLLEAPyuwQCstsIYssQA/K7BBKy2whyyxAD8rsEIrLbCILLEBPyuwQCstsIkssQE/K7BBKy2wiiyxAT8rsEIrLbCLLLILAANFUFiwBhuyBAIDRVgjIRshWVlCK7AIZbADJFB4sQUBFUVYMFktAEu4AMhSWLEBAY5ZsAG5CAAIAGNwsQAHQrEAACqxAAdCsQAKKrEAB0KxAAoqsQAHQrkAAAALKrEAB0K5AAAACyq5AAMAAESxJAGIUViwQIhYuQADAGREsSgBiFFYuAgAiFi5AAMAAERZG7EnAYhRWLoIgAABBECIY1RYuQADAABEWVlZWVmxAA4quAH/hbAEjbECAESzBWQGAERE) format('truetype');
+  font-weight: 400;
+  font-style: normal;
+}
+
+/* ========= 全局字体应用：Advent Pro 科技感 ========= */
+body {
+  color: var(--cyber-yellow);
+  font-family: 'Advent Pro', 'Orbitron', 'Segoe UI', sans-serif;
+  cursor: crosshair !important; /* 极简准星 */
+  letter-spacing: 0.5px; /* 轻微字符间距，增强科技感 */
+  
+  /* 纯黑底色背景 */
+  background-color: var(--cyber-bg);
+  background-image: none;
+}
+
+/* 全局标题字体强化 */
+h1, h2, h3, h4, h5, h6 {
+  font-family: 'Advent Pro', sans-serif;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+}
+
+/* 标签与按钮字体 */
+label, button, .btn {
+  font-family: 'Advent Pro', sans-serif;
+  font-weight: 500;
+  letter-spacing: 1px;
+}
+
+a, button, [role="button"], input, select {
+  cursor: crosshair !important;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+
+
+/* 🌟 标题色差毛刺效果增强 */
+h1, h2 {
+  text-shadow: 
+    3px 3px var(--cyber-red),
+    -2px -2px var(--cyber-cyan) !important;
+  letter-spacing: 3px; /* 字符间距加大至 3px */
+}
+
+/* 🎨 背景纹理：点状矩阵扫描线 ========= */
+body::before {
+  content: " ";
+  display: block; 
+  position: fixed; 
+  top: 0; 
+  left: 0; 
+  bottom: 0; 
+  right: 0;
+  
+  /* 点状矩阵纹理 + CRT 扫描线 */
+  background: 
+    radial-gradient(circle, rgba(249, 240, 2, 0.03) 1px, transparent 1px),
+    linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), 
+    linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+  
+  background-size: 8px 8px, 100% 2px, 3px 100%;
+  background-position: 0 0, 0 0, 0 0;
+  
+  z-index: var(--z-overlay);
+  pointer-events: none;
+  animation: scanline-move calc(var(--glitched-long-duration) * 2) linear infinite;
+}
+
+/* ========= 🛡️ 赛博朋克全局滚动条 (Cyberpunk Scrollbar) ========= */
+
+/* Webkit 内核（Chrome, Edge, Safari） */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background-color: #000000;
+  border-left: 1px solid rgba(0, 230, 246, 0.2);
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: var(--cyber-cyan);
+  border-radius: 0px; /* 强制直角工业风 */
+  border: 1px solid #000000;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--cyber-yellow);
+  box-shadow: 0 0 10px var(--cyber-yellow);
+}
+
+::-webkit-scrollbar-corner {
+  background-color: #000000;
+}
+
+/* Firefox 兼容 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--cyber-cyan) #000000;
+}
+
+/* ========= 动画与辅助效果 ========= */
+
+@keyframes scanline-move {
+  0% {
+    background-position-y: 0;
+  }
+  100% {
+    background-position-y: 4px;
+  }
+}
+
+/* ========= Cyberpunk 按钮（装甲化精简版 - 重型黄色装甲 + 右侧能量点缀） ========= */
+
+button.cyberpunk,
+input[type=submit].cyberpunk, 
+a.cyberpunk {
+  --text: "R-25";
+  --background-color: var(--red-color);
+  display: block;
+  border: none;
+  border-radius: 0%;
+  font-size: 1.5rem;
+  line-height: 1.5rem;
+  letter-spacing: 3px; /* 字符间距拉大至 3px */
+  text-transform: uppercase;
+  font-weight: 700;
+  padding: 35px 75px;
+  margin: 10px 20px 10px 0px;
+  position: relative;
+  color: #fff;
+  
+  /* 🛡️ 重型黄色装甲边框（仅右侧和底部） */
+  border-right: 8px solid var(--cyber-yellow);
+  border-bottom: 5px solid var(--cyber-yellow);
+  box-shadow: 
+    8px 8px 0 rgba(249, 240, 2, 0.3),
+    0 0 20px rgba(138, 230, 110, 0.25);
+  
+  /* 🛡️ 非对称斜角裁剪 */
+  clip-path: polygon(
+    -15px 0%,
+    calc(100% + 15px) 0%,
+    calc(100% + 15px) 100%,
+    30px 100%,
+    -15px calc(100% - 45px)
+  );
+  
+  cursor: pointer;
+  background-color: var(--background-color);
+  outline: none;
+  display: inline-block;
+}
+
+/* 🔋 按钮右侧能量点缀已移除 - 纯净装甲模式 */
+
+button.cyberpunk:after,
+input[type=submit].cyberpunk:after,
+a.cyberpunk:after {
+  content: var(--text);
+  display: block;
+  position: absolute;
+  bottom: 0px;
+  right: 25px;
+  padding: 2px 2px 0px 2px;
+  font-size: 0.6rem;
+  line-height: 0.6rem;
+  color: var(--black-color);
+  background-color: var(--yellow-color);
+  border-left: 2px solid var(--border-color);
+  z-index: var(--z-badge);
+}
+
+button.cyberpunk:hover,
+a.cyberpunk:hover,
+input[type=submit].cyberpunk:hover,
+button.cyberpunk:focus,
+a.cyberpunk:focus,
+input[type=submit].cyberpunk:focus{
+  animation-name: buttonhover;
+  animation-duration: var(--glitched-duration);
+  animation-iteration-count: infinite;
+  animation-timing-function: linear;
+  
+  /* 🛡️ 悬停装甲光晕（增强版） */
+  box-shadow: 
+    10px 10px 0 rgba(249, 240, 2, 0.5),
+    0 0 30px rgba(138, 230, 110, 0.4);
+}
+
+/* 悬停时青色能量点缀已移除 - 纯净装甲模式 */
+
+@keyframes buttonhover {
+  0% {
+    transform: skew(0deg);
+  }
+  60% {
+    transform: skew(0deg);
+  }
+  61% {
+    transform: skew(10deg);
+  }
+  70% {
+    transform: skew(10deg);
+  }
+  71% {
+    transform: skew(0deg);
+  }
+  100% {
+    transform: skew(0deg);
+  }
+}
+
+
+
+/* 🔐 登录按钮特化：黄色 + 斜纹 + 纯净装甲 */
+button.cyberpunk.yellow-stripes {
+  --background-color: var(--yellow-color);
+  color: var(--black-color);
+  font-family: 'Advent Pro', sans-serif !important;
+  font-weight: 700;
+  letter-spacing: 3px;
+  background-image: repeating-linear-gradient(
+    135deg,
+    rgba(0, 0, 0, 0.3) 0px,
+    rgba(0, 0, 0, 0.3) 6px,
+    transparent 6px,
+    transparent 12px
+  );
+  
+  /* 🛡️ 硬朗直角边框 */
+  border-right: 8px solid var(--cyber-yellow);
+  border-bottom: 5px solid var(--cyber-yellow);
+  box-shadow: 
+    6px 6px 0 rgba(249, 240, 2, 0.3),
+    0 0 20px rgba(249, 240, 2, 0.35);
+}
+
+button.cyberpunk.yellow-stripes:hover {
+  box-shadow: 
+    8px 8px 0 rgba(249, 240, 2, 0.5),
+    0 0 30px rgba(249, 240, 2, 0.5);
+  transform: translateY(-2px);
+  filter: brightness(1.05);
+}
+
+button.cyberpunk.btn-auth {
+  padding: 14px 20px !important;
+  font-size: 0.85rem;
+  line-height: 1.1rem;
+  width: 100%;
+  font-family: 'Advent Pro', sans-serif !important;
+  font-weight: 700;
+  letter-spacing: 2px;
+}
+
+/* ========= Cyberpunk 输入框状态反馈 + 黑客字体 ========= */
+
+input.cyberpunk,
+input[type="text"],
+input[type="email"],
+input[type="number"],
+textarea {
+  font-family: 'Advent Pro', sans-serif;
+  letter-spacing: 1px;
+  transition: border-color 0.18s ease-out, box-shadow 0.18s ease-out, background-color 0.18s ease-out;
+  position: relative;
+}
+
+/* 密码输入框：强制应用 Hacked 黑客字体 */
+input[type="password"],
+input.password-field,
+.token-display,
+.api-key-field {
+  font-family: 'Hacked', monospace !important;
+  letter-spacing: 2px !important;
+  font-weight: 400;
+}
+
+/* 🔐 密码输入框 & 敏感密钥区域：强制 Hacked 黑客字体 */
+input[type="password"],
+input[type="password"].cyberpunk,
+.cyberpunk input[type="password"],
+.hacked-font,
+.secret-key-display {
+  font-family: 'Hacked', monospace !important;
+  font-style: normal;
+  font-weight: 400;
+  letter-spacing: 2px !important; /* 字符间距 2px（符合要求） */
+  font-variant: normal;
+  text-transform: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 🔐 密码框对应的 Label 也使用 Hacked 字体 */
+label[for*="password"],
+label.password-label,
+.password-field-label {
+  font-family: 'Hacked', monospace !important;
+  letter-spacing: 2px !important;
+  font-weight: 400;
+  text-transform: uppercase;
+}
+
+/* 🎯 登录页输入框聚焦（.cyberpunk 专用）：黄色霓虹光晕 */
+input.cyberpunk:focus {
+  outline: none !important;
+  border-bottom-color: var(--cyber-yellow) !important;
+  box-shadow: 
+    0 0 0 2px var(--yellow-color-opacity),
+    0 0 12px rgba(249, 240, 2, 0.4),
+    0 0 25px rgba(249, 240, 2, 0.2) !important;
+  animation: input-glow-pulse 2.5s ease-in-out infinite;
+}
+
+/* ========= Cyan Input 豁免层：青色透明界面（MediaToolbar 等） ========= */
+.cyan-input {
+  background: transparent !important;
+  border: 1px solid rgba(0, 230, 246, 0.5) !important;
+  border-bottom: 1px solid rgba(0, 230, 246, 0.5) !important;
+  color: var(--cyber-cyan) !important;
+  clip-path: none !important;
+}
+
+.cyan-input:focus {
+  outline: none !important;
+  border-color: var(--cyber-cyan) !important;
+  box-shadow: 0 0 20px rgba(0, 230, 246, 0.2), inset 0 0 20px rgba(0, 230, 246, 0.05) !important;
+  animation: none !important;
+}
+
+/* ========= Neural Interface Overrides (cyan, no yellow flood) ========= */
+/* 用于 SettingsHub 神经界面：避免全局 cyberpunk 输入框把文字强制染黄 */
+.neural-input,
+.neural-textarea,
+.neural-select {
+  background: rgba(0, 0, 0, 0.4) !important;
+  border: none !important;
+  border-bottom: none !important;
+  clip-path: none !important;
+  color: var(--cyber-cyan) !important;
+  letter-spacing: 1px !important;
+}
+
+.neural-input,
+.neural-textarea {
+  font-family: 'Hacked', monospace !important;
+}
+
+.neural-select {
+  font-family: 'Advent Pro', sans-serif !important;
+}
+
+.neural-input:focus,
+.neural-textarea:focus,
+.neural-select:focus {
+  outline: none !important;
+  border-bottom-color: transparent !important;
+  box-shadow: 0 0 20px rgba(0, 230, 246, 0.4), inset 0 0 20px rgba(0, 230, 246, 0.1) !important;
+  animation: none !important;
+}
+
+@keyframes input-glow-pulse {
+  0%, 100% {
+    box-shadow: 
+      0 0 0 2px var(--yellow-color-opacity),
+      0 0 12px rgba(249, 240, 2, 0.4),
+      0 0 25px rgba(249, 240, 2, 0.2);
+  }
+  50% {
+    box-shadow: 
+      0 0 0 2px var(--yellow-color-opacity),
+      0 0 18px rgba(249, 240, 2, 0.6),
+      0 0 35px rgba(249, 240, 2, 0.3);
+  }
+}
+
+/* ========= Holographic Void Animations ========= */
+@keyframes hologram-float {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ========= Holographic Void 专用动画 ========= */
+@keyframes pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 15px rgba(6, 182, 212, 0.8);
+  }
+  50% {
+    box-shadow: 0 0 25px rgba(6, 182, 212, 1);
+  }
+}

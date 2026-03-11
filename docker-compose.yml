@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  neon-crate-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: neon-crate:v1.0.0
+    container_name: neon-crate-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/data:/app/data
+      - /path/to/your/storage:/storage  # 修改为你的实际路径
+    environment:
+      - APP_NAME=Neon Crate
+      - HOST=0.0.0.0
+      - PORT=8000
+      - LOG_LEVEL=INFO
+      - DOCKER_STORAGE_PATH=/storage
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
+    restart: unless-stopped
+    networks:
+      - ai-media-network
+
+  neon-crate-web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: neon-crate:v1.0.0
+    container_name: neon-crate-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_BASE=http://localhost:8000/api/v1
+    depends_on:
+      - neon-crate-api
+    restart: unless-stopped
+    networks:
+      - ai-media-network
+
+networks:
+  ai-media-network:
+    driver: bridge

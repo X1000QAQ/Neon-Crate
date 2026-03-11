@@ -1,0 +1,214 @@
+# =============================================================================
+# Neon-Crate 工业级 .gitignore
+# 覆盖维度：神盾安全隔离 / AIO 构建产物 / 数据持久化 / 跨平台开发规范
+# =============================================================================
+
+
+# =============================================================================
+# 【神盾计划 - Project Aegis】敏感文件绝对隔离
+# =============================================================================
+
+# Fernet 主密钥 — 泄露即全盘 API Keys 暴露
+data/secret.key
+**/secret.key
+
+# 管理员账号哈希存储
+data/auth.json
+**/auth.json
+
+# 运行时配置（含加密 API Keys：TMDB / OpenSubtitles / LLM）
+data/config.json
+data/config.json.tmp
+
+# 敏感 API Keys 独立加密存储
+data/secure_keys.json
+
+# 整个 data 目录（含 SQLite WAL / 密钥 / 配置 / 海报缓存）
+data/
+
+# 环境变量（保留 .env.example 作为模板）
+.env
+.env.local
+.env.production
+.env.staging
+
+
+# =============================================================================
+# 【Python 后端】构建产物与缓存
+# =============================================================================
+
+# 字节码缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+.Python
+
+# 分发与打包
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+sdist/
+wheels/
+*.egg-info/
+*.egg
+.installed.cfg
+MANIFEST
+lib/
+lib64/
+parts/
+var/
+
+# 测试与覆盖率
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+
+
+# =============================================================================
+# 【前端 Next.js】构建产物与缓存
+# =============================================================================
+
+# Next.js 构建输出与缓存
+frontend/.next/
+frontend/out/
+frontend/.cache/
+
+# Node 依赖
+node_modules/
+frontend/node_modules/
+
+# TypeScript 增量编译缓存
+tsconfig.tsbuildinfo
+frontend/tsconfig.tsbuildinfo
+
+# npm / yarn / pnpm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.npm/
+.yarn/integrity
+
+# 前端生产构建（由 CI/CD 流水线生成，不提交）
+backend/static/
+
+
+# =============================================================================
+# 【数据库 & 日志】持久化文件
+# =============================================================================
+
+# SQLite 数据库及 WAL 模式附属文件
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# 运行日志
+*.log
+logs/
+
+
+# =============================================================================
+# 【GitNexus】索引数据库
+# =============================================================================
+
+.gitnexus/
+.gitnexus
+
+
+# =============================================================================
+# 【Claude / AI 工具】本地 Skills 目录
+# =============================================================================
+
+.claude/
+
+
+# =============================================================================
+# 【IDE & 编辑器】本地配置
+# =============================================================================
+
+# Cursor
+.cursor/
+
+# VS Code
+.vscode/
+
+# JetBrains / PyCharm
+.idea/
+*.iml
+
+# Vim / Emacs 临时文件
+*.swp
+*.swo
+*~
+\#*\#
+.#*
+
+
+# =============================================================================
+# 【操作系统】系统残留文件
+# =============================================================================
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Windows WSL Zone.Identifier 残留
+*.Zone.Identifier
+*:Zone.Identifier
+
+# Linux
+*~
+
+
+# =============================================================================
+# 【临时文件 & 杂项】
+# =============================================================================
+
+# 原子写入临时文件
+*.tmp
+*.bak
+*.orig
+
+# 打包压缩
+*.tar.gz
+*.zip
+*.rar
+
+# 海报 / 图片缓存
+backend/**/poster.jpg
+backend/**/poster.png
+backend/**/fanart.jpg
+backend/**/fanart.png
+backend/**/*.nfo

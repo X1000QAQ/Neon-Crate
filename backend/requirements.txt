@@ -1,0 +1,21 @@
+# AI Media Master - 工业级依赖清单
+# FastAPI 核心框架
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+python-multipart==0.0.6
+
+# 环境配置
+python-dotenv==1.0.0
+
+# HTTP 客户端
+requests==2.31.0
+httpx==0.25.1
+
+# 神盾计划安全核心
+cryptography==41.0.7  # Fernet 对称加密
+PyJWT==2.8.0          # JWT Token 管理
+passlib==1.7.4        # 密码哈希
+bcrypt==3.2.2         # Bcrypt 算法（兼容性版本）
+
