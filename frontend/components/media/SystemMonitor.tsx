@@ -1,11 +1,11 @@
 'use client';
 
-import { useEffect, useState, useRef, useMemo } from 'react';
+import { useEffect, useRef, useMemo, useState } from 'react';
 import { Terminal, Activity } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { api } from '@/lib/api';
 import type { LogEntry } from '@/types';
 import { useLanguage } from '@/hooks/useLanguage';
+import { useLogs } from '@/hooks/useLogs';
 
 const LOG_TAGS = [
   { key: 'SCAN', labelKey: 'monitor_tag_scan' },
@@ -62,34 +62,32 @@ function levelToDot(level: string) {
 
 export default function SystemMonitor() {
   const { t } = useLanguage();
-  const [logs, setLogs] = useState<LogEntry[]>([]);
+  // ✅ 从 LogContext 获取全量日志，不再自行轮询
+  const { logs: allLogs } = useLogs();
+
   const [tagFilters, setTagFilters] = useState<Record<string, boolean>>({
-    SCAN: true, TMDB: true, SUBTITLE: true, ORG: true, CLEAN: true, 
+    SCAN: true, TMDB: true, SUBTITLE: true, ORG: true, CLEAN: true,
     LLM: true, AI: true, META: true, DB: true, SECURITY: true, API: true, ERROR: true,
   });
   const [autoScroll, setAutoScroll] = useState(true);
+  // 本地清空时间戳（只显示清空后的新日志，不影响 Context 全局数据）
+  const [clearedAt, setClearedAt] = useState<string | null>(null);
   const logsContainerRef = useRef<HTMLDivElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
-  const tagsParam = useMemo(() => {
-    const selected = Object.entries(tagFilters).filter(([, v]) => v).map(([k]) => k);
-    return selected.length === 0 ? undefined : selected.join(',');
-  }, [tagFilters]);
-
-  useEffect(() => {
-    const fetchLogs = async () => {
-      try {
-        const list = await api.getSystemLogs(tagsParam);
-        setLogs(list || []);
-      } catch (error) {
-        console.error('Failed to fetch logs:', error);
-        setLogs([]);
-      }
-    };
-    fetchLogs();
-    const interval = setInterval(fetchLogs, 2000);
-    return () => clearInterval(interval);
-  }, [tagsParam]);
+  // ✅ tags 改为前端过滤，不再依赖 tagsParam 触发后端请求
+  const logs = useMemo(() => {
+    const base = clearedAt
+      ? allLogs.filter(log => log.timestamp > clearedAt)
+      : allLogs;
+    const activeTags = Object.entries(tagFilters).filter(([, v]) => v).map(([k]) => k);
+    if (activeTags.length === 0) return base;
+    return base.filter(log =>
+      activeTags.some(tag =>
+        (log.message || '').includes(`[${tag}]`) || log.tag === tag
+      )
+    );
+  }, [allLogs, tagFilters, clearedAt]);
 
   useEffect(() => {
     if (autoScroll) {
@@ -168,7 +166,7 @@ export default function SystemMonitor() {
                   <span className="whitespace-nowrap">{t('monitor_auto_scroll')}</span>
                 </label>
                 <button
-                  onClick={() => setLogs([])}
+                  onClick={() => setClearedAt(new Date().toISOString())}
                   className="px-2.5 py-1 bg-transparent text-cyber-cyan/70 text-xs font-mono tracking-widest border border-cyber-cyan/20 hover:border-cyber-cyan/50 hover:text-cyber-cyan transition-colors"
                   style={{ boxShadow: 'inset 0 0 20px rgba(0, 230, 246, 0.05)' }}
                 >

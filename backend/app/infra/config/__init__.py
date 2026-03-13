@@ -1,5 +1,23 @@
 """
 核心配置模块 - 环境变量与系统配置管理
+
+设计模式：
+- 使用 pydantic-settings BaseSettings，支持环境变量覆盖
+- lru_cache 单例：全局只实例化一次，避免重复读取 .env
+- 所有配置均有默认值，可直接开箱即用
+
+配置层级（优先级从高到低）：
+1. 环境变量（如 PORT=9000 python -m app.main）
+2. .env 文件（项目根目录）
+3. 代码中的默认值
+
+主要配置项：
+- HOST/PORT：服务监听地址（默认 0.0.0.0:8000）
+- CORS_ORIGINS：允许的前端域名
+- DOCKER_STORAGE_PATH：Docker 影音挂载点（默认 /storage）
+- DB_PATH：SQLite 数据库路径（默认 data/media_database.db）
+- API_V1_PREFIX：API 路由前缀（默认 /api/v1）
+- JWT_EXPIRE_DAYS：JWT 有效期（默认 7 天）
 """
 import os
 from typing import Optional

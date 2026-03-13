@@ -1,40 +1,56 @@
-# 根布局与客户端外壳 - `app/layout.tsx` + `ClientShell.tsx`
+# layout.tsx — 根布局
+
+**文件路径**: `frontend/app/layout.tsx`  
+**组件类型**: Server Component（无 `'use client'`）
 
 ---
 
-## 一、`app/layout.tsx`
+## 职责
 
-根布局，挂载全局字体、CSS、元数据，并包裹 `ClientShell`。
-
-```
-RootLayout
-  └─► ClientShell
-        ├─► NetworkProvider     # 全局网络断链状态
-        ├─► CyberParticles      # 背景粒子特效
-        ├─► AuthGuard           # JWT 鉴权守卫
-        │     ├─► {children}    # 页面内容
-        │     └─► AiSidebar    # AI 侧边栏（悬浮）
-        └─► NeuralLinkAlert     # 断链全局弹窗
-```
-
-**字体加载：** `Advent Pro`（标题）、`Share Tech Mono`（代码/等宽）
+- 定义全局 `<html>` 和 `<body>` 标签
+- 挂载全局样式 `globals.css`
+- 注入 `<ClientShell>` 作为客户端根组件
 
 ---
 
-## 二、`ClientShell.tsx`
+## 设计决策
 
-```typescript
-export default function ClientShell({ children })
-```
-
-客户端组件壳，将所有需要 `'use client'` 的 Provider 和全局组件集中在此，避免污染 Server Component 根布局。
-
-**组合顺序：**
-1. `NetworkProvider` — 最外层，提供 `isLinkDown` 全局状态
-2. `CyberParticles` — 背景粒子（Canvas，固定定位，`z-0`）
-3. `AuthGuard` — 鉴权守卫，内部渲染页面内容 + `AiSidebar`
-4. `NeuralLinkAlert` — 断链警告弹窗，监听 `NetworkContext`
+| 决策 | 原因 |
+|------|------|
+| 保持 Server Component | 避免 SSR/客户端水合不匹配 |
+| `<html lang="zh-CN">` 静态写死 | 动态语言切换由子组件 `useLanguage()` 处理，不影响 HTML 根元素 |
+| 仅引入 `ClientShell` | 所有客户端逻辑集中在 `ClientShell`，布局保持纯净 |
 
 ---
 
-*最后更新：2026-03-11*
+## 结构
+
+```tsx
+export default function RootLayout({ children }) {
+  return (
+    <html lang="zh-CN">
+      <head>
+        <title>Neon Crate - 数据容器编排引擎</title>
+        <meta name="description" content="..." />
+      </head>
+      <body>
+        <ClientShell>{children}</ClientShell>
+      </body>
+    </html>
+  );
+}
+```
+
+`{children}` 对应当前路由的 `page.tsx` 内容。
+
+---
+
+## 依赖
+
+```
+layout.tsx
+  ├── ./globals.css
+  └── components/common/ClientShell
+```
+
+→ 详见 [ClientShell.md](../02_components/common/ClientShell.md)

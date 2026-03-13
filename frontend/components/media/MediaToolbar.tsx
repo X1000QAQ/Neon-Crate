@@ -1,3 +1,15 @@
+/**
+ * MediaToolbar - 媒体库操作工具栏
+ *
+ * 职责：
+ * - 搜索栏：关键词过滤任务列表
+ * - 危险操作：批量删除（需选中）、重置数据库（需输入 CONFIRM）
+ * - 任务触发：扫描 / 刮削 / 字幕三大后台任务的入口按钮
+ * - 筛选器：按状态（4 项）和类型（电影/剧集）过滤列表
+ *
+ * 注意：statusFilter 有效值为 all/pending/archived/failed/ignored
+ * success 已移除（tasks 表从不写入该状态，选择后永远返回空列表）
+ */
 'use client';
 
 import { Search, RefreshCw, Trash2, Database, Filter, Radar, Wand2, Subtitles } from 'lucide-react';
@@ -5,24 +17,23 @@ import { useLanguage } from '@/hooks/useLanguage';
 import { cn } from '@/lib/utils';
 
 interface MediaToolbarProps {
-  searchKeyword: string;
-  onSearchChange: (val: string) => void;
-  onRefresh: () => void;
-  loading: boolean;
-  selectedCount: number;
-  onBatchDelete: () => void;
-  onPurge: () => void;
-
-  onScan: () => void;
-  scanning: boolean;
-  onScrapeAll: () => void;
-  scraping: boolean;
-  onFindSubtitles: () => void;
-  findingSubs: boolean;
-  statusFilter: string;
-  onStatusChange: (val: string) => void;
-  typeFilter: string;
-  onTypeChange: (val: string) => void;
+  searchKeyword: string;          // 当前搜索关键词
+  onSearchChange: (val: string) => void;  // 搜索词变更回调
+  onRefresh: () => void;          // 刷新任务列表
+  loading: boolean;               // 是否正在加载（刷新按钮 loading 态）
+  selectedCount: number;          // 当前选中数量（0 时批量删除禁用）
+  onBatchDelete: () => void;      // 批量删除选中记录（仅数据库，不删文件）
+  onPurge: () => void;            // 核弹：清空全部数据库记录（需二次确认）
+  onScan: () => void;             // 触发物理扫描任务
+  scanning: boolean;              // 扫描任务是否进行中
+  onScrapeAll: () => void;        // 触发全量元数据刮削
+  scraping: boolean;              // 刮削任务是否进行中
+  onFindSubtitles: () => void;    // 触发字幕查找任务
+  findingSubs: boolean;           // 字幕查找是否进行中
+  statusFilter: string;           // 当前状态筛选值（all/pending/archived/failed/ignored）
+  onStatusChange: (val: string) => void;  // 状态筛选变更回调
+  typeFilter: string;             // 当前类型筛选值（all/movie/tv）
+  onTypeChange: (val: string) => void;    // 类型筛选变更回调
 }
 
 export default function MediaToolbar({
@@ -179,8 +190,8 @@ export default function MediaToolbar({
               <option value="all" className="bg-black">{t('filter_status_all')}</option>
               <option value="pending" className="bg-black">{t('filter_status_pending')}</option>
               <option value="archived" className="bg-black">{t('filter_status_archived')}</option>
-              <option value="success" className="bg-black">{t('filter_status_success')}</option>
               <option value="failed" className="bg-black">{t('filter_status_failed')}</option>
+              <option value="ignored" className="bg-black">{t('filter_status_ignored')}</option>
             </select>
           </div>
           <div>

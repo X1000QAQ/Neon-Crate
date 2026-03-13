@@ -1,11 +1,33 @@
 """
 神盾计划 (Project Aegis) - 鉴权路由
 
-提供三个核心接口：
+设计目标：
+- 提供完整的认证授权流程
+- 保护 API 端点免受未授权访问
+- 支持首次初始化和密码重置
+
+核心接口：
 1. GET /status - 检查系统是否已初始化
-2. POST /init - 首次初始化管理员账号
+2. POST /init - 首次初始化管理员账号（仅允许执行一次）
 3. POST /login - 登录验证并返回 JWT Token
 4. GET /verify - 验证 Token 有效性
+
+安全机制：
+- Bcrypt 密码哈希：防止密码泄露
+- JWT Token：无状态会话管理，7 天有效期
+- 单次初始化：防止重复创建管理员账号
+- 全局依赖注入：get_current_user 保护所有业务路由
+
+认证流程：
+1. 首次访问：检查 /status，若未初始化则调用 /init
+2. 登录：调用 /login 获取 JWT Token
+3. 访问 API：在 Authorization 头中携带 Bearer Token
+4. Token 验证：每次请求自动验证 Token 有效性
+
+依赖注入：
+- get_current_user：全局 JWT 验证依赖
+- 所有业务路由自动继承此依赖
+- 无需在每个路由手动添加认证逻辑
 """
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -82,9 +104,23 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
     return {"valid": True, "username": username}
 
 
-# 依赖注入：全局 JWT 验证
+# ==========================================
+# 🔐 全局 JWT 依赖注入（Global Auth Guard）
+# ==========================================
+# 设计目标：保护所有业务路由，无需在每个路由单独添加认证逻辑
+# 
+# 使用方式：
+# - app_factory.py 通过 dependencies=[Depends(get_current_user)] 注入
+# - 所有业务路由自动继承此依赖
+# - 返回当前用户名，可在路由中使用
+# 
+# 认证流程：
+# 1. 从 Authorization 头提取 Bearer Token
+# 2. 调用 CryptoManager.verify_token 验证签名和过期时间
+# 3. 返回用户名（验证通过）或抛出 401 异常（验证失败）
+# ==========================================
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
-    """验证 JWT Token 并返回当前用户名"""
+    """验证 JWT Token 并返回当前用户名（全局守卫）"""
     crypto = get_crypto_manager()
     username = crypto.verify_token(credentials.credentials)
     

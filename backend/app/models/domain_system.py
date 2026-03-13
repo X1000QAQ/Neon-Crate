@@ -1,12 +1,49 @@
 """
-系统领域模型 - 配置与系统相关模型
+系统领域模型 - 配置与系统相关 Pydantic 模型
+
+设计说明：
+- 所有模型均继承 Pydantic BaseModel，自动验证数据类型
+- 用于 FastAPI 请求/响应的序列化与反序列化
+
+核心模型分类：
+
+配置模型：
+- PathConfig：路径配置（下载目录、媒体库目录）
+- SystemSettings：完整系统设置（API 密钥、LLM 配置、AI 人格等）
+- SettingsConfig：顶层配置容器（settings + paths）
+
+认证模型：
+- AuthStatusResponse：系统初始化状态
+- TokenResponse：JWT Token 响应
+- LoginRequest：登录请求
+- InitRequest：首次初始化请求（用户名≥3字符，密码≥6字符）
+
+操作模型：
+- DeleteBatchRequest：批量删除任务请求
+- PurgeRequest：全量清空（核弹按钮，需输入 CONFIRM）
+- ResetSettingsRequest：重置配置请求（target: ai|regex）
+
+AI 对话模型：
+- ChatRequest：用户消息
+- ChatResponse：AI 回复 + 意图代码
 """
 from typing import Optional, List
 from pydantic import BaseModel, Field
 
 
 class PathConfig(BaseModel):
-    """路径配置模型"""
+    """
+    路径配置模型
+
+    路径类型（type）：
+    - download：下载目录（PT 客户端的下载目标目录）
+    - library：媒体库目录（Plex/Jellyfin 的媒体库目录）
+
+    媒体分类（category）：
+    - movie：电影库
+    - tv：剧集库
+    - mixed：混合（不区分类型）
+    """
     id: Optional[int] = None
     type: str = Field(..., description="路径类型: download/library")
     path: str = Field(..., description="物理路径")
@@ -15,7 +52,44 @@ class PathConfig(BaseModel):
 
 
 class SystemSettings(BaseModel):
-    """系统设置模型"""
+    """
+    系统设置完整模型
+    
+    配置分类：
+    
+    基础设置：
+    - ui_lang：界面语言（zh/en）
+    - min_size_mb：最小文件大小过滤（0 表示不过滤，用于测试）
+    - filename_clean_regex：文件名清洗正则表达式
+    
+    定时巡逻：
+    - cron_enabled：是否开启定时巡逻
+    - cron_interval_min：巡逻间隔（分钟）
+    - auto_scrape：是否自动刮削
+    - auto_subtitles：是否自动搜索字幕
+    
+    外部服务 API：
+    - tmdb_api_key：TMDB 元数据 API 密钥
+    - os_api_key：OpenSubtitles 字幕 API 密钥
+    - radarr_url/api_key：Radarr 电影下载管理
+    - sonarr_url/api_key：Sonarr 剧集下载管理
+    
+    LLM 配置（双引擎）：
+    - llm_provider：cloud（云端）或 local（本地 Ollama）
+    - llm_cloud_*：云端 API（OpenAI/DeepSeek 兼容接口）
+    - llm_local_*：本地 Ollama 接口
+    
+    AI 人格：
+    - ai_name：AI 助手名称
+    - ai_persona：AI 人格设定（System Prompt）
+    - expert_archive_rules：AI 归档专家规则（识别影视文件）
+    - master_router_rules：总控路由规则（意图识别）
+    
+    多语言偏好：
+    - subtitle_lang：字幕语言（zh/en）
+    - poster_lang：海报语言（zh/en）
+    - rename_lang：重命名语言（zh/en）
+    """
     ui_lang: str = "zh"
     min_size_mb: int = Field(50, ge=0, description="最小文件大小(MB)，允许设为0以支持测试")
     filename_clean_regex: str = ""
@@ -48,9 +122,19 @@ class SystemSettings(BaseModel):
     expert_archive_rules: str = ""
     master_router_rules: str = ""
 
+    # 多语言偏好
+    subtitle_lang: str = "zh"
+    poster_lang: str = "zh"
+    rename_lang: str = "zh"
+
 
 class SettingsConfig(BaseModel):
-    """完整配置模型"""
+    """
+    完整配置顶层容器模型
+
+    作为 GET/POST /settings 的请求和响应体，
+    包含系统设置和路径配置两个部分。
+    """
     settings: SystemSettings
     paths: List[PathConfig] = []
 
@@ -96,11 +180,22 @@ class ResetSettingsRequest(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    """对话请求"""
+    """
+    AI 对话请求模型
+
+    message：用户输入的消息（自然语言）
+    AI Agent 会根据内容识别意图并路由到对应处理逻辑
+    """
     message: str
 
 
 class ChatResponse(BaseModel):
-    """对话响应"""
+    """
+    AI 对话响应模型
+
+    response：AI 回复的文本内容
+    action：意图代码（如 ACTION_SCAN / DOWNLOAD 等），
+            前端根据此字段触发对应的 UI 操作；None 表示纯聊天
+    """
     response: str
     action: Optional[str] = None

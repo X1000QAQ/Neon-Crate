@@ -42,19 +42,11 @@ export default function MediaWall() {
       if (debouncedKeyword.trim()) params.search = debouncedKeyword.trim();
 
       const data = await api.getTasks(params);
-      
-      // 前端数据解析双保险：强制修复后端可能的键名不一致
-      const normalizedTasks = data.tasks.map(t => ({
-        ...t,
-        // 无论后端传的是 type 还是 media_type，都强行统一为 media_type
-        media_type: t.media_type || (t as any).type || 'movie'
-      }));
-      
-      setTasks(normalizedTasks);
+      setTasks(data.tasks);
       setTotal(data.total);
     } catch (error) {
       const err = error as Error & { status?: number; body?: unknown };
-      console.error('[MediaWall] loadTasks 失败:', err?.message, 'status:', err?.status, 'body:', err?.body ?? error);
+      showToast(`加载任务列表失败: ${err?.message ?? '网络错误'}`);
     } finally {
       setLoading(false);
     }
@@ -106,9 +98,11 @@ export default function MediaWall() {
   const handleRetry = async (taskId: number) => {
     try {
       await api.retryTask(taskId);
+      showToast('任务已解锁，将在下次扫描时重新处理');
       loadTasks();
     } catch (error) {
-      console.error('Failed to retry task:', error);
+      console.error('Failed to unlock task:', error);
+      showToast('解锁失败，请重试');
     }
   };
 
@@ -212,7 +206,7 @@ export default function MediaWall() {
         setScanning(false);
       }, 2000);
     } catch (error) {
-      console.error('Failed to trigger scan:', error);
+      showToast(t('scan_trigger_failed') || '扫描触发失败，请重试');
       setScanning(false);
     }
   };
@@ -221,9 +215,9 @@ export default function MediaWall() {
     setScraping(true);
     try {
       await api.triggerScrapeAll();
-      setTimeout(() => { loadTasks().catch(console.error); }, 1000);
+      setTimeout(() => { loadTasks().catch(() => showToast('刮削后刷新列表失败')); }, 1000);
     } catch (error) {
-      console.error('Failed to trigger scrape all:', error);
+      showToast('刮削触发失败，请重试');
     } finally {
       setScraping(false);
     }
@@ -233,9 +227,9 @@ export default function MediaWall() {
     setFindingSubs(true);
     try {
       await api.triggerFindSubtitles();
-      setTimeout(() => { loadTasks().catch(console.error); }, 1000);
+      setTimeout(() => { loadTasks().catch(() => showToast('字幕任务后刷新列表失败')); }, 1000);
     } catch (error) {
-      console.error('Failed to trigger find subtitles:', error);
+      showToast('字幕任务触发失败，请重试');
     } finally {
       setFindingSubs(false);
     }

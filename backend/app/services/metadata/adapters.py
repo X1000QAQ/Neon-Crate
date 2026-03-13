@@ -7,6 +7,7 @@
 3. 429 限流重试：遇到限流自动等待并重试
 4. httpx 替代 requests：统一网络客户端
 5. 严谨 .get() 链式调用：杜绝 KeyError
+6. 多语言支持：rename_lang 控制文本语言，poster_lang 控制图片语言
 """
 from typing import Optional, List, Dict, Any
 import logging
@@ -18,16 +19,20 @@ logger = logging.getLogger(__name__)
 class TMDBAdapter:
     """TMDB 元数据适配器"""
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, rename_lang: str = "zh", poster_lang: str = "zh"):
         """
         初始化 TMDB 适配器
 
         Args:
             api_key: TMDB API Key
+            rename_lang: 文本/标题语言偏好，"zh" 使用 zh-CN，"en" 使用 en-US
+            poster_lang: 海报/图片语言偏好，"zh" 使用 zh，"en" 使用 en
         """
         self.api_key = api_key
+        self.text_lang = "zh-CN" if rename_lang == "zh" else "en-US"
+        self.image_lang = "zh" if poster_lang == "zh" else "en"
         self.base_url = "https://api.themoviedb.org/3"
-        logger.info("[TMDB] TMDB 适配器初始化完成")
+        logger.info(f"[TMDB] TMDB 适配器初始化完成，文本语言: {self.text_lang}，图片语言: {self.image_lang}")
 
     def search_movie(self, query: str, year: Optional[str] = None) -> List[Dict]:
         """
@@ -43,19 +48,19 @@ class TMDBAdapter:
         params = {
             "api_key": self.api_key,
             "query": query,
-            "language": "zh-CN",
+            "language": self.text_lang,
             "include_adult": "false",
         }
         if year:
             params["primary_release_year"] = year
 
         url = f"{self.base_url}/search/movie"
-        resp = _http_get_with_retry(url, params=params)
-        if not resp:
-            logger.error(f"[TMDB] 搜索电影失败: {query}")
-            return []
-
         try:
+            resp = _http_get_with_retry(url, params=params)
+            if not resp:
+                logger.error(f"[TMDB] 搜索电影失败: {query}")
+                return []
+
             results = resp.json().get("results", [])
             logger.info(f"[TMDB] 搜索电影: '{query}' -> {len(results)} 个结果")
             return results
@@ -77,19 +82,19 @@ class TMDBAdapter:
         params = {
             "api_key": self.api_key,
             "query": query,
-            "language": "zh-CN",
+            "language": self.text_lang,
             "include_adult": "false",
         }
         if year:
             params["first_air_date_year"] = year
 
         url = f"{self.base_url}/search/tv"
-        resp = _http_get_with_retry(url, params=params)
-        if not resp:
-            logger.error(f"[TMDB] 搜索剧集失败: {query}")
-            return []
-
         try:
+            resp = _http_get_with_retry(url, params=params)
+            if not resp:
+                logger.error(f"[TMDB] 搜索剧集失败: {query}")
+                return []
+
             results = resp.json().get("results", [])
             logger.info(f"[TMDB] 搜索剧集: '{query}' -> {len(results)} 个结果")
             return results
@@ -109,7 +114,8 @@ class TMDBAdapter:
         """
         params = {
             "api_key": self.api_key,
-            "language": "zh-CN",
+            "language": self.text_lang,
+            "include_image_language": f"{self.image_lang},null",
             "append_to_response": "credits,external_ids",
         }
         url = f"{self.base_url}/movie/{tmdb_id}"
@@ -135,7 +141,8 @@ class TMDBAdapter:
         """
         params = {
             "api_key": self.api_key,
-            "language": "zh-CN",
+            "language": self.text_lang,
+            "include_image_language": f"{self.image_lang},null",
             "append_to_response": "credits,external_ids",
         }
         url = f"{self.base_url}/tv/{tmdb_id}"

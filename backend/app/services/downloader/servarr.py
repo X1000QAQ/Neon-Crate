@@ -38,6 +38,21 @@ class ServarrClient:
         """
         TMDB 侦察兵 - 预先获取真实的 TMDB 数据
         
+        设计目标：
+        - 在调用 Radarr/Sonarr 之前，先从 TMDB 获取准确的 ID
+        - 避免 Radarr/Sonarr 搜索结果不准确的问题
+        - 提供物理映射信任：tmdb:ID 搜索结果 100% 可信
+        
+        工作流程：
+        1. 调用 TMDB API 搜索影片
+        2. 若提供年份，优先选择年份匹配的结果
+        3. 返回 TMDB ID、标题、年份
+        
+        为什么需要侦察兵？
+        - Radarr/Sonarr 的搜索结果可能不准确
+        - 直接使用 TMDB ID 搜索（tmdb:123）可以精准匹配
+        - 避免用户选择错误的影片
+        
         Args:
             name: 片名
             media_type: 媒体类型 (movie/tv)
@@ -104,6 +119,36 @@ class ServarrClient:
     async def add_movie(self, title: str, year: str = "", tmdb_id: int = 0) -> Dict:
         """
         对接 Radarr 添加电影下载任务 (V9.3 AI 原生版)
+        
+        完整流程（5 步走）：
+        
+        步骤 0：TMDB 侦察兵
+        - 若提供 tmdb_id，直接使用（候选列表场景）
+        - 否则调用 TMDB API 搜索，获取准确的 TMDB ID
+        
+        步骤 A：Lookup（精准搜索）
+        - 使用 tmdb:ID 格式搜索 Radarr
+        - 物理映射信任：搜索结果 100% 可信，无需人工校验
+        
+        步骤 B：Root Folder（获取根目录）
+        - 获取 Radarr 配置的根目录
+        - 电影将下载到此目录
+        
+        步骤 C：Quality Profile（获取质量配置）
+        - 获取 Radarr 配置的质量档案
+        - 决定下载的视频质量（1080p、4K 等）
+        
+        步骤 D：查重防御
+        - 检查电影是否已在 Radarr 库中
+        - 若已存在，触发搜索补全命令（N8N 核心逻辑）
+        
+        步骤 E：Add（添加到下载队列）
+        - 将电影添加到 Radarr
+        - 自动触发搜索和下载
+        
+        步骤 F：兜底拦截
+        - 捕获 400 错误中的 "already been added" 消息
+        - 防止遗漏已存在的电影
         
         Args:
             title: 电影名称
@@ -269,9 +314,37 @@ class ServarrClient:
         """
         对接 Sonarr 添加剧集下载任务 (V9.3 AI 原生版)
         
+        完整流程（5 步走）：
+        
+        步骤 0：TMDB 侦察兵
+        - 若提供 tmdb_id，直接使用（候选列表场景）
+        - 否则调用 TMDB API 搜索，获取准确的 TMDB ID
+        
+        步骤 A：Lookup（精准搜索）
+        - 使用 tmdb:ID 格式搜索 Sonarr
+        - 物理映射信任：搜索结果 100% 可信，无需人工校验
+        
+        步骤 B：Root Folder（获取根目录）
+        - 获取 Sonarr 配置的根目录
+        - 剧集将下载到此目录
+        
+        步骤 C：Quality Profile（获取质量配置）
+        - 获取 Sonarr 配置的质量档案
+        - 决定下载的视频质量（1080p、4K 等）
+        
+        步骤 D：Add（添加到下载队列）
+        - 将剧集添加到 Sonarr
+        - 自动触发搜索和下载
+        - 监控所有季和集
+        
+        步骤 E：已存在拦截
+        - 捕获 400 错误中的 "already been added" 消息
+        - 防止重复添加
+        
         Args:
             title: 剧集名称
             year: 年份（可选）
+            tmdb_id: TMDB ID（可选，提供时跳过 TMDB 侦察，直接使用）
             
         Returns:
             Dict: {"success": bool, "msg": str, "data": dict}

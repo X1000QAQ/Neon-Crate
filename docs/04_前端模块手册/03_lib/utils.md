@@ -1,59 +1,45 @@
-# 工具函数 - `lib/utils.ts` + `lib/config.ts` + `lib/apiError.ts`
+# lib/utils.ts — 工具函数
+
+**文件路径**: `frontend/lib/utils.ts`
 
 ---
 
-## 一、`lib/utils.ts`
+## 函数速查
 
-### `cn(...inputs: ClassValue[]) -> string`
-
-Tailwind CSS 类名合并工具，组合 `clsx` + `tailwind-merge`。
+### `cn(...inputs)`
 
 ```typescript
-cn('text-cyan border', isActive && 'bg-cyan')  // 合并并去重 Tailwind 类
-```
+import { clsx } from 'clsx';
+import { twMerge } from 'tailwind-merge';
 
-### `formatDate(dateString: string) -> string`
-
-兼容多种后端时间格式的日期格式化函数：
-- 处理逗号分隔格式：`"2024-03-09, 14:30:00"`
-- 处理空格分隔格式：`"2024-03-09 14:30:00"`
-- 处理 SQLite 毫秒格式：`"2024-03-09 14:30:00.123"`
-- 解析失败返回 `'格式错误'`，空字符串返回 `'刚刚'`
-
----
-
-## 二、`lib/config.ts`
-
-```typescript
-export const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '/api/v1';
-```
-
-API 基础路径配置。默认使用相对路径 `/api/v1`，通过 Next.js `rewrites` 代理到后端（`next.config.js` 配置）。
-
-生产环境可通过 `.env.local` 设置 `NEXT_PUBLIC_API_BASE` 直连后端。
-
----
-
-## 三、`lib/apiError.ts`
-
-### `ApiError` 类
-
-```typescript
-class ApiError extends Error {
-  code: string;   // 'REQUEST_TIMEOUT' | 'NETWORK_ERROR' | 'UNAUTHORIZED' | 'SERVER_ERROR' | 'INVALID_CONTENT'
-  status: number; // HTTP 状态码
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
 }
 ```
 
-### `notifyLinkDown()`
+合并 Tailwind 类名，解决条件类名冲突。项目中所有动态 `className` 均通过此函数处理。
 
-```typescript
-// 调用全局挂载的断链通知函数
-(window as any).__setLinkDown?.(true);
+**示例**：
+```tsx
+cn(
+  'border border-cyber-cyan text-cyber-cyan',
+  isActive && 'bg-cyber-cyan text-black',
+  disabled && 'opacity-50'
+)
 ```
-
-通过 `window.__setLinkDown` 桥接到 `NetworkContext`，触发 `NeuralLinkAlert` 弹窗。
 
 ---
 
-*最后更新：2026-03-11*
+### `formatDate(dateString)`
+
+```typescript
+export function formatDate(dateString: string): string
+```
+
+将 ISO 日期字符串格式化为本地化显示格式（`zh-CN` locale）。  
+用于 `MediaTable` 中任务卡片的 `created_at` 时间戳展示。
+
+**示例**：
+```typescript
+formatDate('2026-03-12T10:00:00')  // → '2026/3/12 10:00:00'
+```

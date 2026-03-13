@@ -126,6 +126,18 @@ class MediaCleaner:
         for pat in self._filter_patterns:
             cleaned = pat.sub(' ', cleaned)
 
+        # 4.5 剧集截断：在 S0xE0x / 1x01 处截断，只保留前面的剧名
+        # 例：'The Boys S03E01 The Payback 2160p' → 'The Boys'
+        # 这样可以避免 AI 把剧集标题当作额外的搜索词产生幻觉
+        se_match = re.search(
+            r'\b(?:[Ss]\d{1,2}[Ee]\d{1,3}|\d{1,2}x\d{1,3})\b',
+            cleaned
+        )
+        if se_match:
+            before = cleaned[:se_match.start()].strip()
+            if before:  # 截断后若仍有内容则保留，否则不截断
+                cleaned = before
+
         # 5. 中文冒号 → 英文冒号
         cleaned = _COLON_PATTERN.sub(':', cleaned)
 
@@ -201,6 +213,38 @@ class MediaCleaner:
                     return True
         return False
 
+    @classmethod
+    def sanitize_filename(cls, name: str) -> str:
+        """
+        净化即将用于创建文件夹/文件名的字符串（中英双语智能冒号适配）
+
+        - 含中文：冒号替换为全角冒号 ：
+        - 纯英文：冒号替换为 " - "（Plex/Jellyfin 推荐规范）
+        - Windows 非法字符 < > " / \\ | ? * 替换为空格
+        - 去除多余连续空格，strip
+        """
+        if not name:
+            return ''
+
+        # 1. 检测是否包含中文字符
+        has_chinese = bool(re.search(r'[\u4e00-\u9fff]', name))
+
+        # 2. 智能替换冒号
+        if has_chinese:
+            # 中文名：各种冒号 → 全角冒号 ：
+            name = re.sub(r'[:\uf03a\ua789\uff1a]', '：', name)
+        else:
+            # 英文名：各种冒号（含全角）→ " - "
+            name = re.sub(r'[:\uf03a\ua789\uff1a]', ' - ', name)
+
+        # 3. 替换 Windows 非法字符为空格
+        name = re.sub(r'[<>"/\\|?*]', ' ', name)
+
+        # 4. 压缩连续空格并去除首尾空格
+        name = re.sub(r' +', ' ', name).strip()
+
+        return name
+
     def clean_and_extract(self, filename: str) -> dict:
         """
         一站式处理：清洗 + 提取所有结构化信息
@@ -229,24 +273,6 @@ class MediaCleaner:
             'is_tv': is_tv,
             'is_ad': is_ad
         }
-        logger.info(f'[EXTRACT] {filename} -> {result}')
+        logger.debug(f'[EXTRACT] {filename} -> {result}')
         return result
 
-
-# ============================================================
-# 本地自测
-# ============================================================
-if __name__ == '__main__':
-    print('[TEST] MediaCleaner Self-Test (no db, symbol-only mode)')
-    cleaner = MediaCleaner()
-    cases = [
-        '[DBD-Raws] The Legend of Hei 2 (2024) [1080p][HEVC-10bit].mkv',
-        'Attack.on.Titan.S03E10.Friends.1080p.HEVC.mkv',
-        '[Lilith-Raws] 葬送的芙莉莲 - 28 [Baha][WEB-DL][1080p][AVC AAC][CHT][MP4].mp4',
-        'Stranger.Things.S04E01.Chapter.One.1080p.mkv',
-    ]
-    for c in cases:
-        r = cleaner.clean_and_extract(c)
-        print(f'  IN : {c}')
-        print(f'  OUT: {r}')
-        print()

@@ -19,9 +19,29 @@ def http_get_with_retry(
 ) -> Optional[httpx.Response]:
     """
     带 429 重试的同步 HTTP GET 请求
-    - 429 限流：指数退避重试
-    - 超时：记录警告后重试
-    - 其他错误：记录后返回 None
+    
+    设计目标：
+    - 自动处理 API 限流（429 Too Many Requests）
+    - 指数退避重试，避免频繁请求
+    - 超时自动重试，提高成功率
+    
+    重试策略：
+    - 429 限流：2s、4s、8s 指数退避
+    - 超时：2s 固定间隔重试
+    - 最多重试 3 次
+    
+    应用场景：
+    - TMDB API 调用（有频率限制）
+    - OpenSubtitles API 调用（有频率限制）
+    - 其他外部 API 调用
+    
+    Args:
+        url: 请求 URL
+        params: 查询参数（可选）
+        timeout: 超时时间（秒）
+    
+    Returns:
+        Optional[httpx.Response]: 成功返回响应对象，失败返回 None
     """
     for attempt in range(1, _MAX_RETRIES + 1):
         try:

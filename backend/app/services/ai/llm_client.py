@@ -88,6 +88,14 @@ class LLMClient:
                         json=payload, 
                         timeout=effective_timeout
                     )
+                    # 就地拦截 429 限流，避免浪费重试次数
+                    # 等待策略：10s / 20s / 40s（LLM API 限流恢复通常需要更长时间）
+                    # 注意：continue 跳回 for 循环顶部，重新创建 AsyncClient 发起新请求
+                    if resp.status_code == 429:
+                        wait = 10 * (2 ** attempt)  # 10s, 20s, 40s
+                        logger.warning(f"[LLM] 限流 (429)，等待 {wait}s 后重试")
+                        await asyncio.sleep(wait)
+                        continue
                     resp.raise_for_status()
                     result = resp.json()['choices'][0]['message']['content'].strip()
                     logger.info(f"✅ [LLM] {provider} 引擎响应成功")
@@ -100,6 +108,5 @@ class LLMClient:
                 if attempt < effective_retries - 1:
                     await asyncio.sleep(2 ** attempt)  # 指数退避
                 else:
-                    error_msg = f"error: {str(e)}"
-                    logger.error(f"❌ [LLM] 最终失败: {error_msg}")
-                    return error_msg
+                    logger.error(f"❌ [LLM] 最终失败: {e}", exc_info=True)
+                    raise RuntimeError(f"LLM 调用失败: {str(e)}")

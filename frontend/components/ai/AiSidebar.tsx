@@ -92,15 +92,15 @@ export default function AiSidebar() {
       const res = await api.chat(text);
       setMessages(p => [...p, { role: 'assistant', content: res.response }]);
       if (res.action === 'ACTION_SCAN') {
-        api.triggerScan().catch(console.error);
+        api.triggerScan().catch((e) => setMessages(p => [...p, { role: 'assistant', content: `扫描触发失败: ${e instanceof Error ? e.message : '未知错误'}` }]));
         setMessages(p => [...p, { role: 'assistant', content: t('ai_scan_triggered') }]);
       }
       if (res.action === 'ACTION_SCRAPE') {
-        api.triggerScrapeAll().catch(console.error);
+        api.triggerScrapeAll().catch((e) => setMessages(p => [...p, { role: 'assistant', content: `刮削触发失败: ${e instanceof Error ? e.message : '未知错误'}` }]));
         setMessages(p => [...p, { role: 'assistant', content: t('ai_scrape_triggered') }]);
       }
       if (res.action === 'ACTION_SUBTITLE') {
-        api.triggerFindSubtitles().catch(console.error);
+        api.triggerFindSubtitles().catch((e) => setMessages(p => [...p, { role: 'assistant', content: `字幕任务触发失败: ${e instanceof Error ? e.message : '未知错误'}` }]));
         setMessages(p => [...p, { role: 'assistant', content: t('ai_subtitle_triggered') }]);
       }
     } catch (e) {
@@ -130,48 +130,97 @@ export default function AiSidebar() {
       {/* Outer hit zone — wide transparent strip, easy to click */}
       <div
         onClick={() => setIsOpen(o => !o)}
-        className="fixed z-[110] top-[5vh] h-[90vh] cursor-pointer transition-all duration-500 group" /* z-sidebar-trigger */
+        className="fixed z-[110] top-[5vh] h-[90vh] cursor-pointer transition-all duration-500 group"
         style={{
           right: isOpen ? '384px' : '0',
-          width: '28px',          /* wide clickable area */
+          width: '32px',          /* 扩大至 32px，更易命中 */
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
           background: 'transparent',
         }}
       >
-        {/* Visual line — stays 4px but glows wider on hover */}
+        {/* Visual line — stays thin but glows wider on hover */}
         <div
-          className="h-full transition-all duration-300"
+          className="h-full transition-all duration-300 relative group-hover:w-[6px] group-hover:animate-pulse"
           style={{
-            width: '4px',
+            width: '3px',
             background: CYAN,
-            boxShadow: '0 0 12px var(--cyber-cyan), 0 0 28px rgba(0,230,246,0.25)',
-          }}
-          onMouseEnter={e => {
-            (e.currentTarget as HTMLElement).style.boxShadow =
-              '0 0 24px var(--cyber-cyan), 0 0 60px rgba(0,230,246,0.55), 0 0 90px rgba(0,230,246,0.25)';
-            (e.currentTarget as HTMLElement).style.width = '6px';
-          }}
-          onMouseLeave={e => {
-            (e.currentTarget as HTMLElement).style.boxShadow =
-              '0 0 12px var(--cyber-cyan), 0 0 28px rgba(0,230,246,0.25)';
-            (e.currentTarget as HTMLElement).style.width = '4px';
+            opacity: 0.6,
+            boxShadow: '0 0 12px rgba(0,230,246,0.5), 0 0 25px rgba(0,230,246,0.3)',
           }}
         >
-          {/* Top energy node */}
-          <div className="absolute top-0 left-1/2 -translate-x-1/2 w-3 h-3 rounded-full animate-pulse"
-            style={{ background: CYAN, boxShadow: `0 0 15px ${CYAN}` }} />
-          {/* Bottom energy node */}
-          <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-3 h-3 rounded-full animate-pulse"
-            style={{ background: CYAN, boxShadow: `0 0 15px ${CYAN}` }} />
+          {/* Hover state: WHITE CORE + MASSIVE GLOW + DROP SHADOW */}
+          <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-300"
+            style={{
+              background: 'linear-gradient(to right, #00f3ff, #fff, #00f3ff)',
+              boxShadow: `
+                0 0 10px #00f3ff,
+                0 0 30px #00f3ff,
+                0 0 60px rgba(0,243,255,0.8),
+                0 0 100px rgba(0,243,255,0.4),
+                0 0 150px rgba(0,243,255,0.2)
+              `,
+              filter: 'drop-shadow(0 0 15px #00f3ff) drop-shadow(0 0 30px rgba(0,243,255,0.6))',
+            }}
+          />
+          
+          {/* Top energy node — WHITE CORE on hover */}
+          <div 
+            className="absolute top-0 left-1/2 -translate-x-1/2 w-2 h-2 rounded-full opacity-60 group-hover:opacity-100 group-hover:w-4 group-hover:h-4 transition-all duration-300"
+            style={{ 
+              background: CYAN,
+              boxShadow: `0 0 12px ${CYAN}, 0 0 25px rgba(0,243,255,0.5)`,
+            }}
+          >
+            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 rounded-full transition-opacity duration-300"
+              style={{
+                background: '#fff',
+                boxShadow: `
+                  0 0 10px #00f3ff,
+                  0 0 25px #00f3ff,
+                  0 0 50px rgba(0,243,255,0.7)
+                `,
+              }}
+            />
+          </div>
+          
+          {/* Bottom energy node — WHITE CORE on hover */}
+          <div 
+            className="absolute bottom-0 left-1/2 -translate-x-1/2 w-2 h-2 rounded-full opacity-60 group-hover:opacity-100 group-hover:w-4 group-hover:h-4 transition-all duration-300"
+            style={{ 
+              background: CYAN,
+              boxShadow: `0 0 12px ${CYAN}, 0 0 25px rgba(0,243,255,0.5)`,
+            }}
+          >
+            <div className="absolute inset-0 opacity-0 group-hover:opacity-100 rounded-full transition-opacity duration-300"
+              style={{
+                background: '#fff',
+                boxShadow: `
+                  0 0 10px #00f3ff,
+                  0 0 25px #00f3ff,
+                  0 0 50px rgba(0,243,255,0.7)
+                `,
+              }}
+            />
+          </div>
         </div>
-        {/* Vertical label — centred in the hit zone */}
-        <div className="absolute top-1/2 left-1/2 select-none pointer-events-none"
+        
+        {/* Vertical label — EXTREME GLOW on hover */}
+        <div className="absolute top-1/2 left-1/2 select-none pointer-events-none opacity-50 group-hover:opacity-100 transition-all duration-300"
           style={{
             writingMode: 'vertical-rl', fontSize: '8px', letterSpacing: '4px',
-            color: CYAN_MID, fontFamily: FONT_A, textTransform: 'uppercase',
+            color: CYAN, fontFamily: FONT_A, textTransform: 'uppercase',
             transform: 'translateX(-50%) translateY(-50%) rotate(180deg)', whiteSpace: 'nowrap',
+            textShadow: '0 0 8px rgba(0,243,255,0.6)',
+          }}
+          onMouseEnter={(e) => {
+            (e.currentTarget as HTMLElement).style.textShadow = '0 0 15px #00f3ff, 0 0 30px #00f3ff, 0 0 50px rgba(0,243,255,0.5)';
+            (e.currentTarget as HTMLElement).style.color = '#fff';
+          }}
+          onMouseLeave={(e) => {
+            (e.currentTarget as HTMLElement).style.textShadow = '0 0 8px rgba(0,243,255,0.6)';
+            (e.currentTarget as HTMLElement).style.color = CYAN;
           }}
         >NEURAL</div>
       </div>

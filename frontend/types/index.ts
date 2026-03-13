@@ -7,15 +7,15 @@ export interface Task {
   file_path: string;
   file_name?: string;
   media_type: 'movie' | 'tv';
-  status: 'pending' | 'scraped' | 'failed' | 'archived' | 'ignored';
-  tmdb_id?: number | string;
+  status: 'pending' | 'archived' | 'failed' | 'ignored';
+  tmdb_id?: number;
   imdb_id?: string;
   title?: string;
-  year?: number | string;
+  year?: number;
   poster_path?: string;
   local_poster_path?: string;
   target_path?: string;
-  sub_status?: 'pending' | 'scraped' | 'failed' | 'missing';
+  sub_status?: 'pending' | 'success' | 'failed' | 'missing';
   season?: number | null;
   episode?: number | null;
   created_at: string;
@@ -57,41 +57,49 @@ export interface LogEntry {
   tag?: string;
 }
 
+export interface SystemSettings {
+  ui_lang: string;
+  min_size_mb: number;
+  filename_clean_regex: string;
+  cron_enabled: boolean;
+  cron_interval_min: number;
+  auto_process_enabled: boolean;
+  auto_scrape: boolean;
+  auto_subtitles: boolean;
+  tmdb_api_key: string;
+  os_api_key: string;
+  radarr_url: string;
+  radarr_api_key: string;
+  sonarr_url: string;
+  sonarr_api_key: string;
+  llm_provider: string;
+  llm_cloud_url: string;
+  llm_cloud_key: string;
+  llm_cloud_model: string;
+  llm_local_url: string;
+  llm_local_key: string;
+  llm_local_model: string;
+  ai_name: string;
+  ai_persona: string;
+  expert_archive_rules: string;
+  master_router_rules: string;
+  // 多语言偏好
+  subtitle_lang: string;
+  poster_lang: string;
+  rename_lang: string;
+}
+
+export interface PathConfig {
+  id?: number;
+  type: string;
+  path: string;
+  category: string;
+  enabled: boolean;
+}
+
 export interface SettingsConfig {
-  settings: {
-    ui_lang: string;
-    min_size_mb: number;
-    filename_clean_regex: string;
-    cron_interval_min: number;
-    cron_enabled: boolean;
-    auto_process_enabled: boolean; // 前端 UI 专用：自动流水线总开关，后端忽略此字段
-    auto_scrape: boolean;
-    auto_subtitles: boolean;
-    tmdb_api_key: string;
-    os_api_key: string;
-    sonarr_url: string;
-    sonarr_api_key: string;
-    radarr_url: string;
-    radarr_api_key: string;
-    llm_provider: string;
-    llm_cloud_url: string;
-    llm_cloud_key: string;
-    llm_cloud_model: string;
-    llm_local_url: string;
-    llm_local_key: string;
-    llm_local_model: string;
-    ai_name: string;
-    ai_persona: string;
-    expert_archive_rules: string;
-    master_router_rules: string;
-  };
-  paths: Array<{
-    id?: number;
-    type: string;
-    path: string;
-    category: string;
-    enabled?: boolean;
-  }>;
+  settings: SystemSettings;
+  paths: PathConfig[];
 }
 
 export interface AuthStatusResponse {
@@ -103,4 +111,29 @@ export interface TokenResponse {
   access_token: string;
   token_type: string;
   username: string;
+}
+
+// ============================================================================
+// Task Status Interfaces - 三大后台任务状态接口
+// ============================================================================
+
+export interface ScanStatus {
+  is_running: boolean;
+  last_scan_time: number | null;
+  last_scan_count: number;
+  error: string | null;
+}
+
+export interface ScrapeStatus {
+  is_running: boolean;
+  last_run_time: number | null;
+  processed_count: number;
+  error: string | null;
+}
+
+export interface SubtitleStatus {
+  is_running: boolean;
+  last_run_time: number | null;
+  processed_count: number;
+  error: string | null;
 }

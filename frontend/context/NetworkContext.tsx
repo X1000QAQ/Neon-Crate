@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 
 interface NetworkContextValue {
   isLinkDown: boolean;
@@ -16,14 +16,25 @@ export function NetworkProvider({ children }: { children: React.ReactNode }) {
   const [isLinkDown, setIsLinkDown] = useState(false);
 
   useEffect(() => {
-    (window as any).__setLinkDown = setIsLinkDown;
+    const handleNetworkDown = () => setIsLinkDown(true);
+    const handleNetworkUp = () => setIsLinkDown(false);
+
+    window.addEventListener('neon-network-down', handleNetworkDown);
+    window.addEventListener('neon-network-up', handleNetworkUp);
+
     return () => {
-      delete (window as any).__setLinkDown;
+      window.removeEventListener('neon-network-down', handleNetworkDown);
+      window.removeEventListener('neon-network-up', handleNetworkUp);
     };
   }, []);
 
+  const contextValue = useMemo(
+    () => ({ isLinkDown, setLinkDown: setIsLinkDown }),
+    [isLinkDown]
+  );
+
   return (
-    <NetworkContext.Provider value={{ isLinkDown, setLinkDown: setIsLinkDown }}>
+    <NetworkContext.Provider value={contextValue}>
       {children}
     </NetworkContext.Provider>
   );

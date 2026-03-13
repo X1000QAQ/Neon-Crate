@@ -39,23 +39,46 @@ def _safe_get(data: Any, *keys, default="") -> Any:
 
 def _validate_path(target_path: str, allowed_base: str) -> Path:
     """
-    路径防穿越校验
+    路径防穿越校验（Docker 软链兼容版）
 
-    使用 Path.resolve() 确保 target_path 在 allowed_base 目录内，
-    彻底杜绝 ../ 路径穿越攻击。
+    策略：
+    1. 优先使用 Path.resolve() 严格校验（解析软链）
+    2. 如果失败，降级为绝对路径字符串前缀校验（兼容 Docker 挂载）
+    3. 彻底杜绝 ../ 路径穿越攻击
 
     Raises:
         ValueError: 路径穿越时抛出
     """
-    resolved = Path(target_path).resolve()
-    base = Path(allowed_base).resolve()
+    # ── 第一步：尝试严格软链解析校验 ──────────────────────────
+    resolved_target = Path(target_path).resolve()
+    resolved_base = Path(allowed_base).resolve()
     try:
-        resolved.relative_to(base)
+        resolved_target.relative_to(resolved_base)
+        logger.debug(f"[SECURITY] 路径校验通过（严格模式）: {resolved_target}")
+        return resolved_target
     except ValueError:
+        # ── 第二步：降级校验（Docker 挂载软链场景）────────────────
+        # 使用绝对路径字符串前缀匹配，不解析软链
+        abs_target = os.path.abspath(target_path)
+        abs_base = os.path.abspath(allowed_base)
+        
+        # 规范化路径分隔符（Windows/Linux 兼容）
+        abs_target_norm = abs_target.replace("\\", "/")
+        abs_base_norm = abs_base.replace("\\", "/")
+        
+        if abs_target_norm.startswith(abs_base_norm):
+            logger.warning(
+                f"[SECURITY] 路径校验通过（降级模式，Docker 软链场景）: "
+                f"target={abs_target}, base={abs_base}"
+            )
+            return Path(abs_target)
+        
+        # ── 第三步：真正的路径穿越攻击，拦截 ────────────────────
         raise ValueError(
-            f"[SECURITY] 路径穿越攻击拦截！目标路径 '{resolved}' 不在允许目录 '{base}' 内"
+            f"[SECURITY] 路径穿越攻击拦截！"
+            f"目标路径 '{abs_target}' 不在允许目录 '{abs_base}' 内。"
+            f"resolved_target={resolved_target}, resolved_base={resolved_base}"
         )
-    return resolved
 
 
 # ============================================================
@@ -85,14 +108,16 @@ EMPTY_DETAIL: Dict[str, Any] = {
 class MetadataManager:
     """元数据管理器"""
 
-    def __init__(self, tmdb_api_key: str):
+    def __init__(self, tmdb_api_key: str, language: str = "zh-CN"):
         """
         初始化元数据管理器
 
         Args:
             tmdb_api_key: TMDB API Key
+            language: 返回语言，默认 zh-CN，可选 en-US
         """
         self.api_key = tmdb_api_key
+        self.language = language
         self.base_url = "https://api.themoviedb.org/3"
         self.image_base_url = "https://image.tmdb.org/t/p/original"
 
@@ -166,6 +191,7 @@ class MetadataManager:
         """
         下载 TMDB 海报（Docker AIO 透明挂载模式）
 
+        - 优先复用：若目标目录已存在 poster.jpg 或 poster.png，直接返回，不重复下载
         - 海报下载失败不抛出异常，返回 None
         - 路径防穿越校验
         - 使用 httpx + 重试机制
@@ -174,6 +200,13 @@ class MetadataManager:
             Optional[str]: 海报本地路径，失败返回 None
         """
         try:
+            # ── 优先复用：检查目标目录是否已有海报 ──────────────────
+            output_dir_abs = str(Path(output_dir).resolve())
+            for existing_name in ["poster.jpg", "poster.png"]:
+                existing_path = os.path.join(output_dir_abs, existing_name)
+                if os.path.exists(existing_path):
+                    logger.info(f"[META] 海报已存在，直接复用: {existing_path}")
+                    return existing_path
             # 从 TMDB 获取详细信息
             if media_type == "movie":
                 details = self._fetch_movie_details(tmdb_id)
@@ -282,7 +315,7 @@ class MetadataManager:
             url = f"{self.base_url}/movie/{tmdb_id}"
             params = {
                 "api_key": self.api_key,
-                "language": "zh-CN",
+                "language": self.language,
                 "append_to_response": "credits,external_ids"
             }
             resp = _http_get_with_retry(url, params=params)
@@ -305,7 +338,7 @@ class MetadataManager:
             url = f"{self.base_url}/tv/{tmdb_id}"
             params = {
                 "api_key": self.api_key,
-                "language": "zh-CN",
+                "language": self.language,
                 "append_to_response": "credits,external_ids"
             }
             resp = _http_get_with_retry(url, params=params)

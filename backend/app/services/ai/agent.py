@@ -42,7 +42,6 @@ class AIAgent:
         self.db = db_manager
         self.llm_client = LLMClient(db_manager)
         # 候选等待状态：key=会话标识(固定"default"), value={candidates, query, media_type}
-        self._pending_candidates: dict = {}
         logger.info("✅ [AIAgent] AI 助手已初始化 (V11 寻猎者引擎已装载)")
     
     @property
@@ -59,7 +58,12 @@ class AIAgent:
         """
         工业级 JSON 块提取器（V2 — 非贪婪 + Markdown 剥离 + 二次降级）
 
-        策略：
+        设计目标：
+        - 从 LLM 返回的文本中提取 JSON 对象
+        - 兼容 Markdown 代码围栏（```json ... ```）
+        - 容错处理：LLM 可能在 JSON 前后添加说明文字
+        
+        提取策略：
         1. 先剥离 ```json ... ``` / ``` ... ``` Markdown 围栏
         2. 用非贪婪正则提取最外层 {...} 块（从第一个 { 到最后一个 }）
         3. 若 json.loads 仍失败，记录原始片段便于调试
@@ -101,11 +105,26 @@ class AIAgent:
         """
         处理用户消息的核心方法（总控中枢神经接通版）
         
-        核心修复：
-        1. 动态读取 master_router_rules（总控中枢规则）和 ai_persona（AI 人格）
-        2. 将两者融合为 System Prompt，注入到 80B 智脑
-        3. 抛弃硬编码关键词匹配，完全依赖大模型的 JSON 返回值进行意图识别
-        4. 保留规则引擎作为兜底防线（Fallback）
+        🧠 设计理念：
+        - 抛弃硬编码关键词匹配，完全依赖大模型的智能理解
+        - 动态读取用户配置的 AI 规则，实现真正的可定制化
+        - 保留规则引擎作为兜底防线（Fallback）
+        
+        🔄 处理流程：
+        1. 候选等待拦截：若上一轮展示了候选列表，优先匹配用户选择
+        2. 动态读取配置：获取 master_router_rules（总控规则）和 ai_persona（AI 人格）
+        3. LLM 意图识别：调用大模型进行智能意图识别
+        4. 意图路由：根据识别结果路由到对应的处理逻辑
+        5. 兜底防线：LLM 失败时使用规则引擎识别意图
+        
+        🎯 支持的意图：
+        - ACTION_SCAN：物理扫描
+        - ACTION_SCRAPE：全量刮削
+        - ACTION_SUBTITLE：字幕补全
+        - SYSTEM_STATUS：系统状态查询
+        - DOWNLOAD：下载影片（V11 寻猎者引擎）
+        - LOCAL_SEARCH：本地搜索
+        - CHAT：普通闲聊
         
         Args:
             user_message: 用户输入的消息
@@ -167,7 +186,6 @@ class AIAgent:
             if chosen:
                 # 清除候选状态（数据库）
                 self.db.set_config("_pending_candidates", "")
-                self._pending_candidates.pop("default", None)
                 logger.info(f"[AIAgent] 用户选择候选: {chosen['title']} ({chosen['year']})")
                 # 直接用选定结果下载
                 from app.services.downloader import ServarrClient
@@ -209,7 +227,6 @@ class AIAgent:
                     # 其他任何意图（聊天/状态/扫描/查看日志等）一律清除候选状态放行
                     logger.info(f"[AIAgent] 检测到非候选选择意图，清除候选状态，放行至正常流程: {repr(stripped)}")
                     self.db.set_config("_pending_candidates", "")
-                    self._pending_candidates.pop("default", None)
                     # 不 return，继续往下走正常意图识别
         
         # 🚀 第二步：融合 System Prompt（将人格设定作为最高准则，附带总控路由契约）
@@ -218,25 +235,33 @@ class AIAgent:
         # 🚀 第三步：优先使用 LLM 进行智能意图识别（如果总控规则存在）
         if router_rules.strip():
             try:
-                # 调用 80B 智脑，传入完整的 System Prompt
+                # 单次调用：LLM 同时返回 intent + reply，消灭双重调用
                 intent_res = await self.llm_client.call_llm(
-                    system_content, 
+                    system_content,
                     f"指令串: {user_message}"
                 )
                 intent_data = self._parse_json_response(intent_res)
-                
+
                 if intent_data:
                     intent = intent_data.get("intent", self.CHAT)
-                    
-                    # 动作类意图（SCAN/SCRAPE/SUBTITLE）在 _generate_llm_response
-                    # 内部已改为本地拼接，不再二次调用 LLM。
-                    # DOWNLOAD/SYSTEM_STATUS/CHAT 仍需 LLM 生成回复。
+                    llm_reply = (intent_data.get("reply") or "").strip()
+
+                    # ── 技术动作：零 Token，本地模板直接返回 ──────────────
+                    _ACTION_TEMPLATES = {
+                        self.ACTION_SCAN:     "好的，物理扫描已启动，稍后刷新页面查看新增文件。",
+                        self.ACTION_SCRAPE:   "收到，全量刮削任务已下发，刮削完成后媒体信息将自动更新。",
+                        self.ACTION_SUBTITLE: "明白，字幕补全任务已启动，将为缺失字幕的文件重新检索。",
+                    }
+                    if intent in _ACTION_TEMPLATES:
+                        response_text = llm_reply if llm_reply else _ACTION_TEMPLATES[intent]
+                        return response_text, intent
+
+                    # ── SYSTEM_STATUS / DOWNLOAD / CHAT：走原有富逻辑生成 ──
                     response_text = await self._generate_llm_response(user_message, intent_data)
-                    
+
                     # 候选列表展示时不下发 action_code（尚未真正下载）
                     if "__CANDIDATES__" in response_text:
                         return response_text, None
-                    # 返回响应文本和意图代码
                     action_code = intent if intent != self.CHAT else None
                     return response_text, action_code
             except Exception as e:
@@ -276,9 +301,9 @@ class AIAgent:
         """
         intent = intent_data.get("intent")
         
-        # 🚀 第一步：动态获取 AI 名称 + 人格设定，融合为完整身份
-        ai_name = self.db.get_agent_config("ai_name", "AI 智能助理")
-        ai_persona_raw = self.db.get_agent_config("ai_persona", "")
+        # 🚀 第一步：动态获取 AI 名称 + 人格设定（复用 property，避免重复读取配置）
+        ai_name = self.ai_name
+        ai_persona_raw = self.ai_persona
         # 将名字显式注入人格，确保 LLM 知道自己叫什么
         ai_persona = f"你的名字是「{ai_name}」。{ai_persona_raw}" if ai_persona_raw else f"你的名字是「{ai_name}」。"
         
@@ -287,34 +312,37 @@ class AIAgent:
         status_summary = f"[实时现状] 总文件:{stats['total']}, 已归档:{stats['archived']}, 磁盘占用:{stats['disk_usage_percent']}%"
         
         if intent in (self.ACTION_SCAN, self.ACTION_SCRAPE, self.ACTION_SUBTITLE):
-            # 动作确认语：优先让 LLM 生成个性化回复，但设置硬超时（本地小模型保护）
-            # 超时或失败则立即降级为本地文本，保证前端不卡死
-            action_labels = {
-                self.ACTION_SCAN:     ("物理扫描",   "稍后刷新页面查看新增文件"),
-                self.ACTION_SCRAPE:   ("全量刮削",   "刮削完成后媒体信息将自动更新"),
-                self.ACTION_SUBTITLE: ("字幕补全",   "将为缺失字幕的文件重新检索"),
+            # 技术动作：零 Token，本地模板直接返回（process_message 已处理，此处作为 fallback 兜底）
+            _ACTION_TEMPLATES = {
+                self.ACTION_SCAN:     "好的，物理扫描已启动，稍后刷新页面查看新增文件。",
+                self.ACTION_SCRAPE:   "收到，全量刮削任务已下发，刮削完成后媒体信息将自动更新。",
+                self.ACTION_SUBTITLE: "明白，字幕补全任务已启动，将为缺失字幕的文件重新检索。",
             }
-            label, hint = action_labels[intent]
-            fallback = f"收到，正在启动{label}任务，{status_summary}，{hint}。"
-            try:
-                prompt = (
-                    f"{ai_persona}\n\n当前系统状态：{status_summary}\n\n"
-                    f"用户请求启动{label}任务，请用简短的一句话确认并告知即将执行的操作。"
-                )
-                llm_reply = await asyncio.wait_for(
-                    self.llm_client.call_llm(prompt, message),
-                    timeout=30.0  # 动作确认语最多等 30s，超时直接用本地文本
-                )
-                # LLM 返回错误字符串时降级
-                if llm_reply and not llm_reply.startswith("error:"):
-                    return llm_reply
-            except asyncio.TimeoutError:
-                logger.warning(f"[AIAgent] {label}确认语 LLM 超时(30s)，已降级为本地文本")
-            except Exception as e:
-                logger.warning(f"[AIAgent] {label}确认语 LLM 异常，已降级: {e}")
-            return fallback
+            return _ACTION_TEMPLATES.get(intent, "收到，任务已启动。")
         
         elif intent == self.SYSTEM_STATUS:
+            # ==========================================
+            # 📊 系统状态查询（全时态感知）
+            # ==========================================
+            # 设计目标：提供实时、准确的系统运行状态
+            # 
+            # 数据来源：
+            # 1. 数据库统计：tasks 表 + media_archive 表
+            # 2. 系统日志：最近 30 行日志
+            # 3. 磁盘占用：真实的磁盘使用率
+            # 
+            # 真理宣言：
+            # - 绝对禁止编造任何数字
+            # - 必须使用实时系统快报中的真实数据
+            # - 如果某项数据为 0，必须如实说明
+            # 
+            # 核心概念：
+            # - archived：已完成刮削 + 文件搬运 + 海报下载
+            # - scraped：已获取元数据但尚未完成搬运
+            # - pending：等待刮削的任务
+            # - failed：刮削或搬运失败的任务
+            # - ignored：重复文件或手动跳过的任务
+            # ==========================================
             # 第一步：获取真实系统统计数据
             stats = self._get_system_stats()
             all_data = self.db.get_all_data()
@@ -382,7 +410,29 @@ class AIAgent:
             return ai_response
         
         elif intent == self.DOWNLOAD:
-            # 🚀 V11 寻猎者计划 (总控中枢神经接通版)
+            # ==========================================
+            # 🚀 V11 寻猎者引擎（Hunter Engine）
+            # ==========================================
+            # 设计目标：智能下载影片，支持模糊意图和精确匹配
+            # 
+            # 核心流程：
+            # 1. 从 LLM 返回的 JSON 中提取结构化数据（片名、类型、年份）
+            # 2. 序号补全：修复 LLM 常把「美国队长1」的「1」丢掉的问题
+            # 3. 模糊意图处理：无年份且无序号时，查询 TMDB 候选列表让用户选择
+            # 4. 调用 Servarr 客户端（Radarr/Sonarr）下发下载任务
+            # 5. 返回下载结果或候选列表
+            # 
+            # 候选列表机制：
+            # - 触发条件：无年份 + 无序号（如「我想看蜘蛛侠」）
+            # - 查询 TMDB：按热度排序返回前 5 条结果
+            # - 保存状态：将候选列表存入数据库（跨请求持久化）
+            # - 用户选择：下次对话时匹配用户输入的序号或片名
+            # 
+            # 序号补全机制：
+            # - 问题：LLM 常把「美国队长1」识别为「美国队长」
+            # - 解决：从原始消息提取末尾序号（中文或阿拉伯数字）
+            # - 支持：「第一部」「第二部」「1」「2」等格式
+            # ==========================================
             # 1. 从 intent_data 中提取结构化数据
             clean_name = intent_data.get("clean_name", "").strip()
             en_name = intent_data.get("en_name", "").strip()  # 80B 提供的英文名，优先用于 TMDB 搜索
@@ -443,7 +493,6 @@ class AIAgent:
                         "media_type": media_type,
                     }
                     self.db.set_config("_pending_candidates", json.dumps(_pending_data, ensure_ascii=False))
-                    self._pending_candidates["default"] = _pending_data  # 内存同步（单次请求内复用）
                     logger.info(f"[AIAgent] 候选状态已写入数据库: {len(candidates)} 条, agent_id={id(self)}")
                     # 附加结构化候选数据（前端解析用）
                     quick_opts = [f"{c['title']} ({c['year']})".strip() if c.get('year') else c['title'] for c in candidates]
@@ -725,40 +774,69 @@ class AIAgent:
         """
         🧠 AI 归档专家 - 智能影视文件识别引擎
         
-        核心功能：
-        1. 动态读取用户配置的 expert_archive_rules（智能影视归档专家规则）
-        2. 将完整规则作为 System Prompt 注入到大模型
-        3. 让 80B 智脑发挥真正的威力，精准提炼片名、年份、类型
+        设计目标：
+        - 将杂乱的影视文件路径清洗为标准的结构化数据
+        - 提取片名、年份、类型等关键信息
+        - 为 TMDB 搜索提供精准的查询词
+        
+        核心优势：
+        1. 动态规则：从数据库读取 expert_archive_rules，用户可自定义
+        2. 路径智能：利用父目录名作为强信号（通常即为作品名）
+        3. 幻觉纠偏：自动修正 LLM 返回的非标准类型值
+        4. 降级保护：解析失败时使用正则清洗名保底
+        
+        识别策略：
+        1. 优先使用父目录名（如 /tv/Breaking Bad/Season 1/S01E01.mkv → Breaking Bad）
+        2. 剧集识别：query 只输出剧名，不含单集标题
+        3. 年份提取：只使用文件名中明确出现的年份，不推断
+        4. 类型映射：film/films/movies → movie；series/show/anime → tv
         
         Args:
-            cleaned_name: 清洗后的文件名
+            cleaned_name: 正则清洗后的文件名
             full_path: 完整文件路径
-            type_hint: 类型提示
+            type_hint: 类型提示（movie/tv）
             
         Returns:
-            Optional[Dict]: 包含 query, year, chinese_title, type 的字典
+            Optional[Dict]: {
+                "query": str,           # TMDB 搜索词（纯净片名）
+                "year": str,            # 年份（4位数字或空）
+                "chinese_title": str,   # 中文译名（可选）
+                "type": str             # 类型（movie/tv/IGNORE）
+            }
         """
-        # 🚀 第一步：动态获取用户的归档专家规则（默认值已在 db_manager.py 中定义）
+        # 🚀 第一步：动态获取用户的归档专家规则（DEFAULT_CONFIG 提供钢铁兜底，绝不为空）
         expert_rules = self.db.get_agent_config("expert_archive_rules", "")
         
-        # 降级保护：如果规则为空，使用基础兜底逻辑
-        if not (expert_rules or "").strip():
-            logger.warning("[AIAgent] expert_archive_rules 为空，使用降级方案")
-            return {
-                "query": (cleaned_name or "").strip(),
-                "year": "",
-                "chinese_title": "",
-                "type": (type_hint or "movie").strip().lower() or "movie",
-            }
-        
-        # 🚀 第二步：调用底层 LLM 客户端（确保 JSON 强制输出）
+        # 🚀 第二步：从完整路径提取父目录名作为额外线索
+        # 例：'/download/tv/The Boys/Season 03/The.Boys.S03E01.mkv' → 'The Boys'
+        parent_dir_hint = ""
+        try:
+            import os as _os
+            parts = full_path.replace("\\", "/").split("/")
+            # 取文件名的上级目录，过滤掉 Season xx 这类无意义目录
+            for part in reversed(parts[:-1]):
+                part = part.strip()
+                if part and not re.match(r'^[Ss]eason\s*\d+$', part, re.IGNORECASE):
+                    parent_dir_hint = part
+                    break
+        except Exception:
+            pass
+
+        # 🚀 第三步：调用底层 LLM 客户端（确保 JSON 强制输出）
         raw = await self.llm_client.call_llm(
             system_prompt=expert_rules,
             user_prompt=(
                 f"请分析以下影视文件：\n"
                 f"文件路径: {full_path}\n"
+                f"父目录名（强信号，通常即为作品名）: {parent_dir_hint}\n"
                 f"清洗后文件名: {cleaned_name}\n"
                 f"类型提示: {type_hint or 'movie'}\n\n"
+                f"⚠️ 重要约束：\n"
+                f"1. 优先以【父目录名】作为作品英文原名的参考依据\n"
+                f"2. query 只能是作品官方英文原名，禁止包含集标题、分辨率、编码格式\n"
+                f"3. 对于剧集，query 只输出剧名本身（如 'The Boys'），不含当集标题（如 'The Payback'）\n"
+                f"4. year 字段：只能填写文件名或路径中明确出现的年份数字，禁止用你的知识推断播出年份，如果没有年份信息就返回空字符串\n"
+                f"5. 严禁发散联想，query 必须严格来自文件名或路径中出现的词汇，不可凭空创造\n"
                 f"请严格按照 System 设定的 JSON 契约输出。"
             )
         )

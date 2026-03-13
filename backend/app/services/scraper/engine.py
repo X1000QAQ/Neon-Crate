@@ -17,6 +17,7 @@ import logging
 
 from .filters import MediaFilter
 from .cleaner import MediaCleaner
+from app.infra.constants import VIDEO_EXTS_EXTENDED
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +25,10 @@ logger = logging.getLogger(__name__)
 class ScanEngine:
     """并发扫描引擎"""
     
-    # 支持的视频格式
-    VIDEO_EXTENSIONS = {
-        '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', 
-        '.webm', '.m4v', '.mpg', '.mpeg', '.ts', '.m2ts'
-    }
+    # 支持的视频格式（使用全局常量，扫描引擎专用扩展集）
+    VIDEO_EXTENSIONS = VIDEO_EXTS_EXTENDED
     
-    def __init__(self, max_workers: int = 4, min_size_mb: int = 50, db_manager=None):
+    def __init__(self, max_workers: int = 4, min_size_mb: int = 50, db_manager=None, known_paths: set = None, known_inodes: set = None):
         """
         初始化扫描引擎
         
@@ -38,11 +36,15 @@ class ScanEngine:
             max_workers: 最大并发线程数
             min_size_mb: 最小文件体积限制（MB）
             db_manager: 数据库管理器（用于加载自定义正则）
+            known_paths: 已入库文件路径集合（用于前置过滤）
+            known_inodes: 已入库文件物理指纹集合（用于硬链接防重）
         """
         self.max_workers = max_workers
         self.min_size_mb = min_size_mb
         self.filter = MediaFilter(min_size_mb=min_size_mb)
         self.cleaner = MediaCleaner(db_manager=db_manager)
+        self.known_paths = known_paths or set()  # 🚀 保存路径白名单
+        self.known_inodes = known_inodes or set()  # 🛡️ 保存 inode 白名单
     
     def scan_directory(self, directory: str, recursive: bool = True) -> List[Dict]:
         """
@@ -113,12 +115,48 @@ class ScanEngine:
                             continue
 
                         if self._is_video_file(file):
-                            video_files.append(os.path.join(root, file))
+                            file_path = os.path.join(root, file)
+                            
+                            # 🚀 第一重拦截：路径白名单（O(1) 哈希查找）
+                            if self.known_paths:
+                                try:
+                                    if str(Path(file_path).resolve()) in self.known_paths:
+                                        continue  # 静默跳过
+                                except Exception:
+                                    pass  # 规范化失败时降级为不过滤
+                            
+                            # 🛡️ 第二重拦截：物理 inode 指纹（终极防重，蒸发做种文件）
+                            if self.known_inodes:
+                                try:
+                                    st = os.stat(file_path)
+                                    if (st.st_ino, st.st_size) in self.known_inodes:
+                                        continue  # 静默跳过硬链接文件
+                                except OSError:
+                                    pass  # stat 失败时降级为不过滤
+                            
+                            video_files.append(file_path)
             else:
                 # 仅扫描当前目录（非递归，无需深度检查）
                 for file in os.listdir(directory):
                     file_path = os.path.join(directory, file)
                     if os.path.isfile(file_path) and self._is_video_file(file):
+                        # 🚀 第一重拦截：路径白名单（O(1) 哈希查找）
+                        if self.known_paths:
+                            try:
+                                if str(Path(file_path).resolve()) in self.known_paths:
+                                    continue  # 静默跳过
+                            except Exception:
+                                pass
+                        
+                        # 🛡️ 第二重拦截：物理 inode 指纹（终极防重，蒸发做种文件）
+                        if self.known_inodes:
+                            try:
+                                st = os.stat(file_path)
+                                if (st.st_ino, st.st_size) in self.known_inodes:
+                                    continue  # 静默跳过硬链接文件
+                            except OSError:
+                                pass
+                        
                         video_files.append(file_path)
         except Exception as e:
             logger.error(f"扫描目录失败: {e}")
@@ -229,78 +267,3 @@ class ScanEngine:
                     processed_paths.add(result['path'])
         
         return all_results
-
-
-# ============================================
-# 本地点火测试块 (严格使用纯 ASCII 标记)
-# ============================================
-if __name__ == "__main__":
-    import tempfile
-    import shutil
-    
-    print("[TEST] ScanEngine Local Fire Test Starting...")
-    print("=" * 70)
-    
-    # 创建临时测试目录
-    test_dir = os.path.join(tempfile.gettempdir(), "test_media")
-    os.makedirs(test_dir, exist_ok=True)
-    
-    print(f"[SETUP] Test directory: {test_dir}")
-    
-    # 创建测试文件（空文件，用于测试解析链路）
-    test_files = [
-        "[DBD-Raws] Frieren - 28 [1080p].mp4",
-        "Dune.Part.Two.2024.4K.mkv",
-        "Game.of.Thrones.S01E01.Winter.Is.Coming.1080p.mkv"
-    ]
-    
-    print("[SETUP] Creating test files...")
-    for filename in test_files:
-        file_path = os.path.join(test_dir, filename)
-        with open(file_path, 'w') as f:
-            f.write("")  # 空文件
-        print(f"  [OK] Created: {filename}")
-    
-    print("-" * 70)
-    
-    # 初始化扫描引擎（min_size_mb=0 用于测试空文件）
-    print("[INIT] Initializing ScanEngine with min_size_mb=0 for testing...")
-    engine = ScanEngine(max_workers=2, min_size_mb=0)
-    print("[OK] ScanEngine initialized")
-    
-    print("-" * 70)
-    
-    # 执行扫描
-    print(f"[SCAN] Scanning directory: {test_dir}")
-    results = engine.scan_directory(test_dir, recursive=False)
-    
-    print(f"[SCAN] Found {len(results)} files")
-    print("=" * 70)
-    
-    # 打印结果
-    for i, result in enumerate(results, 1):
-        print(f"\n[RESULT {i}]")
-        print(f"  Original Name : {result['file_name']}")
-        print(f"  Clean Name    : {result['clean_name']}")
-        print(f"  Year          : {result['year']}")
-        print(f"  Type          : {'TV Show' if result['is_tv'] else 'Movie'}")
-        
-        if result['is_tv']:
-            season = result['season'] if result['season'] else 1
-            episode = result['episode'] if result['episode'] else 0
-            print(f"  Season/Episode: S{season:02d}E{episode:02d}")
-        
-        print(f"  File Size     : {result['size']} bytes")
-        print(f"  Path          : {result['path']}")
-        print("-" * 70)
-    
-    # 清理测试目录
-    print("\n[CLEANUP] Removing test directory...")
-    try:
-        shutil.rmtree(test_dir)
-        print("[OK] Test directory removed")
-    except Exception as e:
-        print(f"[WARNING] Failed to remove test directory: {e}")
-    
-    print("\n[OK] All tests completed successfully!")
-    print("=" * 70)

@@ -21,7 +21,7 @@ services:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
     restart: unless-stopped
     networks:
-      - ai-media-network
+      - neon-crate-network
 
   neon-crate-web:
     build:
@@ -37,8 +37,8 @@ services:
       - neon-crate-api
     restart: unless-stopped
     networks:
-      - ai-media-network
+      - neon-crate-network
 
 networks:
-  ai-media-network:
+  neon-crate-network:
     driver: bridge

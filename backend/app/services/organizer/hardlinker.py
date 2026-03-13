@@ -18,14 +18,15 @@ import errno
 import logging
 from pathlib import Path
 from typing import Tuple
+from app.infra.constants import SUB_EXTS, SUB_LANG_SUFFIXES
 
 logger = logging.getLogger(__name__)
 
-# 字幕扩展名
-SUB_EXTS = (".srt", ".ass", ".ssa", ".sub")
-SUB_LANG_SUFFIXES = (".zh-cn", ".zh", ".chs", ".chi", ".zh-tw", ".zh-hk")
 
-
+# WARNING: 静态调用类 — 所有方法均为 @staticmethod，调用方式为 SmartLink.create_link(...)。
+# GitNexus 等 AST 静态分析工具无法识别此类调用边，图谱中 incoming 将显示为空（误报）。
+# 修改本类任何方法签名前，请务必配合 Grep 手动确认所有调用点：
+#   grep -rn 'SmartLink\.' backend/
 class SmartLink:
     """智能链接引擎"""
     
@@ -33,6 +34,20 @@ class SmartLink:
     def create_link(src: str, dst: str) -> Tuple[bool, str]:
         """
         创建智能链接（硬链接优先，跨盘自动回退到软链接）
+        
+        设计理念：
+        - 硬链接优先：零空间占用，性能最优，保持做种
+        - 智能兜底：跨分区时自动切换为软链接
+        - 幂等处理：目标文件已存在时视为成功
+        
+        硬链接 vs 软链接：
+        - 硬链接：共享 inode，删除源文件不影响目标文件，适合做种
+        - 软链接：类似快捷方式，删除源文件会导致目标文件失效
+        
+        跨分区检测：
+        - 错误码：errno.EXDEV（Cross-device link）
+        - 触发场景：源文件和目标文件在不同的文件系统
+        - 自动回退：检测到跨分区错误时自动使用软链接
         
         Args:
             src: 源文件路径（必须存在）
@@ -44,6 +59,7 @@ class SmartLink:
         链接类型：
             - "hardlink": 硬链接成功
             - "symlink": 软链接成功（跨分区兜底）
+            - "already_exists": 目标文件已存在（幂等处理）
             - "error: xxx": 失败原因
         """
         # 前置检查
@@ -144,7 +160,24 @@ class SmartLink:
     @staticmethod
     def sync_subtitles(src_video_path: str, dest_video_path: str, dest_dir: str) -> int:
         """
-        自带字幕全量搬运
+        自带字幕全量搬运（智能同步机制）
+        
+        设计目标：
+        - 将源视频同目录下的字幕文件同步到目标目录
+        - 支持多语言字幕（.zh-cn.srt、.en.srt 等）
+        - 防止交叉污染（只搬运与源视频同名的字幕）
+        
+        平铺目录检测：
+        - 问题场景：下载目录中混放了多部影片，每部影片都有自己的字幕
+        - 检测策略：
+          1. 公共大厅识别：downloads、movie、tv 等常见目录名
+          2. 异类嗅探：同目录下有不同前缀的视频文件
+        - 防护措施：检测到平铺目录时跳过字幕扫描，避免误搬运
+        
+        前缀匹配防交叉污染：
+        - 只搬运文件名以源视频 stem 开头的字幕
+        - 例如：The.Matrix.1999.mkv 只搬运 The.Matrix.1999.*.srt
+        - 避免：The.Matrix.2.mkv 的字幕被误搬运到 The.Matrix.1.mkv
         
         Args:
             src_video_path: 源视频路径

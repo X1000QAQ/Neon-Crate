@@ -1,4 +1,4 @@
-# AI Media Master - 工业级依赖清单
+# Neon Crate - 工业级依赖清单
 # FastAPI 核心框架
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
@@ -10,7 +10,6 @@ python-multipart==0.0.6
 python-dotenv==1.0.0
 
 # HTTP 客户端
-requests==2.31.0
 httpx==0.25.1
 
 # 神盾计划安全核心

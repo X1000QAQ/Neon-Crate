@@ -48,21 +48,27 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     
     # 🚀 实现自动一致性触发（函数内部导入，避免循环引用）
     if action_code:
-        from .tasks import trigger_scan, trigger_scrape_all, trigger_find_subtitles
-        
-        if action_code == "ACTION_SCAN":
-            await trigger_scan(background_tasks)
-            logger.info("[AI-EXEC] 已自动触发物理扫描")
-        elif action_code == "ACTION_SCRAPE":
-            await trigger_scrape_all(background_tasks)
-            logger.info("[AI-EXEC] 已自动触发全量刮削")
-        elif action_code == "ACTION_SUBTITLE":
-            await trigger_find_subtitles(background_tasks)
-            logger.info("[AI-EXEC] 已自动触发查找字幕")
-        elif action_code == "DOWNLOAD":
-            # 🚀 V11 寻猎者计划 - 下载意图已在 agent 内部完成
-            # 此处无需额外操作，仅记录日志
-            logger.info("[AI-EXEC] 已处理下载请求（寻猎者引擎）")
+        try:
+            from app.api.v1.endpoints.tasks.scan_task import perform_scan_task_sync
+            from app.api.v1.endpoints.tasks.scrape_task import perform_scrape_all_task_sync
+            from app.api.v1.endpoints.tasks.subtitle_task import perform_find_subtitles_task_sync
+            
+            if action_code == "ACTION_SCAN":
+                background_tasks.add_task(perform_scan_task_sync)
+                logger.info("[AI-EXEC] 已自动触发物理扫描")
+            elif action_code == "ACTION_SCRAPE":
+                background_tasks.add_task(perform_scrape_all_task_sync)
+                logger.info("[AI-EXEC] 已自动触发全量刮削")
+            elif action_code == "ACTION_SUBTITLE":
+                background_tasks.add_task(perform_find_subtitles_task_sync)
+                logger.info("[AI-EXEC] 已自动触发查找字幕")
+            elif action_code == "DOWNLOAD":
+                # 🚀 V11 寻猎者计划 - 下载意图已在 agent 内部完成
+                # 此处无需额外操作，仅记录日志
+                logger.info("[AI-EXEC] 已处理下载请求（寻猎者引擎）")
+        except Exception as e:
+            logger.error(f"[AI-EXEC] 自动触发任务失败: {e}", exc_info=True)
+            # 不中断响应，继续返回 AI 回复
     
     # 组装响应
     return ChatResponse(
