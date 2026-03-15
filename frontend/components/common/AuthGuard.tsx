@@ -2,23 +2,29 @@
  * ============================================================================
  * AuthGuard - 神经链接认证守卫组件
  * ============================================================================
- * 
+ *
  * [组件职责]
  * 1. 检查系统初始化状态（首次使用需要初始化）
  * 2. 验证用户 Token（已登录用户才能访问）
  * 3. 显示赛博朋克风格的加载动画（量子凭证同步）
- * 
+ *
  * [加载逻辑]
  * - 最小展示时间: 1500ms（保留仪式感）
  * - 超时保护: 5000ms（防止卡死）
  * - 退出动画: fade-out + scale-up（平滑过渡）
- * 
+ *
  * [状态流转]
  * 1. isChecking = true → 显示加载动画
  * 2. 检查完成 + 最小延时 → isChecking = false
  * 3. 退出动画 300ms → 移除组件
  * 4. 渲染主界面
- * 
+ *
+ * [架构修复 2026-03-15]
+ * authenticatedWrapper prop：
+ * - 登录页（/auth/login）直接渲染裸 children，跳过 wrapper
+ * - 认证成功后才将 children 包裹在 wrapper 内（如 AuthenticatedShell）
+ * - 彻底消除 SettingsProvider/LogProvider 在登录页提前挂载轮询的 401 噪音
+ *
  * ============================================================================
  */
 'use client';
@@ -29,7 +35,19 @@ import { Loader2, AlertTriangle } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useLanguage } from '@/hooks/useLanguage';
 
-export default function AuthGuard({ children }: { children: React.ReactNode }) {
+export default function AuthGuard({
+  children,
+  authenticatedWrapper: Wrapper,
+}: {
+  children: React.ReactNode;
+  /**
+   * 可选的已认证页面包装组件（如 AuthenticatedShell）
+   * - 传入时：只在 isAuthenticated=true 时将 children 包裹在此组件内
+   * - 未传入：直接渲染 children（向后兼容原有用法）
+   * - 登录页（/auth/login）：始终跳过此包装，直接渲染裸 children
+   */
+  authenticatedWrapper?: React.ComponentType<{ children: React.ReactNode }>;
+}) {
   const router = useRouter();
   const pathname = usePathname();
   const { t } = useLanguage();
@@ -112,7 +130,8 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
     }, 300));
   };
 
-  // 登录页直接渲染
+  // 登录页：直接渲染裸 children，跳过 authenticatedWrapper
+  // 确保 SettingsProvider/LogProvider 不在登录页提前挂载
   if (pathname === '/auth/login') {
     return <>{children}</>;
   }
@@ -179,8 +198,12 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
     );
   }
 
-  // 已认证，渲染子组件
+  // 已认证：若传入 authenticatedWrapper 则用它包裹 children，否则直接渲染
+  // Wrapper（即 AuthenticatedShell）只在此处挂载，登录页绝不触发
   if (isAuthenticated) {
+    if (Wrapper) {
+      return <Wrapper>{children}</Wrapper>;
+    }
     return <>{children}</>;
   }
 

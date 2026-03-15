@@ -43,10 +43,16 @@ def _register_middleware(app: FastAPI) -> None:
       - allow_methods：允许所有 HTTP 方法
       - allow_headers：允许所有请求头
     """
+    # CORS 修复说明：
+    # 1. AIO 单容器部署下，前后端同域，正常页面请求不触发 CORS 预检。
+    # 2. 局域网设备（如 192.168.x.x）直接请求 /api/v1/* 时，浏览器会附带 Origin 头，
+    #    必须放行所有来源，否则出现 403/CORS error。
+    # 3. allow_origins=["*"] 与 allow_credentials=True 不兼容（CORS 规范），
+    #    JWT 通过 Authorization header 传递，无需 Cookie，故 allow_credentials=False 安全可行。
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.CORS_ORIGINS,
-        allow_credentials=True,
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -109,13 +115,20 @@ def _register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(404)
     async def spa_fallback_handler(request, exc):
-        """SPA 单页应用 404 回退"""
+        """
+        SPA 单页应用 404 回退
+
+        修复要点：
+        - 使用绝对路径定位 index.html，避免 Docker CWD 不确定导致找不到文件
+        - API 路由 404 仍返回 JSON，不回退到前端
+        """
         if request.url.path.startswith("/api"):
             return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
-        index_path = Path("static/index.html")
+        # 使用绝对路径：app_factory.py -> core/ -> app/ -> backend/ -> static/
+        index_path = Path(__file__).resolve().parent.parent.parent / "static" / "index.html"
         if index_path.exists():
-            return FileResponse("static/index.html")
+            return FileResponse(str(index_path))
         else:
             return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
@@ -162,8 +175,10 @@ def _mount_static_resources(app: FastAPI) -> None:
         logging.info(f"[OK] API 文档静态资源已挂载: {docs_static} -> /static/docs")
 
     # 挂载前端静态文件
-    frontend_static = "static"
-    if os.path.isdir(frontend_static):
+    # 使用绝对路径，确保 Docker 容器内 CWD 不影响挂载
+    frontend_static_abs = Path(__file__).resolve().parent.parent.parent / "static"
+    frontend_static = str(frontend_static_abs)
+    if frontend_static_abs.is_dir():
         app.mount("/", StaticFiles(directory=frontend_static, html=True), name="frontend")
         logging.info(f"[OK] 前端静态文件已挂载: {frontend_static} -> /")
     else:

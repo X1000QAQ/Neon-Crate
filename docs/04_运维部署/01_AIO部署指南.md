@@ -216,11 +216,85 @@ tar -czf backup-$(date +%Y%m%d).tar.gz backend/data/
 | 海报 401 | AIO 模式下图片请求未携带 token | 确认 `SecureImage` 使用 fetch+token，不用 `<img src>` 直接渲染 |
 | 局域网设备海报不显示 | `.env.local` 写死 `http://localhost:8000`，被编译进 bundle | 删除 `.env.local` 的绝对路径，改用 `.env.development.local` 仅本地开发生效 |
 | 401 全站 | `secret.key` 变更导致 JWT 失效 | 重新登录 |
-| SPA 刷新 404 | SPA 回退未生效 | 检查 `main.py` 404 handler |
+| SPA 刷新 404 | SPA 回退未生效 | 见下方「常见问题」→ SPA 路由回退 |
+| 局域网设备 API 返回 403 | 请求未携带 JWT Token 或 CORS 被拦截 | 见下方「常见问题」→ 局域网 403 访问限制 |
 
 ---
 
-## 十、部署检查清单
+## 十、常见问题（FAQ）
+
+### SPA 路由回退（SPA 404 修复）
+
+**现象**：直接访问 `http://IP:8000/auth/login` 返回 404，但访问 `http://IP:8000/` 正常。
+
+**根因**：Next.js `output: 'export'` 生成的是纯静态文件。FastAPI 的 `StaticFiles` 挂载在 `/` 时，
+直接访问子路径（如 `/auth/login`）会在磁盘上寻找名为 `auth/login` 的物理文件，找不到则触发 404。
+此外，若 `index.html` 使用相对路径定位，Docker 容器内 CWD 不确定时也会找不到文件。
+
+**已修复内容（`backend/app/core/app_factory.py`）**：
+
+1. **绝对路径定位**：`spa_fallback_handler` 中改用 `Path(__file__).resolve()` 计算 `index.html` 绝对路径，
+   不再依赖容器运行时 CWD。
+2. **静态挂载绝对路径**：`_mount_static_resources` 中 `StaticFiles` 挂载同样使用绝对路径。
+3. **双重保障**：`StaticFiles(html=True)` 自动处理已知路径；`404 exception_handler` 作为兜底，
+   对所有非 `/api` 路径的 404 统一返回 `index.html`。
+
+**验证方法**：
+```bash
+# 直接访问子路由，应返回 200 并返回 index.html 内容
+curl -I http://<NAS-IP>:8000/auth/login
+# 期望：HTTP/1.1 200 OK
+```
+
+**Next.js `trailingSlash` 注意事项**：如启用 `trailingSlash: true`，`/auth/login` 会生成为
+`auth/login/index.html`，FastAPI `StaticFiles(html=True)` 可自动识别目录下的 `index.html`，无需额外配置。
+
+---
+
+### 局域网 403 访问限制
+
+**现象**：Unraid 终端日志显示来自 `192.168.x.x` 的请求被 `403 Forbidden` 拦截：
+```
+INFO: 192.168.0.208:6434 - "GET /api/v1/system/logs HTTP/1.1" 403 Forbidden
+```
+
+**根因分析**：
+
+| 根因 | 说明 |
+|------|------|
+| **HTTPBearer 默认行为** | FastAPI `HTTPBearer()` 在请求缺少 `Authorization` 头时自动返回 **403**（非 401），语义不准确 |
+| **CORS 配置冲突** | 旧配置 `allow_origins=["http://localhost:3000"]` 不包含局域网 IP，浏览器预检请求被拒 |
+| **credentials 冲突** | `allow_origins=["*"]` 与 `allow_credentials=True` 不兼容，FastAPI 会静默降级或报错 |
+
+**已修复内容**：
+
+1. **`backend/app/api/auth.py`**：
+   - `HTTPBearer(auto_error=False)`：缺少 token 时不自动抛 403，而是传入 `None`
+   - `get_current_user` 统一处理 `None` credentials，返回标准 **401** + `WWW-Authenticate: Bearer` 头
+
+2. **`backend/app/infra/config/__init__.py`**：
+   - `CORS_ORIGINS` 默认值改为 `["*"]`，放行所有来源（AIO 同域部署，CORS 实际不触发）
+
+3. **`backend/app/core/app_factory.py`**：
+   - `allow_credentials=False`（与 `allow_origins=["*"]` 兼容；JWT 走 header，无需 Cookie）
+
+**重要说明**：403 的本质是**客户端没有携带 JWT Token**（未登录或 Token 过期），而非服务端拦截局域网 IP。
+修复后行为变更：未认证请求返回 **401**，客户端（前端 `AuthGuard`）检测到 401 后自动跳转登录页。
+
+**验证方法**：
+```bash
+# 未携带 token，应返回 401（修复前为 403）
+curl -I http://<NAS-IP>:8000/api/v1/system/logs
+# 期望：HTTP/1.1 401 Unauthorized
+
+# 携带有效 token，应返回 200
+curl -H "Authorization: Bearer <your-token>" http://<NAS-IP>:8000/api/v1/system/logs
+# 期望：HTTP/1.1 200 OK
+```
+
+---
+
+## 十一、部署检查清单
 
 - [ ] 根目录 `Dockerfile` 存在（多阶段构建版）
 - [ ] `frontend/next.config.js` 中 `output: 'export'` 已启用

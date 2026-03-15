@@ -66,20 +66,47 @@ class ErrorBoundary extends React.Component<
   }
 }
 
+/**
+ * AuthenticatedShell — 只在 AuthGuard 确认认证后才挂载的 Provider 层
+ *
+ * 架构根因修复（2026-03-15）：
+ * ─────────────────────────────────────────────────────────────────
+ * 旧结构：SettingsProvider > LogProvider > AuthGuard > children
+ *   ✗ Provider 在所有页面（含 /auth/login）立即挂载并轮询 API
+ *   ✗ 无 token 时每 1.5s 触发 401，产生大量日志噪音
+ *
+ * 新结构：AuthGuard（authenticatedWrapper=AuthenticatedShell）> children
+ *   ✓ /auth/login 路径：AuthGuard 直接渲染裸 children（登录页），不经过 AuthenticatedShell
+ *   ✓ 认证通过后：AuthGuard 用 AuthenticatedShell 包裹 children，Provider 才真正挂载
+ *   ✓ 登录页零 API 轮询，401 噪音彻底消除
+ * ─────────────────────────────────────────────────────────────────
+ */
+function AuthenticatedShell({ children }: { children: React.ReactNode }) {
+  return (
+    <SettingsProvider>
+      <LogProvider>
+        {children}
+        <AiSidebar />
+      </LogProvider>
+    </SettingsProvider>
+  );
+}
+
 export default function ClientShell({ children }: { children: React.ReactNode }) {
   return (
     <ErrorBoundary>
       <NetworkProvider>
-        <SettingsProvider>
-          <LogProvider>
-            <CyberParticles />
-            <AuthGuard>
-              {children}
-              <AiSidebar />
-            </AuthGuard>
-            <NeuralLinkAlert />
-          </LogProvider>
-        </SettingsProvider>
+        <CyberParticles />
+        {/*
+          authenticatedWrapper=AuthenticatedShell：
+          - AuthGuard 在 /auth/login 时直接渲染裸 children（登录页），跳过 AuthenticatedShell
+          - AuthGuard 在 isAuthenticated=true 时才用 AuthenticatedShell 包裹 children
+          - SettingsProvider / LogProvider / AiSidebar 因此只在认证后挂载
+        */}
+        <AuthGuard authenticatedWrapper={AuthenticatedShell}>
+          {children}
+        </AuthGuard>
+        <NeuralLinkAlert />
       </NetworkProvider>
     </ErrorBoundary>
   );

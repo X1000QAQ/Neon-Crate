@@ -39,7 +39,10 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     
     # CORS 配置
-    CORS_ORIGINS: list = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    # AIO 单容器部署：前后端同域，CORS 实际不触发；但局域网直接访问 /api/v1/* 时
+    # 若浏览器发送 Origin 头，仍需放行。生产环境使用通配符以兼容任意局域网 IP。
+    # 如需收紧，可通过环境变量 CORS_ORIGINS 覆盖为具体地址列表。
+    CORS_ORIGINS: list = ["*"]
     
     # Docker 环境统一挂载点
     DOCKER_STORAGE_PATH: str = "/storage"

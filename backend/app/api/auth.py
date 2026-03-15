@@ -29,6 +29,7 @@
 - 所有业务路由自动继承此依赖
 - 无需在每个路由手动添加认证逻辑
 """
+from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -41,7 +42,10 @@ from app.models.domain_system import (
 )
 
 router = APIRouter()
-security = HTTPBearer()
+# auto_error=False：当请求缺少 Authorization 头时，不自动抛出 403，
+# 而是将 credentials 设为 None，由 get_current_user 统一返回 401。
+# 这修复了局域网设备访问时日志中出现的 403 Forbidden 问题。
+security = HTTPBearer(auto_error=False)
 
 
 @router.get("/status", response_model=AuthStatusResponse)
@@ -119,12 +123,30 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
 # 2. 调用 CryptoManager.verify_token 验证签名和过期时间
 # 3. 返回用户名（验证通过）或抛出 401 异常（验证失败）
 # ==========================================
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
-    """验证 JWT Token 并返回当前用户名（全局守卫）"""
+def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> str:
+    """
+    验证 JWT Token 并返回当前用户名（全局守卫）
+
+    修复说明：
+    - HTTPBearer(auto_error=False) 使得缺少 Authorization 头时 credentials=None
+    - 此处统一处理 None 和无效 token，均返回 401（而非默认的 403）
+    - 401 语义更准确："未认证"，客户端应重新登录
+    """
+    if credentials is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing authorization token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     crypto = get_crypto_manager()
     username = crypto.verify_token(credentials.credentials)
-    
+
     if username is None:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     return username
