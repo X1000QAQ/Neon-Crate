@@ -44,6 +44,11 @@ const nextConfig = {
 | `JWT_SECRET_KEY` | `"your-secret-key..."` | **是** |
 | `DOCKER_STORAGE_PATH` | `"/storage"` | **是** |
 
+> **⚠️ 前端环境变量重要说明**：`NEXT_PUBLIC_API_BASE` 在 `next build` 时被**编译进静态 bundle**，运行时无法更改。
+> - AIO 生产构建：**不设置**此变量，走默认值 `/api/v1`（相对路径），适配任意 IP 访问
+> - 本地开发：在 `frontend/.env.development.local` 中设置 `NEXT_PUBLIC_API_BASE=http://localhost:8000/api/v1`
+> - **严禁**在 `frontend/.env.local` 中写死 `http://localhost:8000`，否则 Docker 镜像构建后局域网设备无法访问图片
+
 ```bash
 python3 -c "import secrets; print(secrets.token_hex(64))"
 ```
@@ -162,6 +167,14 @@ export const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '/api/v1';
 // export const API_BASE = 'http://localhost:8000/api/v1';
 ```
 
+**本地开发配置**（仅 `next dev` 时生效，不影响 `next build`）：
+```bash
+# frontend/.env.development.local（不提交 git）
+NEXT_PUBLIC_API_BASE=http://localhost:8000/api/v1
+```
+
+**AIO 生产构建**：不设置 `NEXT_PUBLIC_API_BASE`，`API_BASE` 自动降级为 `/api/v1` 相对路径。
+
 ---
 
 ## 七、Ollama 本地 LLM
@@ -200,6 +213,8 @@ tar -czf backup-$(date +%Y%m%d).tar.gz backend/data/
 | 访问 :8000 返回 404 | `static/` 不存在 | 重新构建前端 |
 | API 返回 HTML | API_BASE 配置错误 | 检查 `lib/config.ts` |
 | 海报 403 | `DOCKER_STORAGE_PATH` 与 volumes 不一致 | 对齐路径配置 |
+| 海报 401 | AIO 模式下图片请求未携带 token | 确认 `SecureImage` 使用 fetch+token，不用 `<img src>` 直接渲染 |
+| 局域网设备海报不显示 | `.env.local` 写死 `http://localhost:8000`，被编译进 bundle | 删除 `.env.local` 的绝对路径，改用 `.env.development.local` 仅本地开发生效 |
 | 401 全站 | `secret.key` 变更导致 JWT 失效 | 重新登录 |
 | SPA 刷新 404 | SPA 回退未生效 | 检查 `main.py` 404 handler |
 
@@ -209,6 +224,8 @@ tar -czf backup-$(date +%Y%m%d).tar.gz backend/data/
 
 - [ ] 根目录 `Dockerfile` 存在（多阶段构建版）
 - [ ] `frontend/next.config.js` 中 `output: 'export'` 已启用
+- [ ] `frontend/.env.local` 中**未设置** `NEXT_PUBLIC_API_BASE`（或值为空），AIO 构建使用相对路径
+- [ ] 本地开发的 `NEXT_PUBLIC_API_BASE=http://localhost:8000/api/v1` 已移至 `frontend/.env.development.local`
 - [ ] `docker-compose.yml` 只有 `neon-crate` 单个服务
 - [ ] `.env` 或环境变量中 `JWT_SECRET_KEY` 已替换为强随机值
 - [ ] `DOCKER_STORAGE_PATH` 已配置为实际媒体路径

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
+import { API_BASE } from '@/lib/config';
 
 interface SecureImageProps {
   src: string;
@@ -14,10 +15,16 @@ interface SecureImageProps {
 /**
  * SecureImage — 带鉴权的图片组件
  *
- * 对于指向 /api/v1/public/image 的路径，通过 fetch + Authorization Header 获取
- * 图片二进制数据后转为 Blob URL 渲染，绕过浏览器 <img> 标签无法携带 Header 的限制。
+ * 双模式自适应：
+ * - 开发模式（3000+8000）：API_BASE = 'http://localhost:8000/api/v1'（绝对路径）
+ *   → fetch + Authorization header → Blob URL 渲染
+ * - AIO 生产模式（单端口 8000）：API_BASE = '/api/v1'（相对路径）
+ *   → 同样走 fetch + Authorization header → Blob URL 渲染
+ *   → ⚠️ 不能用 <img src> 直接渲染，因为图片代理路由有 JWT 鉴权
  *
- * 对于外部 http(s):// URL，直接透传给原生 <img>，无需鉴权。
+ * 核心约束：
+ * - 上游（MediaTable.getPosterUrl）必须传入原始物理路径，严禁提前拼接 /api/v1/public/image?path=
+ * - 外部链接（TMDB 等 http/https）直通，不做鉴权处理
  */
 export default function SecureImage({
   src,
@@ -27,29 +34,60 @@ export default function SecureImage({
   className,
   fallback,
 }: SecureImageProps) {
+  const [finalUrl, setFinalUrl] = useState<string>('');
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [error, setError] = useState(false);
   const prevBlobUrl = useRef<string | null>(null);
 
-  const isSecureProxy =
-    src.startsWith('/api/v1/public/image') || src.includes('/api/v1/public/image');
-
+  // Step 1: 计算最终请求 URL
   useEffect(() => {
-    // 外部 URL 不走鉴权流程
-    if (!isSecureProxy) {
-      setBlobUrl(src);
+    if (!src) return;
+
+    // 外部图片（TMDB 等）直通，不走鉴权代理
+    if (src.startsWith('http')) {
+      setFinalUrl(src);
       return;
     }
 
+    // 本地物理路径 → 拼接后端代理地址
+    // API_BASE 在开发模式为绝对路径，AIO 模式为相对路径，两种情况都需要 fetch+token
+    const targetPath = src.includes('/public/image?path=')
+      ? src
+      : `${API_BASE}/public/image?path=${encodeURIComponent(src)}`;
+
+    setFinalUrl(targetPath);
+    console.warn('🚀 [SecureImage] 目标地址:', targetPath);
+  }, [src]);
+
+  // Step 2: 用 fetch + Authorization 获取图片，转为 Blob URL
+  useEffect(() => {
+    if (!finalUrl) return;
+
+    // 外部图片（已在 Step 1 判断为 http 开头的绝对 URL 且非本站）直接渲染
+    // 判断条件：绝对 URL 且不包含 /public/image（即不是本站代理路径）
+    const isExternalImage =
+      (finalUrl.startsWith('http://') || finalUrl.startsWith('https://')) &&
+      !finalUrl.includes('/public/image?path=');
+
+    if (isExternalImage) {
+      setBlobUrl(finalUrl);
+      return;
+    }
+
+    // 本站图片代理（无论相对路径还是绝对路径）：必须携带 token
+    // AIO 模式下 <img src> 标签不携带 Authorization，直接渲染会 401
     let cancelled = false;
 
     const fetchImage = async () => {
       try {
-        const token =
-          typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        const token = localStorage.getItem('token');
+        if (!token) {
+          console.warn('🔑 [SecureImage] 无 token，请先登录');
+        }
 
-        const res = await fetch(src, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        // 相对路径需补全为绝对 URL 才能 fetch（浏览器 fetch 支持相对路径，无需处理）
+        const res = await fetch(finalUrl, {
+          headers: { Authorization: `Bearer ${token ?? ''}` },
         });
 
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -58,11 +96,7 @@ export default function SecureImage({
         if (cancelled) return;
 
         const url = URL.createObjectURL(blob);
-
-        // 释放上一个 Blob URL，防止内存泄漏
-        if (prevBlobUrl.current) {
-          URL.revokeObjectURL(prevBlobUrl.current);
-        }
+        if (prevBlobUrl.current) URL.revokeObjectURL(prevBlobUrl.current);
         prevBlobUrl.current = url;
         setBlobUrl(url);
         setError(false);
@@ -72,27 +106,19 @@ export default function SecureImage({
     };
 
     fetchImage();
+    return () => { cancelled = true; };
+  }, [finalUrl]);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [src, isSecureProxy]);
-
-  // 组件卸载时释放 Blob URL
+  // 卸载时释放 Blob URL，防止内存泄漏
   useEffect(() => {
     return () => {
-      if (prevBlobUrl.current) {
-        URL.revokeObjectURL(prevBlobUrl.current);
-      }
+      if (prevBlobUrl.current) URL.revokeObjectURL(prevBlobUrl.current);
     };
   }, []);
 
-  if (error) {
-    return <>{fallback ?? null}</>;
-  }
+  if (error) return <>{fallback ?? null}</>;
 
   if (!blobUrl) {
-    // 加载占位
     return (
       <div
         className={className}
@@ -103,12 +129,6 @@ export default function SecureImage({
 
   return (
     // eslint-disable-next-line @next/next/no-img-element
-    <img
-      src={blobUrl}
-      alt={alt}
-      width={width}
-      height={height}
-      className={className}
-    />
+    <img src={blobUrl} alt={alt} width={width} height={height} className={className} />
   );
 }

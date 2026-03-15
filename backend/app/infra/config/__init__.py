@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str = "your-secret-key-change-in-production"
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_DAYS: int = 7
+
+    # 运行环境: development / production
+    APP_ENV: str = "production"
     
     class Config:
         env_file = ".env"

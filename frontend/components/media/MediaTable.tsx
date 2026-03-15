@@ -149,12 +149,9 @@ function MediaTable({
   const getPosterUrl = (task: Task): string => {
     const posterPath = task.local_poster_path || task.poster_path;
     if (!posterPath) return '/placeholder-poster.jpg';
-
-    if (posterPath.startsWith('http://') || posterPath.startsWith('https://')) {
-      return posterPath;
-    }
-
-    return `/api/v1/public/image?path=${encodeURIComponent(posterPath)}`;
+    // ✅ 直接返回原始路径，由 SecureImage 统一处理 URL 构建与鉴权
+    // 不在此处拼接，避免相对路径绕过 SecureImage 的绝对地址锁定逻辑
+    return posterPath;
   };
 
   const getStatusLabel = (status: string): string => {
