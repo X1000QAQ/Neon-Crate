@@ -18,3 +18,5 @@ PyJWT==2.8.0          # JWT Token 管理
 passlib==1.7.4        # 密码哈希
 bcrypt==3.2.2         # Bcrypt 算法（兼容性版本）
 
+# 系统监控
+psutil==5.9.8         # 系统资源监控（CPU、磁盘使用率）

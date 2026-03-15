@@ -9,6 +9,7 @@ scan_task.py - 物理扫描任务
 import os
 import time
 import logging
+import threading
 from pathlib import Path
 from typing import Dict, Any
 
@@ -24,6 +25,10 @@ from app.api.v1.endpoints.tasks._shared import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# 🚀 物理级并发防重锁：防止前端快速连点触发多个扫描任务同时运行。
+# 设计选择：使用 threading.Lock 而非 asyncio.Lock，因为任务在同步线程池中执行。
+_scan_entry_lock = threading.Lock()
+
 
 # ==========================================
 # 扫描任务执行函数
@@ -37,12 +42,22 @@ def perform_scan_task_sync():
     使用普通同步函数而非 async def，FastAPI 的 BackgroundTasks 会自动将其
     投入外部线程池执行，避免大量同步磁盘 I/O 阻塞主事件循环。
     """
+    # 🚀 物理级并发防重逻辑：
+    # 1. 尝试非阻塞获取锁（blocking=False），若锁已被占用则立即返回，不排队、不等待，直接丢弃冗余请求。
+    # 2. 检查内存状态标记位 is_running，确保逻辑与物理锁状态同步（双重防护）。
+    # 3. 任务执行完毕后在 finally 块中释放锁，确保即使任务崩溃系统也能自愈。
+    if not _scan_entry_lock.acquire(blocking=False):
+        logger.warning("[SCAN] ⚠️ 拦截并发请求：已有扫描任务正在运行中，本次触发已丢弃。")
+        return
+
     global scan_status
 
-    scan_status["is_running"] = True
-    scan_status["error"] = None
-
     try:
+        if scan_status["is_running"]:
+            return
+
+        scan_status["is_running"] = True
+        scan_status["error"] = None
 
         logger.info("[SCAN] 开始执行物理扫描任务...")
 
@@ -383,8 +398,12 @@ def perform_scan_task_sync():
         logger.error(f"[SCAN] 扫描任务执行失败: {str(e)}", exc_info=True)
 
     finally:
-        # 无论任何情况（含 BaseException）都强制解锁，防止按钮永久僵死
+        # 🚀 物理级并发防重逻辑 — 步骤 3：
+        # 无论任务正常结束、抛出异常还是遭遇 BaseException，finally 块确保：
+        # - is_running 复位为 False，解除前端「运行中」UI 锁定
+        # - 释放 threading.Lock，允许下一次任务进入，实现系统自愈
         scan_status["is_running"] = False
+        _scan_entry_lock.release()
 
 
 # ==========================================

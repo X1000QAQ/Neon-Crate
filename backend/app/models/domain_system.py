@@ -108,7 +108,8 @@ class SystemSettings(BaseModel):
     sonarr_api_key: str = ""
     
     # LLM 配置
-    llm_provider: str = "cloud"
+    llm_cloud_enabled: bool = True   # 云端引擎物理开关
+    llm_local_enabled: bool = False  # 本地引擎物理开关
     llm_cloud_url: str = ""
     llm_cloud_key: str = ""
     llm_cloud_model: str = ""
@@ -186,16 +187,72 @@ class ChatRequest(BaseModel):
     message：用户输入的消息（自然语言）
     AI Agent 会根据内容识别意图并路由到对应处理逻辑
     """
-    message: str
+    message: str = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        description="用户消息（长度限制：防止超长输入）"
+    )
+
+
+class PendingActionPayload(BaseModel):
+    """
+    授权决策层载荷：封装需要用户视觉确认的指令及其关联元数据
+
+    下载意图携带 TMDB 元数据，供前端渲染全屏确认界面；
+    其他意图仅携带基础字段。
+
+    action:      意图代码（来自 AIActionEnum 白名单）
+    label:       操作名称
+    description: 操作摘要
+    title:       TMDB 确认片名
+    year:        上映年份
+    poster_url:  TMDB 海报完整 URL
+    overview:    剧情简介
+    media_type:  movie | tv
+    tmdb_id:     TMDB ID（用于精确下载）
+    clean_name:  原始中文片名（fallback 用）
+    en_name:     英文片名
+    """
+    action: str
+    label: str
+    description: str = ""
+    # 下载意图专属元数据
+    title: Optional[str] = None
+    year: Optional[str] = None
+    poster_url: Optional[str] = None
+    overview: Optional[str] = None
+    media_type: Optional[str] = None
+    tmdb_id: Optional[int] = None
+    clean_name: Optional[str] = None
+    en_name: Optional[str] = None
+    # 查重审计结果
+    is_duplicate: bool = False
+    existing_status: Optional[str] = None  # 如「已在库中」「正在监控」「文件缺失」
+
+
+class CandidateItem(BaseModel):
+    """
+    候选影视条目（结构化候选列表单项）
+    """
+    title: str
+    year: str = ""
+    media_type: str = "movie"
+    tmdb_id: Optional[int] = None
 
 
 class ChatResponse(BaseModel):
     """
     AI 对话响应模型
 
-    response：AI 回复的文本内容
-    action：意图代码（如 ACTION_SCAN / DOWNLOAD 等），
-            前端根据此字段触发对应的 UI 操作；None 表示纯聊天
+    response：       AI 回复的文本内容
+    action：         意图代码（如 ACTION_SCAN / DOWNLOAD 等），
+                    前端根据此字段触发对应的 UI 操作；None 表示纯聊天
+    pending_action： 待确认指令载荷，非 None 时前端渲染「指令确认卡片」，等待用户授权
+    candidates：     结构化候选列表，非空时前端渲染交互式选项按钮组
     """
     response: str
     action: Optional[str] = None
+    pending_action: Optional[PendingActionPayload] = None
+    candidates: List[CandidateItem] = []
+    engine_tag: Optional[str] = None  # V2.0 血缘溯源："cloud" | "local" | "local->cloud"

@@ -81,6 +81,46 @@ class StatsRepo(BaseRepository):
                 for r in rows
             ]
 
+    def get_sibling_poster(self, imdb_id: str, media_type: str, season: int = None, episode: int = None) -> Optional[str]:
+        """
+        根据 IMDb ID（+ 剧集维度）查找已归档的同源任务，返回其 local_poster_path。
+        用于 ignored 任务继承同源海报，保证前端视觉效果正常。
+        优先查 media_archive（已归档冷表），再查 tasks 热表。
+        """
+        if not imdb_id or not str(imdb_id).strip():
+            return None
+        _imdb = str(imdb_id).strip()
+        with self.db_lock:
+            conn = self._get_conn()
+            if media_type == "movie":
+                # 电影：按 imdb_id 查，优先取有海报的记录
+                row = conn.execute(
+                    "SELECT local_poster_path FROM media_archive WHERE imdb_id = ? AND type = 'movie' AND local_poster_path IS NOT NULL LIMIT 1",
+                    (_imdb,)
+                ).fetchone()
+                if row:
+                    return row[0]
+                row = conn.execute(
+                    "SELECT local_poster_path FROM tasks WHERE imdb_id = ? AND type = 'movie' AND local_poster_path IS NOT NULL LIMIT 1",
+                    (_imdb,)
+                ).fetchone()
+                return row[0] if row else None
+            elif media_type == "tv":
+                # 剧集：Show 级海报——查同一 imdb_id 的剧集根目录海报
+                # 策略：取同 imdb_id 的任意 archived 记录的 local_poster_path（剧集主海报路径相同）
+                row = conn.execute(
+                    "SELECT local_poster_path FROM media_archive WHERE imdb_id = ? AND type = 'tv' AND local_poster_path IS NOT NULL LIMIT 1",
+                    (_imdb,)
+                ).fetchone()
+                if row:
+                    return row[0]
+                row = conn.execute(
+                    "SELECT local_poster_path FROM tasks WHERE imdb_id = ? AND type = 'tv' AND local_poster_path IS NOT NULL LIMIT 1",
+                    (_imdb,)
+                ).fetchone()
+                return row[0] if row else None
+        return None
+
     def check_media_exists(self, imdb_id: str, media_type: str, season: int = None, episode: int = None) -> bool:
         """检查媒体是否已存在（精确到季集，彻底解决剧集共享 IMDb ID 被连坐误杀问题）"""
         if not imdb_id or not str(imdb_id).strip():

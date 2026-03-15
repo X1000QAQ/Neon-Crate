@@ -49,7 +49,7 @@
  */
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { Film, Tv, Clock, CheckCircle, Radar, Wand2, Subtitles } from 'lucide-react';
 import { api } from '@/lib/api';
 import type { StatsResponse } from '@/types';
@@ -63,33 +63,40 @@ export default function StatsOverview() {
   const [scanning, setScanning] = useState(false);
   const [scraping, setScraping] = useState(false);
   const [findingSubs, setFindingSubs] = useState(false);
+  // 🚀 组件生命周期加固：
+  // 1. 注册追踪：scanBoostTimerRef 追踪高频轮询，toastTimerRef 追踪 Toast 消除
+  // -> 2. 静默清理：useEffect cleanup 取消所有未完成的 clearInterval + clearTimeout
+  // -> 3. 预防报错：防止组件卸载后异步回调尝试 setStats/setToast 更新已卸载的 state
   const scanBoostTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // 🚀 Toast 计时器防抖：多次触发时先取消旧计时器再重新计时，确保提示不会过早消失
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [toast, setToast] = useState<string | null>(null);
 
-  const showToast = (msg: string) => {
+  const showToast = useCallback((msg: string) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     setToast(msg);
-    setTimeout(() => setToast(null), 3000);
-  };
-
-  useEffect(() => {
-    loadStats();
-    // 不再轮询，避免频繁读库。数据在扫描/刮削完成后由按钮回调主动刷新。
-    return () => {
-      if (scanBoostTimerRef.current) clearInterval(scanBoostTimerRef.current);
-    };
+    toastTimerRef.current = setTimeout(() => setToast(null), 3000);
   }, []);
 
-  const loadStats = async () => {
+  const loadStats = useCallback(async () => {
     try {
       const data = await api.getStats();
       setStats(data);
-    } catch (error) {
+    } catch {
       showToast('加载统计数据失败，请刷新重试');
     } finally {
       setLoading(false);
     }
-  };
+  }, [showToast]);
+
+  useEffect(() => {
+    void loadStats();
+    return () => {
+      if (scanBoostTimerRef.current) clearInterval(scanBoostTimerRef.current);
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    };
+  }, [loadStats]);
 
   const handleScan = async () => {
     setScanning(true);
@@ -99,14 +106,49 @@ export default function StatsOverview() {
       if (scanBoostTimerRef.current) {
         clearInterval(scanBoostTimerRef.current);
       }
+      
+      // 🚀 指数退避策略：高频轮询优化
+      // 0-10s: 每1.5s刷新（极速响应用户点击）
+      // 10-30s: 每5s刷新（进入平稳监控）
+      // 30s后: 停止轮询（进入休眠保护）
       const startedAt = Date.now();
+      let phase = 0; // 0: 极速, 1: 平稳, 2: 休眠
+      
       scanBoostTimerRef.current = setInterval(() => {
-        void loadStats();
-        if (Date.now() - startedAt > 30000) {
-          clearInterval(scanBoostTimerRef.current!);
-          scanBoostTimerRef.current = null;
+        const elapsed = Date.now() - startedAt;
+        
+        // 阶段判断
+        if (elapsed < 10000) {
+          // 极速阶段：每1.5s刷新
+          if (phase !== 0) {
+            phase = 0;
+            if (scanBoostTimerRef.current) {
+              clearInterval(scanBoostTimerRef.current);
+            }
+            scanBoostTimerRef.current = setInterval(() => {
+              void loadStats();
+            }, 1500);
+          }
+          void loadStats();
+        } else if (elapsed < 30000) {
+          // 平稳阶段：每5s刷新
+          if (phase !== 1) {
+            phase = 1;
+            if (scanBoostTimerRef.current) {
+              clearInterval(scanBoostTimerRef.current);
+            }
+            scanBoostTimerRef.current = setInterval(() => {
+              void loadStats();
+            }, 5000);
+          }
+        } else {
+          // 休眠阶段：停止轮询
+          if (scanBoostTimerRef.current) {
+            clearInterval(scanBoostTimerRef.current);
+            scanBoostTimerRef.current = null;
+          }
         }
-      }, 1500);
+      }, 1500); // 初始极速阶段间隔
     } catch (error) {
       showToast('扫描触发失败，请重试');
     } finally {

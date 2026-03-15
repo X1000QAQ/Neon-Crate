@@ -116,6 +116,69 @@ class ServarrClient:
             logger.error(f"[TMDB-Recon] 侦察异常: {str(e)}")
             return None
     
+    async def check_existence(self, tmdb_id: int, media_type: str = "movie") -> Dict:
+        """
+        查重审计：通过 TMDB ID 检查资源是否已存在于 Radarr/Sonarr 库中
+
+        Radarr: GET /api/v3/movie/lookup?term=tmdb:{tmdb_id}
+        Sonarr: GET /api/v3/series/lookup?term=tmdb:{tmdb_id}
+
+        判定规则：lookup 返回列表的首项 id > 0 视为库内已存在。
+
+        Args:
+            tmdb_id:    TMDB ID
+            media_type: "movie" | "tv"
+
+        Returns:
+            Dict: {"exists": bool, "status": Optional[str]}
+                  status 取值："已在库中"、"正在监控（文件缺失）"、None
+        """
+        if not tmdb_id:
+            return {"exists": False, "status": None}
+
+        try:
+            if media_type == "tv":
+                base_url = self.db.get_config("sonarr_url", "").strip().rstrip("/")
+                api_key  = self.db.get_config("sonarr_api_key", "").strip()
+                if not base_url or not api_key:
+                    return {"exists": False, "status": None}
+                lookup_url = f"{base_url}/api/v3/series/lookup"
+                headers    = {"X-Api-Key": api_key}
+            else:
+                base_url = self.db.get_config("radarr_url", "").strip().rstrip("/")
+                api_key  = self.db.get_config("radarr_api_key", "").strip()
+                if not base_url or not api_key:
+                    return {"exists": False, "status": None}
+                lookup_url = f"{base_url}/api/v3/movie/lookup"
+                headers    = {"X-Api-Key": api_key}
+
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(
+                    lookup_url,
+                    headers=headers,
+                    params={"term": f"tmdb:{tmdb_id}"},
+                )
+                resp.raise_for_status()
+                items = resp.json()
+
+            if not items:
+                return {"exists": False, "status": None}
+
+            first = items[0]
+            item_id = first.get("id", 0)
+            logger.info(f"[{'Radarr' if media_type == 'movie' else 'Sonarr'}] 查重审计: tmdb:{tmdb_id} -> 库内 ID: {item_id}")
+
+            if item_id and item_id > 0:
+                has_file = first.get("hasFile", False) or first.get("statistics", {}).get("episodeFileCount", 0) > 0
+                status = "已在库中" if has_file else "正在监控（文件缺失）"
+                return {"exists": True, "status": status}
+
+            return {"exists": False, "status": None}
+
+        except Exception as e:
+            logger.warning(f"[Servarr] 查重审计异常（非阻断）: {e}")
+            return {"exists": False, "status": None}
+
     async def add_movie(self, title: str, year: str = "", tmdb_id: int = 0) -> Dict:
         """
         对接 Radarr 添加电影下载任务 (V9.3 AI 原生版)
@@ -297,11 +360,12 @@ class ServarrClient:
                         logger.info(f"[Radarr] 电影已存在（兜底拦截）: {title}")
                         return {
                             "success": True, 
-                            "msg": f"[OK] {title} 已在库中监控补全。", 
+                            "msg": f"{title} 已在监控队列中，已触发补全搜索。", 
                             "data": {"status": "exists"}
                         }
-                except:
-                    pass
+                except Exception as parse_err:
+                    logger.error(f"[Radarr] 400 错误响应解析失败: {parse_err} | 原始数据: {e.response.text}")
+                    return {"success": False, "msg": f"添加失败，Radarr 拒绝了请求: {e.response.status_code}", "data": {}}
             
             error_msg = f"HTTP 错误 {e.response.status_code}: {e.response.text}"
             logger.error(f"[Radarr] {error_msg}")
@@ -465,12 +529,13 @@ class ServarrClient:
                     if "already been added" in error_msg.lower():
                         logger.info(f"[Sonarr] 剧集已存在: {title}")
                         return {
-                            "success": False, 
-                            "msg": f"[OK] {title} 已在库中监控补全。", 
+                            "success": True, 
+                            "msg": f"{title} 已在监控队列中，已触发补全搜索。", 
                             "data": {"status": "exists"}
                         }
-                except:
-                    pass
+                except Exception as parse_err:
+                    logger.error(f"[Sonarr] 400 错误响应解析失败: {parse_err} | 原始数据: {e.response.text}")
+                    return {"success": False, "msg": f"添加失败，Sonarr 拒绝了请求: {e.response.status_code}", "data": {}}
             
             error_msg = f"HTTP 错误 {e.response.status_code}: {e.response.text}"
             logger.error(f"[Sonarr] {error_msg}")

@@ -11,6 +11,7 @@ import glob
 import asyncio
 import time
 import logging
+import threading
 from pathlib import Path
 from typing import Dict, Any
 
@@ -60,6 +61,10 @@ from app.api.v1.endpoints.tasks._shared import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# 🚀 物理级并发防重锁：防止前端快速连点触发多个刮削任务同时运行。
+# 设计选择：使用 threading.Lock 而非 asyncio.Lock，因为任务在同步线程池中执行。
+_scrape_entry_lock = threading.Lock()
+
 
 # ==========================================
 # 刮削任务执行函数
@@ -67,12 +72,22 @@ router = APIRouter()
 
 def perform_scrape_all_task_sync():
     """执行全量刮削任务（同步版本，用于线程池执行）"""
+    # 🚀 物理级并发防重逻辑：
+    # 1. 尝试非阻塞获取锁（blocking=False），若锁已被占用则立即返回，不排队、不等待，直接丢弃冗余请求。
+    # 2. 检查内存状态标记位 is_running，确保逻辑与物理锁状态同步（双重防护）。
+    # 3. 任务执行完毕后在 finally 块中释放锁，确保即使任务崩溃系统也能自愈。
+    if not _scrape_entry_lock.acquire(blocking=False):
+        logger.warning("[SCRAPE] ⚠️ 拦截并发请求：已有刮削任务正在运行中，本次触发已丢弃。")
+        return
+
     global scrape_all_status
 
-    scrape_all_status["is_running"] = True
-    scrape_all_status["error"] = None
-
     try:
+        if scrape_all_status["is_running"]:
+            return
+
+        scrape_all_status["is_running"] = True
+        scrape_all_status["error"] = None
 
         logger.info("[TMDB] 开始全量刮削任务（线程池模式）...")
 
@@ -113,12 +128,8 @@ def perform_scrape_all_task_sync():
 
         logger.info("[AI] AI 决策层已激活，将对所有文件名进行智能提炼")
 
-        # 获取或创建事件循环（线程安全）
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        # 使用 asyncio.run() 在独立线程中创建隔离事件循环（Python 3.10+ 推荐方式）
+        # 避免 get_event_loop() 废弃警告与嵌套 loop 死锁风险
 
         # 逐个处理任务
         processed = 0
@@ -248,7 +259,7 @@ def perform_scrape_all_task_sync():
                 # AI 决策层强制注入
                 logger.info(f"[AI] 调用 AI Agent 分析文件名: {cleaned_filename}")
                 try:
-                    ai_result = loop.run_until_complete(ai_agent.ai_identify_media(
+                    ai_result = asyncio.run(ai_agent.ai_identify_media(
                         cleaned_name=cleaned_filename,
                         full_path=file_path,
                         type_hint=media_type
@@ -406,7 +417,23 @@ def perform_scrape_all_task_sync():
                         )
                         # 兜底：更新干净标题，防止前端显示丑陋的原始乱码
                         db.update_task_title_year(task_id, title, year)
-                        db.update_task_status(task_id, "ignored")
+
+                        # 🚨🚨🚨 架构师警告：神圣不可侵犯的代码块 (DO NOT REMOVE OR INLINE) 🚨🚨🚨
+                        # 当文件被判定为物理重复时，绝对不允许直接 return 或仅仅调用 update_task_status！
+                        # 必须调用 mark_task_as_ignored_and_inherit，该方法原子完成两件事：
+                        #   1. 跨表查找同源已归档任务的 local_poster_path
+                        #   2. 将 ignored 状态 + local_poster_path 一次写入数据库
+                        # 若拆分此调用，前端将出现严重破图（VHS 特效丢失 + 白板空图）！
+                        db.mark_task_as_ignored_and_inherit(
+                            task_id=task_id,
+                            imdb_id=imdb_id,
+                            media_type=refined_type,
+                            season=season_num,
+                            episode=episode_num,
+                            tmdb_id=int(tmdb_id) if tmdb_id else None,
+                        )
+                        # 🚨🚨🚨 架构师警告结束 🚨🚨🚨
+
                         failed_count += 1
                         continue
                     target_path = None
@@ -800,6 +827,11 @@ def perform_scrape_all_task_sync():
     finally:
         # 无论任何情况（含 BaseException）都强制解锁，防止按钮永久僵死
         scrape_all_status["is_running"] = False
+        # 🚀 物理级并发防重逻辑 — 步骤 3：
+        # 无论任务正常结束、抛出异常还是遭遇 BaseException，finally 块确保：
+        # - is_running 复位为 False，解除前端「运行中」UI 锁定
+        # - 释放 threading.Lock，允许下一次任务进入，实现系统自愈
+        _scrape_entry_lock.release()
 
 
 # ==========================================
@@ -822,10 +854,11 @@ async def trigger_scrape_all(background_tasks: BackgroundTasks):
         async def run_scrape_in_thread():
             try:
                 await asyncio.to_thread(perform_scrape_all_task_sync)
-            except Exception as e:
+            except BaseException as e:
                 logger.error(f"[SCRAPE] 后台线程异常: {e}", exc_info=True)
                 scrape_all_status["is_running"] = False
-                scrape_all_status["error"] = str(e)
+                scrape_all_status["error"] = f"严重中断: {str(e)}"
+                raise
 
         background_tasks.add_task(run_scrape_in_thread)
         logger.info("[API] 全量刮削任务已加入后台线程队列")

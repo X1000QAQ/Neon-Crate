@@ -1,27 +1,129 @@
 'use client';
 
-import { Send } from 'lucide-react';
+import { Send, Download, X } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 import { usePathname } from 'next/navigation';
 import { api } from '@/lib/api';
-import type { ChatMessage } from '@/types';
+import type { ChatMessage, PendingActionPayload, CandidateItem } from '@/types';
 import { useLanguage } from '@/hooks/useLanguage';
 
-// 解析候选列表消息，返回 { text, candidates }
-function parseCandidates(content: string): { text: string; candidates: string[] } {
-  const marker = '__CANDIDATES__';
-  const idx = content.indexOf(marker);
-  if (idx === -1) return { text: content, candidates: [] };
-  const text = content.slice(0, idx).trimEnd();
-  try {
-    const candidates = JSON.parse(content.slice(idx + marker.length));
-    return { text, candidates: Array.isArray(candidates) ? candidates : [] };
-  } catch {
-    return { text, candidates: [] };
-  }
-}
-
 // AiSidebar — Quantum Neural-Core
+
+// ── 授权决策层：下载全屏确认模态框 ──────────────────────────────────────
+function DownloadConfirmOverlay({
+  pending,
+  onConfirm,
+  onDeny,
+  confirmLoading,
+}: {
+  pending: PendingActionPayload;
+  onConfirm: () => void;
+  onDeny: () => void;
+  confirmLoading: boolean;
+}) {
+  const CYAN = 'var(--cyber-cyan)';
+  const FONT_A = '"Advent Pro", sans-serif';
+  const FONT_H = 'Hacked, "Advent Pro", monospace';
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center"
+      style={{ background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)', animation: 'overlayIn 0.2s ease' }}
+    >
+      <style dangerouslySetInnerHTML={{ __html: `
+        @keyframes overlayIn { from { opacity:0 } to { opacity:1 } }
+        @keyframes cardUp { from { opacity:0; transform:translateY(20px) } to { opacity:1; transform:translateY(0) } }
+        @keyframes scanline { 0%{top:0%} 100%{top:100%} }
+      ` }} />
+      <div className="relative mx-4 w-full max-w-2xl"
+        style={{ border: '1px solid rgba(0,230,246,0.35)', boxShadow: '0 0 60px rgba(0,230,246,0.15), inset 0 0 40px rgba(0,230,246,0.02)', background: 'rgba(2,8,16,0.97)', animation: 'cardUp 0.25s ease' }}
+      >
+        {/* 扫描线 */}
+        <div className="absolute inset-0 pointer-events-none overflow-hidden" style={{ opacity: 0.04 }}>
+          <div style={{ position:'absolute', left:0, right:0, height:'2px', background:`linear-gradient(to right,transparent,${CYAN},transparent)`, animation:'scanline 4s linear infinite' }} />
+        </div>
+        {/* 顶栏 */}
+        <div className="flex items-center justify-between px-6 py-3" style={{ borderBottom: '1px solid rgba(0,230,246,0.12)' }}>
+          <div className="flex items-center gap-2">
+            <div className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: CYAN, boxShadow:`0 0 8px ${CYAN}` }} />
+            <span className="text-xs tracking-[0.25em] uppercase" style={{ color: CYAN, fontFamily: FONT_A }}>下载授权请求</span>
+          </div>
+          <button onClick={onDeny} className="opacity-40 hover:opacity-100 transition-opacity" style={{ color: CYAN }}><X size={16}/></button>
+        </div>
+        {/* 内容 */}
+        <div className="flex" style={{ minHeight: '320px' }}>
+          {/* 海报 */}
+          <div className="flex-shrink-0 relative overflow-hidden" style={{ width:'200px', borderRight:'1px solid rgba(0,230,246,0.10)' }}>
+            {pending.poster_url ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={pending.poster_url} alt={pending.title||'海报'} className="w-full h-full object-cover" style={{ minHeight:'300px', filter:'brightness(0.9) contrast(1.05)' }} />
+            ) : (
+              <div className="w-full h-full flex items-center justify-center" style={{ minHeight:'300px', background:'rgba(0,230,246,0.03)', color:'rgba(0,230,246,0.18)', fontFamily:FONT_H, fontSize:'11px', letterSpacing:'0.1em' }}>NO POSTER</div>
+            )}
+            <div className="absolute inset-0 pointer-events-none" style={{ background:'linear-gradient(to right,transparent 70%,rgba(2,8,16,0.85) 100%)' }} />
+          </div>
+          {/* 右侧信息 */}
+          <div className="flex-1 flex flex-col justify-between p-6">
+            <div>
+              {/* 查重预警横幅：资源已在库中时显示 */}
+              {pending.is_duplicate && (
+                <div className="flex items-center gap-2 px-3 py-2 mb-4 text-xs font-bold"
+                  style={{ background:'rgba(255,160,0,0.10)', border:'1px solid rgba(255,160,0,0.45)', color:'rgba(255,185,0,0.9)', fontFamily:FONT_A, letterSpacing:'0.06em' }}>
+                  <span style={{ fontSize:'14px' }}>⚠️</span>
+                  <span>该资源已存在于您的媒体库中{pending.existing_status ? `（${pending.existing_status}）` : ''}</span>
+                </div>
+              )}
+              {/* 类型标签 */}
+              <div className="mb-3">
+                <span className="text-[10px] tracking-[0.2em] uppercase px-2 py-0.5"
+                  style={{ border:'1px solid rgba(0,230,246,0.25)', color:'rgba(0,230,246,0.5)', fontFamily:FONT_A }}>
+                  {pending.media_type === 'tv' ? 'TV SERIES' : 'MOVIE'}
+                </span>
+              </div>
+              <h2 className="text-2xl font-bold leading-tight mb-1"
+                style={{ color:CYAN, fontFamily:FONT_H, textShadow:'0 0 20px rgba(0,230,246,0.5)', letterSpacing:'0.03em' }}>
+                {pending.title || pending.clean_name || '未知片名'}
+              </h2>
+              {pending.year && <div className="text-sm mb-4" style={{ color:'rgba(0,230,246,0.4)', fontFamily:FONT_A }}>{pending.year}</div>}
+              <div style={{ height:'1px', background:'rgba(0,230,246,0.07)', marginBottom:'14px' }} />
+              {pending.overview
+                ? <p className="text-xs leading-relaxed line-clamp-6" style={{ color:'rgba(0,230,246,0.48)', fontFamily:FONT_A, lineHeight:'1.75' }}>{pending.overview}</p>
+                : <p className="text-xs" style={{ color:'rgba(0,230,246,0.18)', fontFamily:FONT_A }}>暂无简介</p>
+              }
+            </div>
+            {/* 按钮组 */}
+            <div className="flex gap-3 mt-6">
+              <button onClick={onConfirm} disabled={confirmLoading}
+                className="flex-1 flex items-center justify-center gap-2 py-3 text-sm font-bold tracking-wider transition-all duration-200 disabled:opacity-50"
+                style={{
+                  border: pending.is_duplicate ? '1px solid rgba(255,160,0,0.6)' : `1px solid ${CYAN}`,
+                  background: pending.is_duplicate ? 'rgba(255,160,0,0.08)' : 'rgba(0,230,246,0.07)',
+                  color: pending.is_duplicate ? 'rgba(255,185,0,0.9)' : CYAN,
+                  fontFamily:FONT_A, letterSpacing:'0.12em',
+                  boxShadow: pending.is_duplicate ? '0 0 20px rgba(255,160,0,0.10)' : '0 0 20px rgba(0,230,246,0.08)'
+                }}
+                onMouseEnter={e => { if(!confirmLoading){ const el=e.currentTarget as HTMLElement; el.style.background=pending.is_duplicate?'rgba(255,160,0,0.18)':'rgba(0,230,246,0.16)'; el.style.boxShadow=pending.is_duplicate?'0 0 30px rgba(255,160,0,0.35)':'0 0 30px rgba(0,230,246,0.3)'; }}}
+                onMouseLeave={e => { const el=e.currentTarget as HTMLElement; el.style.background=pending.is_duplicate?'rgba(255,160,0,0.08)':'rgba(0,230,246,0.07)'; el.style.boxShadow=pending.is_duplicate?'0 0 20px rgba(255,160,0,0.10)':'0 0 20px rgba(0,230,246,0.08)'; }}
+              >
+                <Download size={14}/>
+                {confirmLoading ? '执行中...' : (pending.is_duplicate ? '强制重新下载' : '授权下载')}
+              </button>
+              <button onClick={onDeny} disabled={confirmLoading}
+                className="px-5 py-3 text-sm transition-all duration-200 disabled:opacity-50"
+                style={{ border:'1px solid rgba(255,80,80,0.22)', background:'rgba(255,80,80,0.04)', color:'rgba(255,100,100,0.55)', fontFamily:FONT_A, letterSpacing:'0.08em' }}
+                onMouseEnter={e => { if(!confirmLoading){ const el=e.currentTarget as HTMLElement; el.style.background='rgba(255,80,80,0.12)'; el.style.borderColor='rgba(255,80,80,0.5)'; el.style.color='rgba(255,120,120,0.9)'; }}}
+                onMouseLeave={e => { const el=e.currentTarget as HTMLElement; el.style.background='rgba(255,80,80,0.04)'; el.style.borderColor='rgba(255,80,80,0.22)'; el.style.color='rgba(255,100,100,0.55)'; }}
+              >取消</button>
+            </div>
+          </div>
+        </div>
+        {/* 底栏技术信息 */}
+        <div className="px-6 py-2 flex gap-4" style={{ borderTop:'1px solid rgba(0,230,246,0.07)' }}>
+          {pending.tmdb_id && <span className="text-[10px]" style={{ color:'rgba(0,230,246,0.18)', fontFamily:FONT_A }}>TMDB #{pending.tmdb_id}</span>}
+          <span className="text-[10px]" style={{ color:'rgba(0,230,246,0.18)', fontFamily:FONT_A }}>via Radarr / Sonarr</span>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function AiSidebar() {
   const pathname = usePathname();
@@ -35,7 +137,20 @@ export default function AiSidebar() {
   const [visibleIdx, setVisibleIdx] = useState<Set<number>>(new Set());
   const [selectedMsgIdx, setSelectedMsgIdx] = useState<Set<number>>(new Set());
   const [waveAmplitude, setWaveAmplitude] = useState(0);
+  // 授权决策层：下载意图的全屏确认模态框状态
+  const [downloadPending, setDownloadPending] = useState<PendingActionPayload | null>(null);
+  const [confirmLoading, setConfirmLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  // 🚀 异步链路治理：AbortController 全生命周期管理。
+  // 1. 注入信号：每次发送消息时创建新的 AbortController，将其 signal 传入底层 fetch 请求。
+  // 2. 物理掐断：当用户连续发送新消息时，先 abort() 上一个飞行中的请求，浏览器立即切断网络连接。
+  // 3. 资源回收：后端同步捕获 asyncio.CancelledError，释放 LLM 推理资源，避免无效计算堆积。
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  // 组件卸载时中止飞行中的请求
+  useEffect(() => {
+    return () => { abortControllerRef.current?.abort(); };
+  }, []);
 
   const quickCommands = [
     { label: '/scan',    hint: t('ai_quick_scan') },
@@ -59,11 +174,10 @@ export default function AiSidebar() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages]);
 
-  // 恢复：神经波形动画引擎
+  // 神经波形动画引擎
   useEffect(() => {
     let animationFrameId: number;
     const animate = () => {
-      // 放慢量子神经波形速度
       setWaveAmplitude((prev) => (prev + 0.1) % 100);
       animationFrameId = requestAnimationFrame(animate);
     };
@@ -76,11 +190,15 @@ export default function AiSidebar() {
   const handleSendText = async (text: string, displayText?: string) => {
     if (!text.trim() || loading) return;
     const userMsg: ChatMessage = { role: 'user', content: displayText ?? text };
+    // 幽灵取消防护：发送新消息前立即清除 downloadPending，避免竞态触发 handleDownloadDeny
+    setDownloadPending(null);
     // 发送任何消息时，封死当前所有候选消息（防止用户二次选择）
     setMessages(prev => {
       const deadIdxs = new Set(
-        prev.map((m, i) => (m.role === 'assistant' && parseCandidates(m.content).candidates.length > 0 ? i : -1))
-            .filter(i => i >= 0)
+        prev.map((m, i) => {
+          const hasStructured = m.role === 'assistant' && m.candidates && m.candidates.length > 0;
+          return hasStructured ? i : -1;
+        }).filter(i => i >= 0)
       );
       if (deadIdxs.size > 0) setSelectedMsgIdx(p => new Set([...p, ...deadIdxs]));
       return [...prev, userMsg];
@@ -89,21 +207,27 @@ export default function AiSidebar() {
     setMenuOpen(false);
     setLoading(true);
     try {
-      const res = await api.chat(text);
-      setMessages(p => [...p, { role: 'assistant', content: res.response }]);
-      if (res.action === 'ACTION_SCAN') {
-        api.triggerScan().catch((e) => setMessages(p => [...p, { role: 'assistant', content: `扫描触发失败: ${e instanceof Error ? e.message : '未知错误'}` }]));
-        setMessages(p => [...p, { role: 'assistant', content: t('ai_scan_triggered') }]);
-      }
-      if (res.action === 'ACTION_SCRAPE') {
-        api.triggerScrapeAll().catch((e) => setMessages(p => [...p, { role: 'assistant', content: `刮削触发失败: ${e instanceof Error ? e.message : '未知错误'}` }]));
-        setMessages(p => [...p, { role: 'assistant', content: t('ai_scrape_triggered') }]);
-      }
-      if (res.action === 'ACTION_SUBTITLE') {
-        api.triggerFindSubtitles().catch((e) => setMessages(p => [...p, { role: 'assistant', content: `字幕任务触发失败: ${e instanceof Error ? e.message : '未知错误'}` }]));
-        setMessages(p => [...p, { role: 'assistant', content: t('ai_subtitle_triggered') }]);
+      // 🚀 异步链路治理 — 步骤 1：中止上一次飞行中的请求，注入新 AbortController
+      // 确保同一时刻只有最新一条请求的 signal 处于激活状态
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = new AbortController();
+      const res = await api.chat(text, abortControllerRef.current.signal);
+      // 执行权由后端 BackgroundTasks 统一管理，前端仅负责渲染回复文本
+      setMessages(p => [...p, { 
+        role: 'assistant', 
+        content: res.response,
+        candidates: res.candidates && res.candidates.length > 0 ? res.candidates : undefined,
+        engine_tag: res.engine_tag,  // V2.0 血缘溯源标签
+      }]);
+      // 授权决策层：DOWNLOAD 意图携带 pending_action 时弹出全屏确认界面
+      if (res.action === 'DOWNLOAD' && res.pending_action) {
+        setDownloadPending(res.pending_action);
       }
     } catch (e) {
+      // 🚀 异步链路治理 — 步骤 2：物理掐断后的前端静默处理
+      // AbortError 说明这是主动中止（用户连续发送新消息 或 组件卸载），
+      // 属于正常的用户行为而非异常，不应向对话框追加错误气泡，直接 return 静默退出。
+      if (e instanceof Error && e.name === 'AbortError') return;
       const msg = e instanceof Error ? e.message : 'NEURAL LINK ERROR';
       setMessages(p => [...p, { role: 'assistant', content: msg }]);
     } finally {
@@ -118,6 +242,29 @@ export default function AiSidebar() {
     await handleSendText(sent);
   };
 
+  // 授权决策层：用户点击「授权下载」后调用 /confirm 端点执行真正下载
+  const handleDownloadConfirm = async () => {
+    if (!downloadPending || confirmLoading) return;
+    setConfirmLoading(true);
+    try {
+      const payload = JSON.stringify(downloadPending);
+      const res = await api.confirmAction(payload);
+      setDownloadPending(null);
+      setMessages(p => [...p, { role: 'assistant', content: res.response }]);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '授权执行失败';
+      setDownloadPending(null);
+      setMessages(p => [...p, { role: 'assistant', content: `⚠️ ${msg}` }]);
+    } finally {
+      setConfirmLoading(false);
+    }
+  };
+
+  const handleDownloadDeny = () => {
+    setDownloadPending(null);
+    setMessages(p => [...p, { role: 'assistant', content: '已取消下载。' }]);
+  };
+
   const CYAN = 'var(--cyber-cyan)';
   const CYAN_DIM = 'rgba(0,230,246,0.22)';
   const CYAN_MID = 'rgba(0,230,246,0.55)';
@@ -126,6 +273,15 @@ export default function AiSidebar() {
 
   return (
     <>
+      {/* 授权决策层：下载全屏确认模态框 */}
+      {downloadPending && (
+        <DownloadConfirmOverlay
+          pending={downloadPending}
+          onConfirm={handleDownloadConfirm}
+          onDeny={handleDownloadDeny}
+          confirmLoading={confirmLoading}
+        />
+      )}
       {/* === QUANTUM AXIS: wide hit-area + hover glow === */}
       {/* Outer hit zone — wide transparent strip, easy to click */}
       <div
@@ -318,13 +474,17 @@ export default function AiSidebar() {
               // 找到最后一条含候选列表的消息 idx，只有它的按钮是激活的
               let lastCandidateIdx = -1;
               messages.forEach((m, i) => {
-                if (m.role === 'assistant' && parseCandidates(m.content).candidates.length > 0) {
+                if (m.role === 'assistant' && (
+                  (m.candidates && m.candidates.length > 0)
+                )) {
                   lastCandidateIdx = i;
                 }
               });
-              return messages.map((msg, idx) => {
+            return messages.map((msg, idx) => {
                 const visible = visibleIdx.has(idx);
-                const parsed = msg.role === 'assistant' ? parseCandidates(msg.content) : { text: msg.content, candidates: [] };
+                // 结构化候选数据
+                const structuredCandidates: CandidateItem[] = msg.candidates || [];
+                const isActiveCandidates = structuredCandidates.length > 0 && idx === lastCandidateIdx && !selectedMsgIdx.has(idx);
                 return (
                   <div key={idx} style={{
                     display: 'flex',
@@ -336,16 +496,33 @@ export default function AiSidebar() {
                   }}>
                     {msg.role === 'assistant' && (
                       <div className="max-w-[85%] relative group">
-                        <div className="text-sm leading-relaxed whitespace-pre-wrap"
+                        <div className="text-sm leading-relaxed whitespace-pre-wrap break-all"
                           style={{ color: CYAN, fontFamily: FONT_H, textShadow: '0 0 15px rgba(0,230,246,0.6)' }}>
-                          {parsed.text}
+                          {msg.content}
                         </div>
-                        {/* 候选快捷按钮 */}
-                        {parsed.candidates.length > 0 && (
+                        {/* V2.0 血缘溯源：引擎标识角标 */}
+                        {msg.engine_tag && (
+                          <div
+                            className="mt-1 flex items-center gap-1 opacity-30 hover:opacity-100 transition-opacity duration-300 cursor-default select-none"
+                            title={
+                              msg.engine_tag === 'local'         ? 'Edge Node (本地模型)' :
+                              msg.engine_tag === 'cloud'         ? 'Cloud API (云端模型)' :
+                              'Fallback: 本地 → 云端补位'
+                            }
+                          >
+                            <span className="text-[10px] tracking-wider" style={{ fontFamily: FONT_A, color: CYAN }}>
+                              {msg.engine_tag === 'local'         && '🧠'}
+                              {msg.engine_tag === 'cloud'         && '☁️'}
+                              {msg.engine_tag === 'local->cloud'  && '🧠 → ☁️'}
+                            </span>
+                          </div>
+                        )}
+                        {/* 结构化候选按钮（优先） */}
+                        {structuredCandidates.length > 0 && (
                           <div className="mt-3 flex flex-col gap-1.5">
-                            {parsed.candidates.map((opt, oi) => {
-                              // 只有最后一条候选消息且未被选中时激活，其余全部变灰
-                              const isUsed = selectedMsgIdx.has(idx) || idx !== lastCandidateIdx;
+                            {structuredCandidates.map((item, oi) => {
+                              const isUsed = !isActiveCandidates;
+                              const label = item.year ? `${item.title} (${item.year})` : item.title;
                               return (
                                 <button
                                   key={oi}
@@ -353,7 +530,7 @@ export default function AiSidebar() {
                                   onClick={() => {
                                     if (isUsed) return;
                                     setSelectedMsgIdx(p => new Set([...p, idx]));
-                                    setTimeout(() => handleSendText(opt, opt), 50);
+                                    setTimeout(() => handleSendText(label, label), 50);
                                   }}
                                   className="text-left px-3 py-1.5 text-xs transition-all duration-200 relative flex items-center gap-2"
                                   style={{
@@ -370,8 +547,6 @@ export default function AiSidebar() {
                                     el.style.background = 'rgba(0,230,246,0.15)';
                                     el.style.borderColor = 'rgba(0,230,246,0.7)';
                                     el.style.boxShadow = '0 0 12px rgba(0,230,246,0.3)';
-                                    const dot = el.querySelector('.candidate-dot') as HTMLElement;
-                                    if (dot) { dot.style.opacity = '1'; dot.style.boxShadow = `0 0 8px ${CYAN}`; }
                                   }}
                                   onMouseLeave={e => {
                                     if (isUsed) return;
@@ -379,28 +554,12 @@ export default function AiSidebar() {
                                     el.style.background = 'rgba(0,230,246,0.05)';
                                     el.style.borderColor = 'rgba(0,230,246,0.30)';
                                     el.style.boxShadow = 'none';
-                                    const dot = el.querySelector('.candidate-dot') as HTMLElement;
-                                    if (dot) { dot.style.opacity = '0'; dot.style.boxShadow = 'none'; }
                                   }}
                                 >
-                                  <span
-                                    className="candidate-dot"
-                                    style={{
-                                      position: 'absolute',
-                                      left: '-14px',
-                                      top: '50%',
-                                      transform: 'translateY(-50%)',
-                                      width: '6px',
-                                      height: '6px',
-                                      borderRadius: '50%',
-                                      background: CYAN,
-                                      opacity: 0,
-                                      transition: 'opacity 0.2s, box-shadow 0.2s',
-                                      flexShrink: 0,
-                                    }}
-                                  />
                                   <span style={{ opacity: isUsed ? 0.2 : 0.45, marginRight: '4px' }}>{oi + 1}.</span>
-                                  {opt}
+                                  <span>{item.media_type === 'tv' ? '📺' : '🎬'}</span>
+                                  <span>{item.title}</span>
+                                  {item.year && <span style={{ opacity: 0.5 }}>({item.year}){item.media_type === 'tv' ? ' [剧集]' : ''}</span>}
                                 </button>
                               );
                             })}

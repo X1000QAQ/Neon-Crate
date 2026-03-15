@@ -38,7 +38,7 @@ from app.infra.database import get_db_manager
 
 def _setup_logging() -> Path:
     """
-    初始化日志系统
+    初始化日志系统（异步优化版）
     
     日志配置：
     - 文件日志：RotatingFileHandler（10MB 轮转，最多 5 个备份文件）
@@ -46,6 +46,11 @@ def _setup_logging() -> Path:
     - 日志路径：data/logs/app.log（相对于项目根目录）
     - 日志级别：INFO（DEBUG 级别不记录到文件）
     - 日志格式：时间戳 - 模块名 - 级别 - 消息
+    
+    异步优化（新增）：
+    - QueueHandler：主线程写入队列（非阻塞）
+    - QueueListener：后台线程批量写入文件（异步）
+    - 适合高频日志场景（压力测试：5000 条/10秒）
     
     为什么用 RotatingFileHandler？
     - 防止日志文件无限增长耗尽磁盘
@@ -55,6 +60,9 @@ def _setup_logging() -> Path:
     Returns:
         Path: 日志文件路径
     """
+    from logging.handlers import QueueHandler, QueueListener
+    from queue import Queue
+    
     BASE_DIR = Path(__file__).resolve().parent.parent.parent
     log_dir = BASE_DIR / "data" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -65,7 +73,10 @@ def _setup_logging() -> Path:
     root_logger.setLevel(logging.INFO)
     root_logger.handlers.clear()
 
-    # 创建 RotatingFileHandler（即时冲刷模式）
+    # 创建日志队列（异步写入，最多缓存 50000 条，防止高频刮削时丢日志）
+    log_queue = Queue(maxsize=50000)
+    
+    # 创建 RotatingFileHandler（后台线程使用）
     file_handler = RotatingFileHandler(
         filename=str(log_file),
         maxBytes=10 * 1024 * 1024,  # 10MB
@@ -75,7 +86,7 @@ def _setup_logging() -> Path:
     )
     file_handler.setLevel(logging.INFO)
 
-    # 创建 StreamHandler
+    # 创建 StreamHandler（控制台输出）
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
 
@@ -85,14 +96,19 @@ def _setup_logging() -> Path:
     file_handler.setFormatter(formatter)
     console_handler.setFormatter(formatter)
 
-    root_logger.addHandler(file_handler)
+    # 创建 QueueHandler（主线程使用，非阻塞）
+    queue_handler = QueueHandler(log_queue)
+    root_logger.addHandler(queue_handler)
     root_logger.addHandler(console_handler)
 
-    # 强制即时冲刷到磁盘
-    for handler in root_logger.handlers:
-        if hasattr(handler, 'stream'):
-            handler.stream.flush()
+    # 创建 QueueListener（后台线程，批量写入）
+    queue_listener = QueueListener(log_queue, file_handler, respect_handler_level=True)
+    queue_listener.start()
+    
+    # 保存 listener 引用，供 shutdown 时停止
+    root_logger._queue_listener = queue_listener
 
+    logging.info("[OK] 日志系统已启动（异步队列模式）")
     return log_file
 
 
@@ -109,6 +125,25 @@ def _check_environment() -> None:
         logging.warning(f"[WARN] Docker 影音挂载点未找到: {settings.DOCKER_STORAGE_PATH}")
 
     logging.info(f"[INFO] API 文档地址: http://{settings.HOST}:{settings.PORT}/docs")
+
+
+async def _sqlite_maintenance():
+    """SQLite 定期维护：WAL checkpoint + 碎片整理（每 24 轮 Cron 触发一次，约每天一次）"""
+    try:
+        from app.infra.database import get_db_manager
+        db = get_db_manager()
+        conn = db._get_conn()
+        with db.db_lock:
+            # 合并 .wal 到 .db，截断防止 .wal 膨胀
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            # 重建 .db，回收删除操作留下的空洞碎片
+            conn.execute("VACUUM")
+            # VACUUM 后优化查询分析器
+            conn.execute("PRAGMA optimize")
+            conn.commit()
+        logging.info("[CRON] 🟢 SQLite 定期维护完成（WAL checkpoint + VACUUM）")
+    except Exception as e:
+        logging.warning(f"[CRON] 🟡 SQLite 维护失败（非致命）: {e}")
 
 
 async def cron_scanner_loop():
@@ -149,6 +184,7 @@ async def cron_scanner_loop():
     - 失败后 60 秒重试
     """
     default_interval_minutes = 60
+    _maintenance_loops = 0  # SQLite 定期维护计数器（每 24 轮触发一次）
 
     while True:
         try:
@@ -194,7 +230,7 @@ async def cron_scanner_loop():
             # ── 步骤 1：物理扫描 + 智能入库 ────────────────────────
             logging.info("[CRON] ▶ 步骤1 开始物理扫描 + 智能入库...")
             from app.api.v1.endpoints.tasks import perform_scan_task_sync
-            await asyncio.get_event_loop().run_in_executor(None, perform_scan_task_sync)
+            await asyncio.get_running_loop().run_in_executor(None, perform_scan_task_sync)
             logging.info("[CRON] ✔ 步骤1 扫描完成")
 
             # ── 步骤 2：自动刮削（可选）────────────────────────────
@@ -207,7 +243,7 @@ async def cron_scanner_loop():
                 if scrape_all_status["is_running"]:
                     logging.warning("[CRON] 刮削任务正在执行中，本轮跳过")
                 else:
-                    await asyncio.get_event_loop().run_in_executor(
+                    await asyncio.get_running_loop().run_in_executor(
                         None, perform_scrape_all_task_sync
                     )
                     logging.info("[CRON] ✔ 步骤2 刮削完成")
@@ -222,7 +258,7 @@ async def cron_scanner_loop():
                     if find_subtitles_status["is_running"]:
                         logging.warning("[CRON] 字幕任务正在执行中，本轮跳过")
                     else:
-                        await asyncio.get_event_loop().run_in_executor(
+                        await asyncio.get_running_loop().run_in_executor(
                             None, perform_find_subtitles_task_sync
                         )
                         logging.info("[CRON] ✔ 步骤3 字幕搜索完成")
@@ -230,6 +266,12 @@ async def cron_scanner_loop():
                     logging.debug("[CRON] auto_subtitles=OFF，跳过字幕步骤")
             else:
                 logging.debug("[CRON] auto_scrape=OFF，跳过刮削和字幕步骤")
+
+            # ── SQLite 定期维护（每 24 轮约 1 天触发一次）──────────
+            _maintenance_loops += 1
+            if _maintenance_loops >= 24:
+                await _sqlite_maintenance()
+                _maintenance_loops = 0
 
             logging.info(f"[CRON] 本轮流水线结束，{interval_minutes} 分钟后执行下一轮")
             # 🚀 高敏心跳睡眠：将漫长的睡眠切分为 10 秒一次的微小阻塞，确保即时响应前端配置变更
@@ -324,4 +366,11 @@ async def lifespan(app):
         await cron_task
     except asyncio.CancelledError:
         pass
+    
+    # 关闭日志队列监听器（新增）
+    root_logger = logging.getLogger()
+    if hasattr(root_logger, '_queue_listener'):
+        root_logger._queue_listener.stop()
+        logging.info("[OK] 日志队列监听器已停止")
+    
     logging.info("[STOP] Neon Crate Server 正在关闭...")

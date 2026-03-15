@@ -23,7 +23,7 @@
  */
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { Loader2, AlertTriangle } from 'lucide-react';
 import { api } from '@/lib/api';
@@ -33,18 +33,23 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
   const { t } = useLanguage();
-  
+
   const [isChecking, setIsChecking] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isExiting, setIsExiting] = useState(false); // 退出动画状态
-  const [showBypass, setShowBypass] = useState(false); // 超时后显示强制跳过按钮
+  const [isExiting, setIsExiting] = useState(false);
+  const [showBypass, setShowBypass] = useState(false);
+  // 🚀 组件生命周期加固：
+  // 1. 注册追踪：将所有运行时产生的 setTimeout ID 集中存入 useRef 数组，而非分散管理
+  // -> 2. 静默清理：useEffect cleanup 遍历并 clearTimeout 所有未完成的计时器
+  // -> 3. 预防报错：防止组件卸载后异步回调尝试更新已不存在的 state，
+  //    避免 React "unmounted component" 警告与潜在内存泄漏
+  const timerRefs = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   useEffect(() => {
-    checkAuth();
-  }, [pathname]);
+    return () => { timerRefs.current.forEach(clearTimeout); };
+  }, []);
 
-  const checkAuth = async () => {
-    // 如果已经在登录页，不需要检查
+  const checkAuth = useCallback(async () => {
     if (pathname === '/auth/login') {
       setIsChecking(false);
       return;
@@ -54,29 +59,23 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
     let authCheckComplete = false;
 
     try {
-      // 检查系统是否已初始化
       const status = await api.authStatus();
 
       if (!status.initialized) {
-        // 系统未初始化，跳转到登录页进行初始化
         router.push('/auth/login');
         return;
       }
 
-      // 检查是否有 Token
       const token = localStorage.getItem('token');
       if (!token) {
-        // 无 Token，跳转登录
         router.push('/auth/login');
         return;
       }
 
-      // Token 存在，允许访问
       setIsAuthenticated(true);
       authCheckComplete = true;
     } catch (err) {
       console.error('Auth check failed:', err);
-      // 检查失败，跳转登录
       router.push('/auth/login');
       return;
     }
@@ -85,32 +84,32 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
     const elapsed = Date.now() - startTime;
     const remainingTime = Math.max(0, 1500 - elapsed);
 
-    setTimeout(() => {
+    timerRefs.current.push(setTimeout(() => {
       if (authCheckComplete) {
-        // 触发退出动画
         setIsExiting(true);
-        // 300ms 后完全移除加载界面
-        setTimeout(() => {
+        timerRefs.current.push(setTimeout(() => {
           setIsChecking(false);
-        }, 300);
+        }, 300));
       }
-    }, remainingTime);
+    }, remainingTime));
 
     // 超时保护：5秒后显示强制跳过按钮
-    setTimeout(() => {
-      if (isChecking) {
-        setShowBypass(true);
-      }
-    }, 5000);
-  };
+    timerRefs.current.push(setTimeout(() => {
+      setShowBypass(true);
+    }, 5000));
+  }, [pathname, router]);
+
+  useEffect(() => {
+    checkAuth();
+  }, [pathname, checkAuth]);
 
   // 强制跳过加载（用于超时或连接失败）
   const handleBypass = () => {
     setIsExiting(true);
-    setTimeout(() => {
+    timerRefs.current.push(setTimeout(() => {
       setIsChecking(false);
       setIsAuthenticated(true);
-    }, 300);
+    }, 300));
   };
 
   // 登录页直接渲染
@@ -121,7 +120,7 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
   // 检查中显示加载状态
   if (isChecking) {
     return (
-      <div 
+      <div
         className={`min-h-screen bg-black flex flex-col items-center justify-center relative overflow-hidden transition-all duration-300 ${
           isExiting ? 'opacity-0 scale-105' : 'opacity-100 scale-100'
         }`}
@@ -141,12 +140,6 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
 
         {/* 中央加载器 */}
         <div className="relative flex flex-col items-center gap-6">
-          {/* 
-            旋转加载图标
-            - 外框: 6px 偏移边框
-            - 内框: 20x20 容器
-            - 图标: 10x10 旋转动画
-          */}
           <div className="relative">
             <div className="absolute -inset-6 border border-cyber-cyan/30" />
             <div className="relative flex h-20 w-20 items-center justify-center border border-cyber-cyan/70 bg-black">
@@ -169,7 +162,7 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
           {showBypass && (
             <button
               onClick={handleBypass}
-              className="mt-8 px-6 py-3 bg-transparent border-2 border-orange-400 text-orange-400 font-semibold uppercase tracking-widest hover:bg-orange-400 hover:text-black transition-all animate-pulse"
+              className="mt-8 px-6 py-3 bg-transparent border-2 border-orange-400 text-orange-400 font-semibold uppercase tracking-widest hover:bg-orange-400 hover:text-black transition-all"
               style={{
                 boxShadow: '0 0 20px rgba(251, 146, 60, 0.4)',
                 animation: 'fade-in 0.5s ease-out'

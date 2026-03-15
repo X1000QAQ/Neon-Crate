@@ -11,6 +11,7 @@ import glob
 import os
 import time
 import logging
+import threading
 from typing import Dict, Any
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
@@ -92,6 +93,10 @@ from app.api.v1.endpoints.tasks._shared import find_subtitles_status
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# 🚀 物理级并发防重锁：防止前端快速连点触发多个字幕任务同时运行。
+# 设计选择：使用 threading.Lock 而非 asyncio.Lock，因为任务在同步线程池中执行。
+_subtitle_entry_lock = threading.Lock()
+
 
 # ==========================================
 # 字幕任务执行函数
@@ -102,37 +107,37 @@ def perform_find_subtitles_task_sync():
     执行全量字幕补完任务（同步版本，用于线程池执行）
     
     核心流程：
-    1. 获取待字幕任务：从数据库查询 sub_status 为 pending/failed/missing 的任务
-    2. 本地字幕白嫖：若目标路径已有字幕，直接跳过下载
-    3. 调用字幕引擎：逐个任务调用 OpenSubtitles API
-    4. AI 命名规范：将下载的字幕重命名为标准格式
-    5. 更新数据库：写回字幕状态
-    6. 频率限制保护：每个任务间隔 5 秒，防止 API 封号
+    1. 获取待字幕任务 -> 2. 本地字幕白嫖（已有字幕直接跳过）-> 3. 调用 OpenSubtitles API
+    -> 4. AI 命名规范重命名 -> 5. 写回数据库状态 -> 6. 遵守频率限制休眠 5 秒防封号
     
-    字幕白嫖前置拦截：
-    - 检测策略：检查目标路径是否已有字幕文件
-    - 支持格式：.srt、.ass、.vtt、.sub、.idx
-    - 匹配策略：
-      1. 严格匹配：视频文件名 + 字幕扩展名
-      2. 通配匹配：视频文件名.*.srt（多语言字幕）
-      3. 模糊匹配：同目录下任何字幕（电影）或季集号匹配（剧集）
+    字幕白嫖前置拦截（支持格式：.srt/.ass/.vtt/.sub/.idx）：
+    1. 严格匹配：视频文件名 + 字幕扩展名 -> 2. 通配匹配：文件名.*.srt（多语言）
+    -> 3. 模糊匹配：同目录任意字幕（电影）或季集号匹配（剧集）
     
     AI 命名规范后处理：
-    - 原始格式：OpenSubtitles 返回的文件名（如 movie.srt）
-    - 标准格式：视频文件名.ai.语言代码.扩展名（如 The.Matrix.1999.ai.zh-CN.srt）
-    - 语言代码：zh-CN（简体）、zh-TW（繁体）、en（英文）
+    1. 读取原始文件名（如 movie.srt）-> 2. 重命名为「视频名.ai.语言码.扩展名」标准格式
+    -> 3. 语言代码：zh-CN（简体）/ zh-TW（繁体）/ en（英文）
     
     频率限制保护：
-    - OpenSubtitles API 限制：每秒最多 1 个请求
-    - 保护策略：每个任务完成后休眠 5 秒
-    - 防封号：严格遵守 API 频率限制，避免账号被封
+    1. 每个任务完成后强制休眠 5 秒 -> 2. 遵守 OpenSubtitles 每秒最多 1 请求限制
+    -> 3. 防止因高频调用导致账号被封
     """
     global find_subtitles_status
 
-    find_subtitles_status["is_running"] = True
-    find_subtitles_status["error"] = None
+    # 🚀 物理级并发防重逻辑：
+    # 1. 尝试非阻塞获取锁（blocking=False），若锁已被占用则立即返回，不排队、不等待，直接丢弃冗余请求。
+    # 2. 检查内存状态标记位 is_running，确保逻辑与物理锁状态同步（双重防护）。
+    # 3. 任务执行完毕后在 finally 块中释放锁，确保即使任务崩溃系统也能自愈。
+    if not _subtitle_entry_lock.acquire(blocking=False):
+        logger.warning("[SUBTITLE] ⚠️ 拦截并发请求：已有字幕任务正在运行中，本次触发已丢弃。")
+        return
 
     try:
+        if find_subtitles_status["is_running"]:
+            return
+
+        find_subtitles_status["is_running"] = True
+        find_subtitles_status["error"] = None
 
         logger.info("[API] 开始查找字幕任务（线程池模式）...")
 
@@ -163,12 +168,8 @@ def perform_find_subtitles_task_sync():
         from app.services.subtitle.engine import SubtitleFatalError
         subtitle_engine = SubtitleEngine(api_key=api_key, user_agent=user_agent)
 
-        # 获取或创建事件循环（线程安全）
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        # 使用 asyncio.run() 在独立线程中创建隔离事件循环（Python 3.10+ 推荐方式）
+        # 避免 get_event_loop() 废弃警告与嵌套 loop 死锁风险
 
         # 逐个处理任务
         processed = 0
@@ -217,7 +218,7 @@ def perform_find_subtitles_task_sync():
                 logger.info(f"[SUBTITLE] 处理任务: {file_path}")
 
                 # 调用字幕下载（使用事件循环驱动协程）
-                result = loop.run_until_complete(subtitle_engine.download_subtitle_for_task(
+                result = asyncio.run(subtitle_engine.download_subtitle_for_task(
                     db_manager=db,
                     file_path=file_path,
                     tmdb_id=tmdb_id,
@@ -301,8 +302,13 @@ def perform_find_subtitles_task_sync():
         logger.error(f"[API] 查找字幕执行失败: {str(e)}")
 
     finally:
-        # 无论任何情况（含 BaseException）都强制解锁，防止按钮永久僵死
+        # 🚀 物理级并发防重逻辑 — 步骤 3：
+        # 无论任务正常结束、抛出异常还是遭遇 BaseException，finally 块确保：
+        # - is_running 复位为 False，解除前端「运行中」UI 锁定
+        # - 释放 threading.Lock，允许下一次任务进入，实现系统自愈
         find_subtitles_status["is_running"] = False
+        _subtitle_entry_lock.release()
+        _subtitle_entry_lock.release()
 
 
 # ==========================================

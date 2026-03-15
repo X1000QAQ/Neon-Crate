@@ -213,12 +213,14 @@ export function NeuralCoreSwitch({
         type="button"
         onClick={onToggle}
         className={cn(
-          'relative rounded-full transition-all',
+          'relative rounded-full transition-all shrink-0',
           'hover:scale-110 focus:outline-none'
         )}
         style={{
           width: px,
           height: px,
+          minWidth: px,
+          minHeight: px,
           background: active
             ? 'radial-gradient(circle, rgba(0, 230, 246, 0.85) 0%, rgba(0, 230, 246, 0.28) 52%, rgba(0, 0, 0, 0) 100%)'
             : 'radial-gradient(circle, rgba(0, 230, 246, 0.18) 0%, rgba(0, 0, 0, 0) 70%)',

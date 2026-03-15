@@ -10,11 +10,48 @@
  */
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, memo } from 'react';
 import { Terminal } from 'lucide-react';
 import type { LogEntry } from '@/types';
 import { useLanguage } from '@/hooks/useLanguage';
 import { useLogs } from '@/hooks/useLogs';
+
+// ── 纯函数提升到组件外：避免每次渲染重新创建，确保 React.memo 有效 ──
+function levelColor(level: string): string {
+  switch ((level || '').toUpperCase()) {
+    case 'ERROR': return 'text-cyber-red';
+    case 'WARNING': return 'text-cyber-yellow';
+    case 'DEBUG': return 'text-cyber-cyan/40';
+    default: return 'text-cyber-cyan';
+  }
+}
+
+function levelBorderColor(level: string): string {
+  switch ((level || '').toUpperCase()) {
+    case 'ERROR': return 'border-cyber-red shadow-[0_0_8px_rgba(255,0,60,0.6)]';
+    case 'WARNING': return 'border-cyber-yellow shadow-[0_0_6px_rgba(255,215,0,0.4)]';
+    case 'DEBUG': return 'border-cyber-cyan/20';
+    default: return 'border-cyber-cyan/30';
+  }
+}
+
+function safeMessage(msg: unknown): string {
+  if (typeof msg === 'object' && msg !== null) return JSON.stringify(msg);
+  return String(msg || '');
+}
+
+// ── React.memo 记忆化日志行：key 由时间戳保证唯一，避免全量重绘 ──
+const LogRow = memo(function LogRow({ log, idx }: { log: LogEntry; idx: number }) {
+  return (
+    <div
+      className={`terminal-row text-cyber-cyan py-2 px-3 bg-black/20 border-l-2 ${levelBorderColor(log.level)} hover:border-cyber-cyan hover:bg-black/40 hover:shadow-[0_0_12px_rgba(0,230,246,0.3)] transition-all duration-200`}
+    >
+      <span className="text-cyber-cyan/50 mr-3">[{String(idx + 1).padStart(2, '0')}]</span>
+      <span className={levelColor(log.level)}>[{log.level}]</span>
+      <span className="text-cyber-cyan/90 ml-2">{safeMessage(log.message)}</span>
+    </div>
+  );
+});
 
 /** 最多展示最新 50 条过滤后日志，防止 DOM 节点过多影响性能 */
 const MINI_LOG_LINES = 50;
@@ -24,7 +61,6 @@ const MIN_DISPLAY_LINES = 8;
 export default function MiniLog() {
   const { t } = useLanguage();
   const { logs, error } = useLogs();
-  const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   // 防御性数据处理：确保 logs 始终是数组
@@ -81,32 +117,6 @@ export default function MiniLog() {
     } as LogEntry);
   }
 
-  const levelColor = (level: string) => {
-    switch ((level || '').toUpperCase()) {
-      case 'ERROR': return 'text-cyber-red';
-      case 'WARNING': return 'text-cyber-yellow';
-      case 'DEBUG': return 'text-cyber-cyan/40';
-      default: return 'text-cyber-cyan';
-    }
-  };
-
-  const levelBorderColor = (level: string) => {
-    switch ((level || '').toUpperCase()) {
-      case 'ERROR': return 'border-cyber-red shadow-[0_0_8px_rgba(255,0,60,0.6)]';
-      case 'WARNING': return 'border-cyber-yellow shadow-[0_0_6px_rgba(255,215,0,0.4)]';
-      case 'DEBUG': return 'border-cyber-cyan/20';
-      default: return 'border-cyber-cyan/30';
-    }
-  };
-
-  // 渲染安全检查：确保 message 始终是字符串
-  const safeMessage = (msg: any): string => {
-    if (typeof msg === 'object' && msg !== null) {
-      return JSON.stringify(msg);
-    }
-    return String(msg || '');
-  };
-
   return (
     <div
       className="relative bg-transparent border border-cyber-cyan/50 p-6 overflow-hidden"
@@ -127,21 +137,18 @@ export default function MiniLog() {
           {t('ui_holographic_stream')}
         </h3>
       </div>
-      <div ref={containerRef} className="space-y-2 font-mono text-sm h-[300px] overflow-y-auto relative z-10">
+      <div ref={containerRef} className="space-y-2 font-mono text-sm h-[300px] overflow-y-auto relative z-10" style={{ contain: 'content' }}>
         {error && (
           <div className="text-cyber-red py-2 px-3 bg-black/20 border-l-2 border-cyber-red shadow-[0_0_8px_rgba(255,0,60,0.6)]">
             {error}
           </div>
         )}
         {displayLogs.map((log, idx) => (
-          <div
-            key={log.id || log.timestamp || `log-${idx}`}
-            className={`terminal-row text-cyber-cyan py-2 px-3 bg-black/20 border-l-2 ${levelBorderColor(log.level)} hover:border-cyber-cyan hover:bg-black/40 hover:shadow-[0_0_12px_rgba(0,230,246,0.3)] transition-all duration-200`}
-          >
-            <span className="text-cyber-cyan/50 mr-3">[{String(idx + 1).padStart(2, '0')}]</span>
-            <span className={levelColor(log.level)}>[{log.level}]</span>
-            <span className="text-cyber-cyan/90 ml-2">{safeMessage(log.message)}</span>
-          </div>
+          <LogRow
+            key={log.timestamp ? `${log.timestamp}-${idx}` : `placeholder-${idx}`}
+            log={log}
+            idx={idx}
+          />
         ))}
       </div>
       

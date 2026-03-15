@@ -152,6 +152,13 @@ async def get_all_tasks(
             if "file_path" not in normalized_task:
                 normalized_task["file_path"] = normalized_task.get("path") or ""
 
+            # 4) 🚀 全栈契约对齐：
+            #    1. 遍历任务结果集，将数据库 NULL 值转化为前端 TypeScript 期望的非空字符串。
+            #    2. 预防白屏：防止前端执行时间字符串操作（如 .substring）时因 null 抛出 TypeError。
+            #    (前端 types/index.ts 将 created_at 定义为必填 string，后端 Optional[str] 需在此层兜底)
+            if not normalized_task.get("created_at"):
+                normalized_task["created_at"] = ""
+
             normalized_tasks.append(normalized_task)
 
         # media_type 过滤（archived 模式下也生效）

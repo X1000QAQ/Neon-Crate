@@ -7,7 +7,7 @@ export interface Task {
   file_path: string;
   file_name?: string;
   media_type: 'movie' | 'tv';
-  status: 'pending' | 'archived' | 'failed' | 'ignored';
+  status: 'pending' | 'archived' | 'failed' | 'ignored' | 'match failed' | 'scraped';
   tmdb_id?: number;
   imdb_id?: string;
   title?: string;
@@ -15,7 +15,7 @@ export interface Task {
   poster_path?: string;
   local_poster_path?: string;
   target_path?: string;
-  sub_status?: 'pending' | 'success' | 'failed' | 'missing';
+  sub_status?: 'pending' | 'failed' | 'missing' | 'scraped' | 'found';
   season?: number | null;
   episode?: number | null;
   created_at: string;
@@ -40,14 +40,46 @@ export interface ScanResponse {
   task_id?: string | null;
 }
 
+// 授权决策层：下载意图的视觉确认载荷，携带元数据供前端渲染全屏确认界面
+export interface PendingActionPayload {
+  action: string;       // 意图代码（如 DOWNLOAD）
+  label: string;        // 操作名称（如「下载」）
+  description: string;  // 操作摘要
+  // 下载意图专属元数据
+  title?: string;       // TMDB 确认片名
+  year?: string;        // 上映年份
+  poster_url?: string;  // TMDB 海报完整 URL
+  overview?: string;    // 剧情简介
+  media_type?: string;  // movie | tv
+  tmdb_id?: number;     // TMDB ID（用于精确下载）
+  clean_name?: string;  // 原始中文片名（fallback 用）
+  en_name?: string;     // 英文片名
+  // 查重审计结果
+  is_duplicate?: boolean;       // 是否已在库中
+  existing_status?: string;     // 存在状态描述（如「已在库中」「正在监控」）
+}
+
+// 结构化候选列表单项
+export interface CandidateItem {
+  title: string;
+  year: string;
+  media_type: string;
+  tmdb_id?: number;
+}
+
 export interface ChatResponse {
   response: string;
   action?: string;
+  pending_action?: PendingActionPayload;
+  candidates?: CandidateItem[];
+  engine_tag?: string;  // V2.0 血缘溯源："cloud" | "local" | "local->cloud"
 }
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
+  engine_tag?: string;  // V2.0 气泡标识用
+  candidates?: import('./index').CandidateItem[];
 }
 
 export interface LogEntry {
@@ -72,7 +104,8 @@ export interface SystemSettings {
   radarr_api_key: string;
   sonarr_url: string;
   sonarr_api_key: string;
-  llm_provider: string;
+  llm_cloud_enabled: boolean;
+  llm_local_enabled: boolean;
   llm_cloud_url: string;
   llm_cloud_key: string;
   llm_cloud_model: string;

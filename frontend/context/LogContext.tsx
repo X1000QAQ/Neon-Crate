@@ -10,8 +10,8 @@ const MAX_LOG_LINES = 200;      // 全量上限，防止内存无限增长
 interface LogContextValue {
   /** 全量原始日志（最近 MAX_LOG_LINES 条）*/
   logs: LogEntry[];
-  /** 首次加载状态 */
-  isLoading: boolean;
+  /** 首次加载状态（仅在 logs 为空时为 true，后续轮询不触发此状态）*/
+  isInitialLoading: boolean;
   /** 上次请求错误信息 */
   error: string | null;
   /** 手动立即拉取一次（供手动刷新使用）*/
@@ -22,7 +22,8 @@ export const LogContext = createContext<LogContextValue | null>(null);
 
 export function LogProvider({ children }: { children: React.ReactNode }) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  // isInitialLoading：仅在 logs 为空时为 true，后续轮询静默更新，不触发黑屏加载
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const fetchLogs = useCallback(async () => {
@@ -34,7 +35,8 @@ export function LogProvider({ children }: { children: React.ReactNode }) {
     } catch (e) {
       setError((e as Error).message);
     } finally {
-      setIsLoading(false);
+      // 首次请求完成后关闭初始加载状态，后续轮询不再修改此值
+      setIsInitialLoading(false);
     }
   }, []);
 
@@ -52,8 +54,8 @@ export function LogProvider({ children }: { children: React.ReactNode }) {
   }, [fetchLogs]);
 
   const contextValue = useMemo(
-    () => ({ logs, isLoading, error, fetchNow: fetchLogs }),
-    [logs, isLoading, error, fetchLogs]
+    () => ({ logs, isInitialLoading, error, fetchNow: fetchLogs }),
+    [logs, isInitialLoading, error, fetchLogs]
   );
 
   return (

@@ -491,6 +491,95 @@ class TaskRepo(BaseRepository):
                 logger.warning(f"[TaskRepo] reset_orphan_pending_tasks 失败: {e}")
                 return 0
 
+    def mark_task_as_ignored_and_inherit(
+        self,
+        task_id: int,
+        is_archive: bool,
+        imdb_id: Optional[str] = None,
+        tmdb_id: Optional[str] = None
+    ) -> bool:
+        """
+        🚨 架构级原子操作：标记任务为 ignored 并继承同源海报路径
+        
+        触发场景：文件被 IMDb 重复检测判定为物理副本（PT 做种重复文件）
+        
+        执行流程（必须原子）：
+        1. 跨表检索：从 media_archive/tasks 检索同源海报路径
+        2. 状态原子写入：一次性写入 ignored + local_poster_path + imdb_id + tmdb_id
+        3. 视觉防护：确保前端获得海报路径，正确触发 VHS TAPE ERROR 特效
+        
+        Args:
+            task_id: 任务 ID
+            is_archive: True=冷表，False=热表
+            imdb_id: IMDb ID（用于查找同源文件）
+            tmdb_id: TMDB ID
+        
+        Returns:
+            bool: 是否成功标记
+        """
+        with self.db_lock:
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN")
+                
+                # 1. 跨表检索同源海报路径
+                inherited_poster = None
+                if imdb_id:
+                    # 从 media_archive 查找同源文件
+                    cursor = conn.execute(
+                        "SELECT local_poster_path FROM media_archive WHERE imdb_id = ? AND local_poster_path IS NOT NULL LIMIT 1",
+                        (imdb_id,)
+                    )
+                    row = cursor.fetchone()
+                    inherited_poster = row[0] if row else None
+                    
+                    # 如果冷表没找到，从热表查找
+                    if not inherited_poster:
+                        cursor = conn.execute(
+                            "SELECT local_poster_path FROM tasks WHERE imdb_id = ? AND local_poster_path IS NOT NULL LIMIT 1",
+                            (imdb_id,)
+                        )
+                        row = cursor.fetchone()
+                        inherited_poster = row[0] if row else None
+                
+                # 2. 原子写入：一次性更新所有字段
+                table = "media_archive" if is_archive else "tasks"
+                pk_field = "original_task_id" if is_archive else "id"
+                
+                updates = ["status = 'ignored'"]
+                params = []
+                
+                if inherited_poster:
+                    updates.append("local_poster_path = ?")
+                    params.append(inherited_poster)
+                
+                if imdb_id:
+                    updates.append("imdb_id = ?")
+                    params.append(imdb_id)
+                
+                if tmdb_id:
+                    updates.append("tmdb_id = ?")
+                    params.append(tmdb_id)
+                
+                params.append(task_id)
+                
+                cursor = conn.execute(
+                    f"UPDATE {table} SET {', '.join(updates)} WHERE {pk_field} = ?",
+                    params
+                )
+                
+                conn.commit()
+                logger.info(
+                    f"[TaskRepo] 🚨 原子操作：标记任务 {task_id} 为 ignored，"
+                    f"继承海报: {inherited_poster}, imdb_id: {imdb_id}"
+                )
+                return cursor.rowcount > 0
+                
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"[TaskRepo] 原子操作失败: {e}", exc_info=True)
+                raise
+
     # ==========================================
     # 任务删除
     # ==========================================

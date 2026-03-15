@@ -80,6 +80,7 @@
  */
 'use client';
 
+import { useState, memo } from 'react';
 import { Film, Tv, RefreshCw, Trash2, AlertCircle } from 'lucide-react';
 
 /**
@@ -98,7 +99,7 @@ function getProgress(status: string, subStatus?: string | null): number {
   const ss = (subStatus || '').toLowerCase();
   if (s === 'pending') return 30;
   if (s === 'archived' || s === 'scraped') {
-    if (ss === 'scraped' || ss === 'found' || ss === 'success') return 100;
+    if (ss === 'scraped' || ss === 'found') return 100;
     return 60;
   }
   return 0;
@@ -121,7 +122,7 @@ interface MediaTableProps {
   onDelete: (taskId: number) => void;  // 删除单条任务记录（仅数据库，不删物理文件）
 }
 
-export default function MediaTable({
+function MediaTable({
   loading,
   tasks,
   selectedIds,
@@ -134,6 +135,8 @@ export default function MediaTable({
   onDelete,
 }: MediaTableProps) {
   const { t } = useLanguage();
+  // 🚀 飞行期防护：记录正在处理中的任务 ID，防止连点重复请求
+  const [processingId, setProcessingId] = useState<number | null>(null);
 
   /**
    * 构建海报图片 URL
@@ -357,10 +360,7 @@ export default function MediaTable({
                 */
                 <div
                   key={task.id}
-                  className={cn(
-                    "relative bg-transparent border border-cyber-cyan/30 p-3 hover:border-cyber-cyan hover:bg-cyber-cyan/5transition-all group",
-                    "relative bg-transparent border border-cyber-cyan/30 p-3 hover:border-cyber-cyan hover:bg-cyber-cyan/5transition-all group"
-                  )}
+                  className="relative bg-transparent border border-cyber-cyan/30 p-3 hover:border-cyber-cyan hover:bg-cyber-cyan/5 transition-all group"
                   style={{
                     backdropFilter: 'blur(25px)', // 毛玻璃: 25px模糊半径
                     boxShadow: '0 0 40px rgba(6, 182, 212, 0.2)', // 外层发光: 40px扩散
@@ -408,6 +408,18 @@ export default function MediaTable({
                                 width={64}
                                 height={96}
                                 className="object-cover w-full h-full opacity-80 group-hover/poster:opacity-100 group-hover/poster:scale-110 transition-all duration-300"
+                                fallback={
+                                  <div className="w-full h-full flex flex-col items-center justify-center bg-black/40">
+                                    {task.media_type === 'movie' ? (
+                                      <Film className="text-cyber-cyan/30" size={20} />
+                                    ) : (
+                                      <Tv className="text-cyber-cyan/30" size={20} />
+                                    )}
+                                    {task.status === 'ignored' && (
+                                      <span className="text-[8px] mt-1 font-mono text-cyber-cyan/40 tracking-wider">DUPLICATE</span>
+                                    )}
+                                  </div>
+                                }
                               />
                             </div>
 
@@ -638,24 +650,41 @@ export default function MediaTable({
                         {/* 重试按钮 (仅失败任务显示) */}
                         {(task.status === 'failed' || (task.status || '').toLowerCase() === 'match failed') && (
                           <button
-                            onClick={() => onRetry(task.id)}
-                            className="p-2 bg-transparent border border-cyber-cyan text-cyber-cyan hover:bg-cyber-cyan hover:text-black transition-all group/btn"
+                            onClick={async () => {
+                              if (processingId !== null) return;
+                              setProcessingId(task.id);
+                              try { await Promise.resolve(onRetry(task.id)); }
+                              finally { setProcessingId(null); }
+                            }}
+                            disabled={processingId === task.id}
+                            className={cn(
+                              "p-2 bg-transparent border border-cyber-cyan text-cyber-cyan hover:bg-cyber-cyan hover:text-black transition-all group/btn",
+                              processingId === task.id && "opacity-50 cursor-not-allowed"
+                            )}
                             style={{ backdropFilter: 'blur(10px)' }}
                             title="将任务状态重置为待处理，下次扫描时会重新处理"
                           >
-                            {/* Hover 旋转180度 */}
-                            <RefreshCw size={16} className="group-hover/btn:rotate-180 transition-transform duration-500" />
+                            <RefreshCw size={16} className={cn("transition-transform duration-500", processingId === task.id ? "animate-spin" : "group-hover/btn:rotate-180")} />
                           </button>
                         )}
 
                         {/* 删除按钮 (红色警示风格) */}
                         <button
-                          onClick={() => onDelete(task.id)}
-                          className="p-2 bg-transparent border border-cyber-red text-cyber-red hover:bg-cyber-red hover:text-white transition-all"
+                          onClick={async () => {
+                            if (processingId !== null) return;
+                            setProcessingId(task.id);
+                            try { await Promise.resolve(onDelete(task.id)); }
+                            finally { setProcessingId(null); }
+                          }}
+                          disabled={processingId === task.id}
+                          className={cn(
+                            "p-2 bg-transparent border border-cyber-red text-cyber-red hover:bg-cyber-red hover:text-white transition-all",
+                            processingId === task.id && "opacity-50 cursor-not-allowed"
+                          )}
                           style={{ backdropFilter: 'blur(10px)' }}
                           title={t('task_delete_record')}
                         >
-                          <Trash2 size={16} />
+                          <Trash2 size={16} className={cn(processingId === task.id && "animate-pulse")} />
                         </button>
                       </div>
                     </div>
@@ -699,3 +728,6 @@ export default function MediaTable({
     </>
   );
 }
+
+// 🚀 React.memo 包裹：父组件 toast/scanning 等无关状态更新时，MediaTable 不重绘
+export default memo(MediaTable);

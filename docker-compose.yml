@@ -1,44 +1,40 @@
+# ============================================================================
+# Neon Crate — AIO 极简部署方案
+# 架构哲学：单容器 · 单端口（8000）· 零跨域 · NAS 友好
+# ============================================================================
 version: '3.8'
 
 services:
-  neon-crate-api:
+  neon-crate:
     build:
-      context: ./backend
+      context: .
       dockerfile: Dockerfile
-    image: neon-crate:v1.0.0
-    container_name: neon-crate-backend
+    image: neon-crate:v1.0.0-stable
+    container_name: neon-crate
     ports:
+      # 🚀 AIO 单端口：前端静态资源 + 后端 API 全部由 8000 端口响应
       - "8000:8000"
     volumes:
-      - ./backend/data:/app/data
-      - /path/to/your/storage:/storage  # 修改为你的实际路径
+      # 🚨 存储防线：持久化核心数据库、配置文件、海报缓存、运行日志
+      - ./data:/app/data
+      # 🚨 媒体防线：挂载 NAS 真实的媒体根目录（修改为实际路径）
+      - /path/to/your/storage:/storage
     environment:
       - APP_NAME=Neon Crate
       - HOST=0.0.0.0
       - PORT=8000
       - LOG_LEVEL=INFO
       - DOCKER_STORAGE_PATH=/storage
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
+      # 🔐 安全：生产环境务必通过 .env 文件或 NAS 环境变量覆盖此值
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production-to-a-secure-key}
     restart: unless-stopped
-    networks:
-      - neon-crate-network
+    # 健康检查：依赖 Dockerfile 中定义的 HEALTHCHECK 指令
 
-  neon-crate-web:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    image: neon-crate:v1.0.0
-    container_name: neon-crate-frontend
-    ports:
-      - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_BASE=http://localhost:8000/api/v1
-    depends_on:
-      - neon-crate-api
-    restart: unless-stopped
-    networks:
-      - neon-crate-network
-
-networks:
-  neon-crate-network:
-    driver: bridge
+# ============================================================================
+# ✅ AIO 架构优势说明
+# ============================================================================
+# 1. 零跨域：前端和后端跑在同一域名的 8000 端口下，彻底消灭 CORS 预检请求
+# 2. 网络极简：无需配置 bridge 网络，无需 depends_on 依赖关系
+# 3. 数据安全：SQLite WAL 模式文件（.db / .db-wal / .db-shm）完整保留在 ./data
+# 4. NAS 友好：单端口映射，无需开放多个端口，降低 NAS 防火墙配置复杂度
+# 5. 内存高效：单容器 vs 双容器，节省约 200MB+ Node.js 运行时内存开销

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { api } from '@/lib/api';
 import type { Task } from '@/types';
 import { useLanguage } from '@/hooks/useLanguage';
@@ -30,7 +30,32 @@ export default function MediaWall() {
   const [batchDeleteModalOpen, setBatchDeleteModalOpen] = useState(false);
   const [batchDeleting, setBatchDeleting] = useState(false);
 
+  // 🚀 Toast 计时器防抖：防止多次触发导致 Toast 提前消失
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 🚀 loadTasks AbortController：防止快速切换筛选时旧请求覆盖新数据
+  const loadAbortRef = useRef<AbortController | null>(null);
+
+  // 组件卸载时清理 timer 和飞行请求
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      loadAbortRef.current?.abort();
+    };
+  }, []);
+
+  // showToast 必须在 loadTasks 之前定义（loadTasks 依赖它）
+  const showToast = useCallback((msg: string) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToast(msg);
+    toastTimerRef.current = setTimeout(() => setToast(null), 3000);
+  }, []);
+
   const loadTasks = useCallback(async () => {
+    // 🚀 中止上一次飞行中的请求，防止旧数据覆盖新状态
+    loadAbortRef.current?.abort();
+    loadAbortRef.current = new AbortController();
+    const signal = loadAbortRef.current.signal;
+
     setLoading(true);
     try {
       const params: { page?: number; page_size?: number; status?: string; media_type?: string; search?: string } = {
@@ -42,15 +67,17 @@ export default function MediaWall() {
       if (debouncedKeyword.trim()) params.search = debouncedKeyword.trim();
 
       const data = await api.getTasks(params);
+      if (signal.aborted) return;
       setTasks(data.tasks);
       setTotal(data.total);
     } catch (error) {
+      if ((error as Error)?.name === 'AbortError') return;
       const err = error as Error & { status?: number; body?: unknown };
       showToast(`加载任务列表失败: ${err?.message ?? '网络错误'}`);
     } finally {
-      setLoading(false);
+      if (!signal.aborted) setLoading(false);
     }
-  }, [statusFilter, typeFilter, debouncedKeyword]);
+  }, [statusFilter, typeFilter, debouncedKeyword, showToast]);
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedKeyword(searchKeyword), 500);
@@ -89,11 +116,6 @@ export default function MediaWall() {
     () => filteredTasks.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
     [filteredTasks, page]
   );
-
-  const showToast = (msg: string) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 3000);
-  };
 
   const handleRetry = async (taskId: number) => {
     try {

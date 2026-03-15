@@ -136,7 +136,7 @@ export default function PathsSettings({ t }: Props) {
                 items-end: 所有列底部对齐
                 ═══════════════════════════════════════════════════════════════
               */}
-              <div className="grid grid-cols-1 lg:grid-cols-[160px,120px,1fr,120px,100px] gap-6 items-end min-w-[900px]">
+              <div className="grid grid-cols-1 lg:grid-cols-[180px,120px,1fr,120px,100px] gap-6 items-end w-full">
                 {/* 列1: 开关组件 (160px) */}
                 <NeuralCoreSwitch 
                   active={!!pathItem.enabled} 
@@ -157,12 +157,14 @@ export default function PathsSettings({ t }: Props) {
                 </NeuralSelect>
                 
                 {/* 列3: 路径输入框 (1fr - 弹性) */}
+                <div className="min-w-0 w-full">
                 <NeuralInput 
                   label={t('paths_path_label')} 
                   type="text" 
                   value={pathItem.path} 
                   onChange={(e) => updatePathDetail(index, 'path', e.target.value)} 
                 />
+                </div>
                 
                 {/* 列4: 分类选择器 (120px) */}
                 <NeuralSelect 

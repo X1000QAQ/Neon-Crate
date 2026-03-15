@@ -34,6 +34,67 @@ class TMDBAdapter:
         self.base_url = "https://api.themoviedb.org/3"
         logger.info(f"[TMDB] TMDB 适配器初始化完成，文本语言: {self.text_lang}，图片语言: {self.image_lang}")
 
+    def search_media(self, query: str, media_type: str = "movie", year: Optional[str] = None) -> List[Dict]:
+        """
+        统一搜索入口：动态路由 + /search/multi 降级
+
+        Args:
+            query:      搜索关键词
+            media_type: "movie" 或 "tv"
+            year:       年份（可选）
+
+        路由策略：
+        1. 精确端点：media_type=="tv" → /search/tv，否则 → /search/movie
+        2. 终极降级：精确端点返回 0 个结果时，自动请求 /search/multi
+           并过滤掉 media_type=="person" 的脏数据
+        """
+        log_type = "剧集" if media_type == "tv" else "电影"
+        endpoint = "/search/tv" if media_type == "tv" else "/search/movie"
+        logger.info(f"[TMDB] 搜索{log_type}: '{query}' → {endpoint}")
+
+        # 精确端点参数
+        params: dict = {
+            "api_key": self.api_key,
+            "query": query,
+            "language": self.text_lang,
+            "include_adult": "false",
+        }
+        if year:
+            if media_type == "tv":
+                params["first_air_date_year"] = year
+            else:
+                params["primary_release_year"] = year
+
+        results: List[Dict] = []
+        try:
+            resp = _http_get_with_retry(f"{self.base_url}{endpoint}", params=params)
+            if resp:
+                results = resp.json().get("results", [])
+                logger.info(f"[TMDB] {endpoint} 返回 {len(results)} 条结果")
+        except Exception as e:
+            logger.error(f"[TMDB] {endpoint} 请求失败: {e}")
+
+        # fallback：精确端点无结果时请求 /search/multi
+        if not results:
+            logger.info(f"[TMDB] {log_type}端点无结果，降级 /search/multi: '{query}'")
+            multi_params = {
+                "api_key": self.api_key,
+                "query": query,
+                "language": self.text_lang,
+                "include_adult": "false",
+            }
+            try:
+                resp = _http_get_with_retry(f"{self.base_url}/search/multi", params=multi_params)
+                if resp:
+                    raw = resp.json().get("results", [])
+                    # 过滤 person 脏数据，并标记 media_type
+                    results = [r for r in raw if r.get("media_type") != "person"]
+                    logger.info(f"[TMDB] /search/multi 返回 {len(results)} 条（过滤 person 后）")
+            except Exception as e:
+                logger.error(f"[TMDB] /search/multi 失败: {e}")
+
+        return results
+
     def search_movie(self, query: str, year: Optional[str] = None) -> List[Dict]:
         """
         搜索电影

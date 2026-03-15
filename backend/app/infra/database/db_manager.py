@@ -374,7 +374,45 @@ class DatabaseManager:
 
     def get_all_data(self, search_keyword=None, include_ignored: bool = False) -> List[Dict[str, Any]]:  return self._stats_repo.get_all_data(search_keyword, include_ignored)
     def get_dashboard_stats(self) -> Dict[str, int]:                     return self._stats_repo.get_dashboard_stats()
+    def get_sibling_poster(self, imdb_id: str, media_type: str, season: int = None, episode: int = None):          return self._stats_repo.get_sibling_poster(imdb_id, media_type, season, episode)
     def check_media_exists(self, imdb_id: str, media_type: str, season: int = None, episode: int = None) -> bool:   return self._stats_repo.check_media_exists(imdb_id, media_type, season, episode)
+
+    def mark_task_as_ignored_and_inherit(self, task_id: int, imdb_id: str, media_type: str,
+                                          season: int = None, episode: int = None,
+                                          tmdb_id: int = None):
+        """
+        🚨 架构级原子操作：专为 PT 做种重复文件设计。[DO NOT SPLIT OR INLINE]
+
+        为什么这个方法不可拆分？
+        当文件被 IMDb 重复检测判定为物理副本时，仅将状态改为 ignored 是不够的：
+        前端渲染依赖 local_poster_path 字段显示 VHS 破损特效（TAPE ERROR 印章）。
+        若该字段为空，前端将出现白板破图，ignored 状态的视觉标识不会触发。
+
+        执行流程：
+        1. 跨表检索：从 media_archive（冷表）或 tasks（热表）检索同源海报路径
+        -> 2. 状态原子写入：一次性将 ignored 状态、local_poster_path、imdb_id、tmdb_id 写入数据库
+        -> 3. 视觉防护：确保前端获得海报路径，正确触发 VHS TAPE ERROR 特效
+
+        任何重构此处代码的开发者，请确保以上三步永远绑定在一起。
+        """
+        # 1. 跨表查找同源已归档任务的海报路径
+        sibling_poster = self.get_sibling_poster(imdb_id, media_type, season, episode)
+        if sibling_poster:
+            import logging as _log
+            _log.getLogger(__name__).info(f"[DB][IGNORE] 已继承同源海报: {sibling_poster}")
+        else:
+            import logging as _log
+            _log.getLogger(__name__).info(f"[DB][IGNORE] 未找到同源海报 (imdb={imdb_id}, type={media_type}, S{season}E{episode})")
+
+        # 2. 原子写入：status=ignored + local_poster_path + imdb_id + tmdb_id
+        self._task_repo.update_task_status(
+            task_id=task_id,
+            status="ignored",
+            local_poster_path=sibling_poster,
+            tmdb_id=tmdb_id,
+            imdb_id=imdb_id if imdb_id else None,
+            task_type=media_type,
+        )
 
     # ==========================================
     # 归档方法（委托给 ArchiveRepo）

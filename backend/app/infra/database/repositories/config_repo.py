@@ -57,8 +57,12 @@ class ConfigRepo(BaseRepository):
         if not os.path.exists(self.config_path):
             # config.json 不存在时直接返回常量兜底
             return DEFAULT_CONFIG.get(key, default)
-        with open(self.config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
+        try:
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error(f"[ConfigRepo] config.json 读取失败或损坏，触发容灾降级: {e}")
+            return DEFAULT_CONFIG.get(key, default)
         settings = config.get("settings", {})
         if key in SENSITIVE_KEYS:
             if os.path.exists(self.secure_keys_path):
@@ -80,8 +84,12 @@ class ConfigRepo(BaseRepository):
         if not os.path.exists(self.config_path):
             config = {"settings": {}, "paths": []}
         else:
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
+            try:
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                logger.error(f"[ConfigRepo] config.json 损坏，set_config 重新初始化空配置: {e}")
+                config = {"settings": {}, "paths": []}
         if key in SENSITIVE_KEYS:
             secure_data = {}
             if os.path.exists(self.secure_keys_path):
@@ -104,8 +112,12 @@ class ConfigRepo(BaseRepository):
         """获取完整配置（合并解密后的敏感键）"""
         if not os.path.exists(self.config_path):
             return {"settings": {}, "paths": []}
-        with open(self.config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
+        try:
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error(f"[ConfigRepo] config.json 读取失败或损坏，get_all_config 触发容灾降级: {e}")
+            return {"settings": dict(DEFAULT_CONFIG), "paths": []}
         if os.path.exists(self.secure_keys_path):
             with open(self.secure_keys_path, "r", encoding="utf-8") as f:
                 secure_data = json.load(f)

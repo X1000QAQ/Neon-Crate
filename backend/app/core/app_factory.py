@@ -128,7 +128,9 @@ def _mount_static_resources(app: FastAPI) -> None:
     1. /api/v1/assets：媒体资源（海报、Fanart 等）
        - Docker 优先：DOCKER_STORAGE_PATH（/media 等挂载点）
        - 本地回退：data/posters 目录
-    2. /：前端静态文件（SPA）
+    2. /static/docs：API 文档静态资源（Swagger UI）
+       - 如果存在则挂载，支持离线环境
+    3. /：前端静态文件（SPA）
        - 需要 static/index.html 存在才会挂载
        - 不存在时跳过（纯 API 模式）
     
@@ -152,6 +154,12 @@ def _mount_static_resources(app: FastAPI) -> None:
 
     if assets_dir:
         app.mount("/api/v1/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    # 挂载 API 文档静态资源（新增 - 支持离线环境）
+    docs_static = Path(__file__).resolve().parent.parent.parent / "static" / "docs"
+    if docs_static.exists() and docs_static.is_dir():
+        app.mount("/static/docs", StaticFiles(directory=str(docs_static)), name="docs")
+        logging.info(f"[OK] API 文档静态资源已挂载: {docs_static} -> /static/docs")
 
     # 挂载前端静态文件
     frontend_static = "static"
@@ -184,7 +192,7 @@ def create_app(lifespan=None) -> FastAPI:
         title="Neon Crate API Gateway",
         description="Quantum Data Container Orchestration Engine // 神经链路核心 API 接口库",
         version="2.1.0",
-        docs_url="/docs",
+        docs_url=None,  # 禁用默认 Swagger UI，改用自定义路由
         redoc_url=None,  # 原生 ReDoc 无法访问，由 Scalar 接管
         lifespan=lifespan,
         openapi_tags=[
@@ -212,7 +220,44 @@ def create_app(lifespan=None) -> FastAPI:
     _register_routers(app)
     _register_exception_handlers(app)
     _add_health_check(app)
-    _mount_static_resources(app)
+    
+    # ⚠️ 关键修复：在挂载静态资源之前定义所有特定路由
+    # 自定义 Swagger UI（支持本地资源回退）
+    from fastapi.openapi.docs import get_swagger_ui_html
+    
+    @app.get("/docs", include_in_schema=False)
+    async def custom_swagger_ui_html():
+        """
+        自定义 Swagger UI 文档路由
+        
+        离线支持：
+        - 优先使用本地资源（/static/docs/）
+        - 本地资源不存在时回退到 CDN
+        - 通过 download_docs_assets.py 脚本可下载本地资源
+        """
+        # 修正路径：确保指向 backend/static/docs
+        docs_static = Path(__file__).resolve().parent.parent.parent / "static" / "docs"
+        
+        # 检查本地资源是否存在
+        local_bundle = docs_static / "swagger-ui-bundle.js"
+        local_css = docs_static / "swagger-ui.css"
+        
+        if local_bundle.exists() and local_css.exists():
+            # 使用本地资源（离线模式）
+            logging.info(f"[DOCS] 使用本地 Swagger UI 资源: {docs_static}")
+            return get_swagger_ui_html(
+                openapi_url=app.openapi_url,
+                title=f"{app.title} - API Documentation",
+                swagger_js_url="/static/docs/swagger-ui-bundle.js",
+                swagger_css_url="/static/docs/swagger-ui.css",
+            )
+        else:
+            # 回退到 CDN（在线模式）
+            logging.warning(f"[DOCS] 本地资源不存在，回退到 CDN: {docs_static}")
+            return get_swagger_ui_html(
+                openapi_url=app.openapi_url,
+                title=f"{app.title} - API Documentation",
+            )
 
     # Scalar API 文档引擎（替代原生 ReDoc）
     @app.get("/redoc", include_in_schema=False)
@@ -230,5 +275,9 @@ def create_app(lifespan=None) -> FastAPI:
 </body>
 </html>"""
         return HTMLResponse(html_content)
+    
+    # ⚠️ 关键修复：静态资源挂载必须在所有路由定义之后
+    # 这样 / 根路径才不会覆盖 /docs 和 /redoc
+    _mount_static_resources(app)
 
     return app
