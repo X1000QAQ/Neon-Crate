@@ -73,13 +73,13 @@ class TaskRepo(BaseRepository):
             conn.commit()
 
     def insert_task(self, task_data: Dict[str, Any]) -> int:
-        """插入新任务记录（新版，接受 Dict，支持 local_poster_path / target_path，返回新记录 ID）"""
+        """插入新任务记录（新版，接受 Dict，支持 local_poster_path / target_path / tmdb_id / imdb_id，返回新记录 ID）"""
         with self.db_lock:
             conn = self._get_conn()
             cursor = conn.execute(
                 "INSERT INTO tasks "
-                "(path, file_name, clean_name, type, status, year, season, episode, local_poster_path, target_path) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(path, file_name, clean_name, type, status, year, season, episode, local_poster_path, target_path, tmdb_id, imdb_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     task_data.get("path"),
                     task_data.get("file_name"),
@@ -91,6 +91,8 @@ class TaskRepo(BaseRepository):
                     task_data.get("episode"),
                     task_data.get("local_poster_path"),
                     task_data.get("target_path"),
+                    task_data.get("tmdb_id"),
+                    task_data.get("imdb_id"),
                 )
             )
             conn.commit()
@@ -199,6 +201,12 @@ class TaskRepo(BaseRepository):
         """
         获取需要刮削的任务列表（双表联查：tasks 热表 + media_archive 冷表）
         
+        ── 业务链路 ──
+        1. 查询热表 tasks（pending 或 archived 缺 imdb_id 的任务）-> 
+        2. 查询冷表 media_archive（缺 imdb_id 的归档任务）-> 
+        3. 去重（冷表中已在热表的任务不重复返回）-> 
+        4. 返回合并结果（包含 is_archive 标记）
+        
         刮削条件：
         1. tasks 热表：status='pending' 的新任务
         2. tasks 热表：status='archived' 但缺少 imdb_id 且字幕未完成的任务
@@ -209,7 +217,10 @@ class TaskRepo(BaseRepository):
         """
         with self.db_lock:
             conn = self._get_conn()
-            # 热表：pending 或 archived 缺 imdb_id 且字幕未完成
+            
+            # ── Step 1: 查询热表 tasks ──
+            # 业务链路：1. 查询 status='pending' 的新任务 -> 2. 查询 status='archived' 但缺 imdb_id 的任务 -> 
+            # 3. 按创建时间排序 -> 4. 标记 is_archive=0（热表）
             cursor = conn.execute(
                 """
                 SELECT id, path, file_name, clean_name, type, status, season, episode,
@@ -232,7 +243,10 @@ class TaskRepo(BaseRepository):
                 }
                 for r in rows
             ]
-            # 冷表：media_archive 缺 imdb_id 且字幕未完成
+            
+            # ── Step 2: 查询冷表 media_archive ──
+            # 业务链路：1. 查询缺 imdb_id 的归档任务 -> 2. 将 original_task_id 映射为 id（与热表保持一致）-> 
+            # 3. 标记 is_archive=1（冷表）-> 4. 去重（排除已在热表中的任务）
             seen_paths = {r["target_path"] for r in results if r.get("target_path")}
             cursor2 = conn.execute(
                 """
@@ -248,6 +262,7 @@ class TaskRepo(BaseRepository):
             )
             for r in cursor2.fetchall():
                 tp = r[10]
+                # 5. 去重：若冷表任务的 target_path 已在热表中，则跳过
                 if tp and tp in seen_paths:
                     continue
                 results.append({
@@ -264,6 +279,13 @@ class TaskRepo(BaseRepository):
         """
         获取需要字幕的任务列表（含 7 天冷却期过滤，双表联查）
         
+        ── 业务链路 ──
+        1. 查询冷表 media_archive（已归档但字幕未完成的任务）-> 
+        2. 查询热表 tasks（已归档但字幕未完成的任务）-> 
+        3. 按 target_path 去重（冷表优先）-> 
+        4. 应用 7 天冷却期过滤（避免频繁搜索无字幕的冷门片源）-> 
+        5. 返回合并结果（包含 is_archive 标记）
+        
         字幕条件：
         1. 必须有 imdb_id（用于字幕搜索）
         2. 必须有 target_path（已归档到媒体库）
@@ -279,8 +301,14 @@ class TaskRepo(BaseRepository):
         """
         with self.db_lock:
             conn = self._get_conn()
+            # ── Step 1: 计算冷却期截止时间 ──
+            # 业务链路：1. 获取当前时间 -> 2. 减去 7 天 -> 3. 格式化为 SQL 时间戳
             cooldown_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
-            # 1. 从 media_archive 冷表查（原逻辑，保留 7 天冷却期；放宽：tmdb_id 为空但 target_path 有值也允许进队列）
+            
+            # ── Step 2: 查询冷表 media_archive ──
+            # 业务链路：1. 查询已归档的任务 -> 2. 过滤条件：有 target_path + 有 imdb_id -> 
+            # 3. 字幕状态为 pending/failed/missing 或 NULL -> 4. 若为 missing 则检查冷却期 -> 
+            # 5. 标记 is_archive=True
             cursor = conn.execute(
                 "SELECT original_task_id AS id, path, file_name, type, tmdb_id, imdb_id, target_path, sub_status "
                 "FROM media_archive "
@@ -300,7 +328,10 @@ class TaskRepo(BaseRepository):
                 }
                 for r in rows
             ]
-            # 2. 从 tasks 热表查（已归档但字幕未完成；放宽：tmdb_id 为空但 target_path 有值也允许进队列）
+            
+            # ── Step 3: 查询热表 tasks ──
+            # 业务链路：1. 查询已归档的任务 -> 2. 过滤条件：有 target_path + 有 imdb_id -> 
+            # 3. 字幕状态为 NULL 或非 success -> 4. 标记 is_archive=False
             cursor2 = conn.execute(
                 "SELECT id, path, file_name, type, tmdb_id, imdb_id, target_path, sub_status "
                 "FROM tasks "
@@ -311,10 +342,14 @@ class TaskRepo(BaseRepository):
                 "ORDER BY created_at ASC"
             )
             rows2 = cursor2.fetchall()
-            # 合并去重（按 target_path 去重，优先保留冷表记录）
+            
+            # ── Step 4: 合并去重 ──
+            # 业务链路：1. 按 target_path 去重 -> 2. 冷表记录优先保留 -> 
+            # 3. 热表中重复的记录被跳过 -> 4. 返回最终合并结果
             seen_targets = {r["target_path"] for r in results if r.get("target_path")}
             for r in rows2:
                 tp = r[6]
+                # 1. 若热表任务的 target_path 已在冷表中，则跳过（冷表优先）
                 if tp and tp in seen_targets:
                     continue
                 results.append({
@@ -322,6 +357,7 @@ class TaskRepo(BaseRepository):
                     "tmdb_id": r[4], "imdb_id": r[5], "target_path": r[6], "sub_status": r[7],
                     "is_archive": False
                 })
+                # 2. 将热表任务的 target_path 添加到去重集合
                 if tp:
                     seen_targets.add(tp)
             return results
@@ -402,12 +438,31 @@ class TaskRepo(BaseRepository):
         sub_status: Optional[str] = None,
         title: Optional[str] = None,
         year: Optional[str] = None,
-    ):
-        """通用双表元数据更新（根据 is_archive 决定写热表还是冷表）"""
+        local_poster_path: Optional[str] = None,   # 新增：海报本地路径
+        target_path: Optional[str] = None,         # 新增：视频物理路径（重命名后同步）
+        clean_name: Optional[str] = None,          # 新增：前端首行显示名（TMDB 译名）
+        season: Optional[int] = None,              # 新增：季数（TV）
+        episode: Optional[int] = None,             # 新增：集数（TV）
+    ) -> None:
+        """
+        通用双表元数据更新（根据 is_archive 决定写热表还是冷表）
+        
+        ── 业务链路 ──
+        1. 根据 is_archive 标志选择目标表（热表 tasks 或冷表 media_archive）-> 
+        2. 构建动态 UPDATE 语句（仅更新非 None 字段）-> 
+        3. 执行原子级 UPDATE 并提交事务 -> 
+        4. 记录更新结果或异常
+        
+        ⚠️ ARCHITECT WARNING: 当前采用 is not None 过滤，意味着传入 None 会被跳过，
+        无法实现 DB 字段的 NULL 清空。未来若需擦除数据，必须重构为字典传入模式。
+        """
         with self.db_lock:
             conn = self._get_conn()
             updates = []
             params = []
+            
+            # ── 动态构建 UPDATE 字段列表 ──
+            # 1. 遍历所有可选参数 -> 2. 若非 None 则添加到 updates 列表 -> 3. 参数值追加到 params
             if imdb_id is not None:
                 updates.append("imdb_id = ?"); params.append(imdb_id)
             if tmdb_id is not None:
@@ -418,19 +473,38 @@ class TaskRepo(BaseRepository):
                 updates.append("title = ?"); params.append(title)
             if year is not None:
                 updates.append("year = ?"); params.append(year)
+            if local_poster_path is not None:
+                updates.append("local_poster_path = ?"); params.append(local_poster_path)
+            if target_path is not None:
+                updates.append("target_path = ?"); params.append(target_path)
+            if clean_name is not None:
+                updates.append("clean_name = ?"); params.append(clean_name)
+            if season is not None:
+                updates.append("season = ?"); params.append(season)
+            if episode is not None:
+                updates.append("episode = ?"); params.append(episode)
+            
+            # ── 若无任何字段需更新，直接返回 ──
             if not updates:
                 return
 
             params.append(task_id)
-            
+
+            # ── 根据 is_archive 选择目标表和主键字段 ──
+            # 1. is_archive=True：冷表 media_archive，主键为 original_task_id（全局唯一身份证）
+            # 2. is_archive=False：热表 tasks，主键为 id
+            # 注意：冷表的 original_task_id 已在 get_archived_data 中映射为 "id" 字段返回前端，链路完全闭环
             if is_archive:
-                # 🚀 致命修复：更新冷表时，必须使用 original_task_id 匹配！因为冷表的 id 是独立的。
+                # ✅ 冷表用 original_task_id 匹配（全局唯一身份证，与 get_archived_data 返回的 "id" 保持一致）
+                # get_archived_data 已将 original_task_id 映射为 "id" 字段返回前端，链路完全闭环
                 table = "media_archive"
                 pk_field = "original_task_id"
             else:
                 table = "tasks"
                 pk_field = "id"
-                
+
+            # ── 执行原子级 UPDATE 并提交事务 ──
+            # 1. 构建 SQL 语句 -> 2. 执行查询 -> 3. 提交事务 -> 4. 检查受影响行数 -> 5. 异常时回滚
             try:
                 cur = conn.execute(f"UPDATE {table} SET {', '.join(updates)} WHERE {pk_field} = ?", params)
                 conn.commit()
@@ -501,6 +575,11 @@ class TaskRepo(BaseRepository):
         """
         🚨 架构级原子操作：标记任务为 ignored 并继承同源海报路径
         
+        ── 业务链路 ──
+        1. 跨表检索同源海报路径（冷表 → 热表）-> 
+        2. 原子写入：一次性更新 status + local_poster_path + imdb_id + tmdb_id -> 
+        3. 提交事务 -> 4. 返回操作结果
+        
         触发场景：文件被 IMDb 重复检测判定为物理副本（PT 做种重复文件）
         
         执行流程（必须原子）：
@@ -522,10 +601,11 @@ class TaskRepo(BaseRepository):
             try:
                 conn.execute("BEGIN")
                 
-                # 1. 跨表检索同源海报路径
+                # ── Step 1: 跨表检索同源海报路径 ──
+                # 业务链路：1. 若有 imdb_id，先从冷表查找同源文件 -> 2. 若冷表无结果，从热表查找 -> 3. 返回海报路径
                 inherited_poster = None
                 if imdb_id:
-                    # 从 media_archive 查找同源文件
+                    # 1. 从 media_archive 冷表查找同源文件的海报路径
                     cursor = conn.execute(
                         "SELECT local_poster_path FROM media_archive WHERE imdb_id = ? AND local_poster_path IS NOT NULL LIMIT 1",
                         (imdb_id,)
@@ -533,7 +613,7 @@ class TaskRepo(BaseRepository):
                     row = cursor.fetchone()
                     inherited_poster = row[0] if row else None
                     
-                    # 如果冷表没找到，从热表查找
+                    # 2. 如果冷表没找到，从热表 tasks 查找
                     if not inherited_poster:
                         cursor = conn.execute(
                             "SELECT local_poster_path FROM tasks WHERE imdb_id = ? AND local_poster_path IS NOT NULL LIMIT 1",
@@ -542,37 +622,45 @@ class TaskRepo(BaseRepository):
                         row = cursor.fetchone()
                         inherited_poster = row[0] if row else None
                 
-                # 2. 原子写入：一次性更新所有字段
+                # ── Step 2: 原子写入 ──
+                # 业务链路：1. 根据 is_archive 选择目标表 -> 2. 构建动态 UPDATE 语句 -> 3. 一次性提交所有更新
                 table = "media_archive" if is_archive else "tasks"
                 pk_field = "original_task_id" if is_archive else "id"
                 
+                # 1. 初始化 UPDATE 字段列表（必须包含 status='ignored'）
                 updates = ["status = 'ignored'"]
                 params = []
                 
+                # 2. 若有继承的海报路径，添加到 UPDATE 列表
                 if inherited_poster:
                     updates.append("local_poster_path = ?")
                     params.append(inherited_poster)
                 
+                # 3. 若有 imdb_id，添加到 UPDATE 列表
                 if imdb_id:
                     updates.append("imdb_id = ?")
                     params.append(imdb_id)
                 
+                # 4. 若有 tmdb_id，添加到 UPDATE 列表
                 if tmdb_id:
                     updates.append("tmdb_id = ?")
                     params.append(tmdb_id)
                 
                 params.append(task_id)
                 
+                # 5. 执行原子级 UPDATE
                 cursor = conn.execute(
                     f"UPDATE {table} SET {', '.join(updates)} WHERE {pk_field} = ?",
                     params
                 )
                 
+                # ── Step 3: 提交事务 ──
                 conn.commit()
                 logger.info(
                     f"[TaskRepo] 🚨 原子操作：标记任务 {task_id} 为 ignored，"
                     f"继承海报: {inherited_poster}, imdb_id: {imdb_id}"
                 )
+                # ── Step 4: 返回操作结果 ──
                 return cursor.rowcount > 0
                 
             except Exception as e:

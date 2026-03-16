@@ -6,6 +6,7 @@ export interface Task {
   id: number;
   file_path: string;
   file_name?: string;
+  clean_name?: string;
   media_type: 'movie' | 'tv';
   status: 'pending' | 'archived' | 'failed' | 'ignored' | 'match failed' | 'scraped';
   tmdb_id?: number;
@@ -19,6 +20,7 @@ export interface Task {
   season?: number | null;
   episode?: number | null;
   created_at: string;
+  is_archive?: boolean;
 }
 
 export interface TasksResponse {
@@ -120,6 +122,9 @@ export interface SystemSettings {
   subtitle_lang: string;
   poster_lang: string;
   rename_lang: string;
+  // 文件格式过滤
+  supported_video_exts?: string;
+  supported_subtitle_exts?: string;
 }
 
 export interface PathConfig {

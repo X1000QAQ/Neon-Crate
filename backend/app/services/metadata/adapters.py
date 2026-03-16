@@ -67,7 +67,7 @@ class TMDBAdapter:
 
         results: List[Dict] = []
         try:
-            resp = _http_get_with_retry(f"{self.base_url}{endpoint}", params=params)
+            resp = _http_get_with_retry(f"{self.base_url}{endpoint}", params=params, timeout=15.0)
             if resp:
                 results = resp.json().get("results", [])
                 logger.info(f"[TMDB] {endpoint} 返回 {len(results)} 条结果")
@@ -84,7 +84,7 @@ class TMDBAdapter:
                 "include_adult": "false",
             }
             try:
-                resp = _http_get_with_retry(f"{self.base_url}/search/multi", params=multi_params)
+                resp = _http_get_with_retry(f"{self.base_url}/search/multi", params=multi_params, timeout=15.0)
                 if resp:
                     raw = resp.json().get("results", [])
                     # 过滤 person 脏数据，并标记 media_type

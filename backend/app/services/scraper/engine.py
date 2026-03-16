@@ -22,12 +22,20 @@ from app.infra.constants import VIDEO_EXTS_EXTENDED
 logger = logging.getLogger(__name__)
 
 
+def _parse_ext_config(raw: str) -> frozenset:
+    """将逗号分隔的后缀字符串解析为小写 frozenset，去除多余空格。"""
+    parts = [e.strip().lower() for e in raw.split(",") if e.strip()]
+    # 确保每个后缀以 '.' 开头
+    parts = [e if e.startswith(".") else f".{e}" for e in parts]
+    return frozenset(parts)
+
+
 class ScanEngine:
     """并发扫描引擎"""
-    
-    # 支持的视频格式（使用全局常量，扫描引擎专用扩展集）
-    VIDEO_EXTENSIONS = VIDEO_EXTS_EXTENDED
-    
+
+    # 静态兜底（db 读取失败时使用）
+    _VIDEO_EXTS_FALLBACK = VIDEO_EXTS_EXTENDED
+
     def __init__(self, max_workers: int = 4, min_size_mb: int = 50, db_manager=None, known_paths: set = None, known_inodes: set = None):
         """
         初始化扫描引擎
@@ -45,6 +53,15 @@ class ScanEngine:
         self.cleaner = MediaCleaner(db_manager=db_manager)
         self.known_paths = known_paths or set()  # 🚀 保存路径白名单
         self.known_inodes = known_inodes or set()  # 🛡️ 保存 inode 白名单
+        # 动态读取视频格式（从数据库，失败时兜底静态常量）
+        if db_manager is not None:
+            try:
+                _raw = db_manager.get_config("supported_video_exts", "")
+                self.VIDEO_EXTENSIONS = _parse_ext_config(_raw) if _raw else self._VIDEO_EXTS_FALLBACK
+            except Exception:
+                self.VIDEO_EXTENSIONS = self._VIDEO_EXTS_FALLBACK
+        else:
+            self.VIDEO_EXTENSIONS = self._VIDEO_EXTS_FALLBACK
     
     def scan_directory(self, directory: str, recursive: bool = True) -> List[Dict]:
         """

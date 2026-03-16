@@ -983,7 +983,8 @@ class AIAgent:
         return ""
 
     async def ai_identify_media(
-        self, cleaned_name: str, full_path: str, type_hint: str
+        self, cleaned_name: str, full_path: str, type_hint: str,
+        keyword_hint: Optional[str] = None
     ) -> Optional[Dict]:
         """
         🧠 AI 归档专家 - 智能影视文件识别引擎
@@ -1009,17 +1010,34 @@ class AIAgent:
             cleaned_name: 正则清洗后的文件名
             full_path: 完整文件路径
             type_hint: 类型提示（movie/tv）
+            keyword_hint: 用户手动输入的正确片名（最高优先级，直接覆盖 AI 推断）
             
         Returns:
             Optional[Dict]: {
                 "query": str,           # TMDB 搜索词（纯净片名）
                 "year": str,            # 年份（4位数字或空）
-                "chinese_title": str,   # 中文译名（可选）
-                "type": str             # 类型（movie/tv/IGNORE）
+                "type": str,            # 类型（movie/tv/IGNORE）
+                "season": int | None,   # 季数（仅剧集）
+                "episode": int | None,  # 集数（仅剧集）
             }
         """
         # 🚀 第一步：动态获取用户的归档专家规则（DEFAULT_CONFIG 提供钢铁兜底，绝不为空）
         expert_rules = self.db.get_agent_config("expert_archive_rules", "")
+
+        # ══ keyword_hint 快速通道（最高优先级）══════════════════════════
+        # 若调用方传入了用户手动填写的正确片名，跳过 AI 推断，直接返回。
+        # 这是「人在回路」机制的入口：人的判断永远高于 AI 猜测。
+        if keyword_hint and keyword_hint.strip():
+            _hint = keyword_hint.strip()
+            logger.info(f"[AI][KEYWORD_HINT] 使用用户提供的片名覆盖 AI 推断: '{_hint}'")
+            return {
+                "query": _hint,
+                "year": "",
+                "type": (type_hint or "movie").strip().lower() or "movie",
+                "season": None,
+                "episode": None,
+            }
+        # ══════════════════════════════════════════════════════════════
         
         # 🚀 第二步：从完整路径提取父目录名作为额外线索
         # 例：'/download/tv/The Boys/Season 03/The.Boys.S03E01.mkv' → 'The Boys'
@@ -1043,18 +1061,17 @@ class AIAgent:
             system_prompt=expert_rules,
             prefer_local=True,
             user_prompt=(
-                f"请分析以下影视文件：\n"
+                f"请分析以下影视文件，严格按照 System Prompt 的 JSON 契约输出：\n"
                 f"文件路径: {full_path}\n"
                 f"父目录名（强信号，通常即为作品名）: {parent_dir_hint}\n"
                 f"清洗后文件名: {cleaned_name}\n"
                 f"类型提示: {type_hint or 'movie'}\n\n"
-                f"⚠️ 重要约束：\n"
-                f"1. 优先以【父目录名】作为作品英文原名的参考依据\n"
-                f"2. query 只能是作品官方英文原名，禁止包含集标题、分辨率、编码格式\n"
-                f"3. 对于剧集，query 只输出剧名本身（如 'The Boys'），不含当集标题（如 'The Payback'）\n"
-                f"4. year 字段：只能填写文件名或路径中明确出现的年份数字，禁止用你的知识推断播出年份，如果没有年份信息就返回空字符串\n"
-                f"5. 严禁发散联想，query 必须严格来自文件名或路径中出现的词汇，不可凭空创造\n"
-                f"请严格按照 System 设定的 JSON 契约输出。"
+                f"⚠️ 关键提示：\n"
+                f"1. 优先以【父目录名】作为作品名的参考依据\n"
+                f"2. 对于剧集，query 只输出剧名本身，不含单集标题\n"
+                f"3. year 只能填写文件名或路径中明确出现的年份，无年份信息填空字符串\n"
+                f"4. 华语优先铁律已在 System Prompt 中定义，必须遵守\n"
+                f"5. 必须输出 query、year、type 三个字段，剧集还需 season 和 episode"
             )
         )
         
@@ -1102,8 +1119,9 @@ class AIAgent:
             return {
                 "query": _fallback_query,
                 "year": "",
-                "chinese_title": "",
                 "type": (type_hint or "movie").strip().lower() or "movie",
+                "season": None,
+                "episode": None,
             }
 
         # ── V2.1 弹性审计分流 ────────────────────────────────────────
@@ -1129,8 +1147,9 @@ class AIAgent:
             return {
                 "query": _fallback_query,
                 "year": "",
-                "chinese_title": "",
                 "type": (type_hint or "movie").strip().lower() or "movie",
+                "season": None,
+                "episode": None,
             }
         # _confidence == "PASS": 直接继续第五步，无需任何处理
         
@@ -1144,6 +1163,16 @@ class AIAgent:
         query = re.sub(r"\b(19|20)\d{2}\b", "", query).strip()  # 去年份
         query = re.sub(r'[/\\]', ' ', query).strip()            # 去路径斜杠
         query = re.sub(r'\s{2,}', ' ', query).strip()           # 去多余空格
+
+        # ── 字段完整性校验 ────────────────────────────────────────────
+        if not data.get("year") and year:
+            logger.debug(f"[AI][FIELD] year 字段缺失，已从数据中提取: '{year}'")
+        if not data.get("type"):
+            logger.warning(f"[AI][FIELD] type 字段缺失，将使用 type_hint='{type_hint}' 兜底")
+        if data.get("type") == "tv" and data.get("season") is None:
+            logger.warning(f"[AI][FIELD] 剧集 season 字段缺失，将默认为 1 | query='{query}'")
+        if data.get("type") == "tv" and data.get("episode") is None:
+            logger.debug(f"[AI][FIELD] 剧集 episode 字段缺失 | query='{query}'")
 
         # ── 幻觉纠偏：AI 返回非标准 type 值时强制映射 ────────────────
         # 支持的幻觉词：film/films/movies -> movie；series/show/shows/anime -> tv
@@ -1180,6 +1209,7 @@ class AIAgent:
         return {
             "query": query or (cleaned_name or "").strip(),
             "year": year[:4] if len(year) >= 4 else year,
-            "chinese_title": (data.get("chinese_title") or "").strip(),
             "type": media_type,
+            "season": data.get("season"),
+            "episode": data.get("episode"),
         }

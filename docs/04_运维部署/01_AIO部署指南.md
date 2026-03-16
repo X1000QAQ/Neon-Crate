@@ -2,7 +2,7 @@
 
 **文档编号**：OPS-001  
 **版本**：v1.0.0-Stable  
-**最后更新**：2026-03-14  
+**最后更新**：2026-03-15  
 
 ---
 
@@ -72,7 +72,133 @@ python3 -c "import secrets; print(secrets.token_hex(64))"
 
 ---
 
-## 五、启动方案
+## 五、数据库自动迁移引擎（v1.0.1-Enhanced）
+
+### 版本迁移机制（_migrate_database）
+
+**业务链路**：
+```
+1. 读取 system_meta 中的当前 schema_version -> 
+2. 遍历 MIGRATIONS，执行所有版本号 > 当前版本的任务 -> 
+3. 每个迁移任务独占一个事务（BEGIN ... COMMIT / ROLLBACK）-> 
+4. 迁移完成后更新 schema_version -> 
+5. 任何迁移失败立即 rollback 并抛出异常，阻止系统启动
+```
+
+**实现细节**：
+```python
+# db_manager.py: _migrate_database()
+def _migrate_database(self):
+    with self.db_lock:
+        conn = self._get_conn()
+        
+        # Step 1: 读取当前版本
+        row = conn.execute(
+            "SELECT value FROM system_meta WHERE key = 'schema_version'"
+        ).fetchone()
+        current_version = row[0] if row else "1.0"
+        
+        # Step 2: 遍历迁移任务
+        for target_version, description, migrate_fn in self.MIGRATIONS:
+            # 版本比较：使用 tuple 数值比较，避免字符串排序陷阱
+            def _ver(v: str):
+                return tuple(int(x) for x in v.split("."))
+            
+            if _ver(target_version) <= _ver(current_version):
+                continue  # 已完成的迁移跳过
+            
+            try:
+                # Step 3: 事务开启与迁移执行
+                conn.execute("BEGIN")
+                migrate_fn(conn)
+                # Step 4: 更新版本号（在同一事务内）
+                conn.execute(
+                    "INSERT OR REPLACE INTO system_meta (key, value) VALUES ('schema_version', ?)",
+                    (target_version,)
+                )
+                conn.commit()
+                current_version = target_version
+                
+            except Exception as e:
+                # Step 5: 异常处理与回滚
+                conn.rollback()
+                error_msg = f"[FATAL] 迁移 {current_version} -> {target_version} 失败，已回滚。错误: {e}"
+                logger.error(error_msg)
+                raise RuntimeError(error_msg) from e
+```
+
+**启动日志示例**：
+```
+[INFO][DB] 执行迁移 1.0 -> 1.0.1: 添加 is_archive 字段
+[INFO][DB] 迁移完成，当前版本: 1.0.1
+[INFO][DB] 数据库初始化完成 (Baseline Version 1.0.1)
+```
+
+### 敏感密钥明文转密文迁移（_migrate_sensitive_keys）
+
+**业务链路**：
+```
+1. 读取 config.json 文件 -> 
+2. 扫描 SENSITIVE_KEYS 列表中的明文密钥 -> 
+3. 将非空明文密钥加密后写入 secure_keys.json -> 
+4. 清空 config.json 中的明文密钥 -> 
+5. 后续读取时，ConfigRepo 会自动从 secure_keys.json 解密
+```
+
+**实现细节**：
+```python
+# db_manager.py: _migrate_sensitive_keys()
+def _migrate_sensitive_keys(self):
+    if not os.path.exists(self.config_path):
+        return
+    
+    with open(self.config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    settings = config.get("settings", {})
+    crypto = get_crypto_manager()
+    
+    # Step 1: 扫描明文密钥
+    keys_to_migrate = {}
+    for key in self.SENSITIVE_KEYS:
+        value = settings.get(key, "")
+        if value and value.strip():
+            keys_to_migrate[key] = value
+    
+    if not keys_to_migrate:
+        return  # 无需迁移
+    
+    # Step 2: 加载现有的加密存储
+    secure_data = {}
+    if os.path.exists(self.secure_keys_path):
+        with open(self.secure_keys_path, "r", encoding="utf-8") as f:
+            secure_data = json.load(f)
+    
+    # Step 3: 加密并存储密钥
+    for key, value in keys_to_migrate.items():
+        encrypted = crypto.encrypt_api_key(value)
+        secure_data[key] = encrypted
+        settings[key] = ""  # 清空明文
+    
+    # Step 4: 原子写入加密文件
+    with open(self.secure_keys_path, "w", encoding="utf-8") as f:
+        json.dump(secure_data, f, indent=4)
+    
+    # Step 5: 原子写入配置文件
+    with open(self.config_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=4, ensure_ascii=False)
+    
+    logger.info(f"[DB] 已迁移 {len(keys_to_migrate)} 个敏感密钥到加密存储")
+```
+
+**幂等性**：多次执行不会重复迁移（已加密的密钥会被跳过）。
+
+**启动日志示例**：
+```
+[INFO][DB] 已迁移 3 个敏感密钥到加密存储
+[INFO][DB] 敏感密钥迁移完成
+```
+
+---
 
 ```bash
 # 方案 A：直接启动
@@ -311,3 +437,38 @@ curl -H "Authorization: Bearer <your-token>" http://<NAS-IP>:8000/api/v1/system/
 - [ ] 局域网其他设备通过 `http://<NAS-IP>:8000` 可正常访问
 
 *Neon Crate DevOps 团队 | v1.0.0-Stable | 2026-03-15*
+
+---
+
+## 十二、变更日志
+
+### 2026-03-15 — 生产就绪修复批次
+
+#### SPA 路由回退（404）
+- **文件**：`backend/app/core/app_factory.py`
+- `spa_fallback_handler` 改用 `Path(__file__).resolve()` 绝对路径定位 `index.html`，消除 Docker CWD 不确定导致的 404
+- `_mount_static_resources` 的 `StaticFiles` 挂载同样改用绝对路径
+
+#### 局域网鉴权 403 → 401（auth.py / config）
+- **文件**：`backend/app/api/auth.py`
+  - `HTTPBearer(auto_error=False)`：无 token 时不自动抛 403，由 `get_current_user` 统一返回 401
+  - 新增 `WWW-Authenticate: Bearer` 响应头，符合 RFC 规范
+- **文件**：`backend/app/infra/config/__init__.py`
+  - `CORS_ORIGINS` 默认值改为 `["*"]`，放行所有局域网来源
+- **文件**：`backend/app/core/app_factory.py`
+  - `allow_credentials=False`（与 `allow_origins=["*"]` 兼容，JWT 走 Authorization header）
+
+#### 登录页 401 轮询噪音（前端架构）
+- **文件**：`frontend/components/common/AuthGuard.tsx`
+  - 新增 `authenticatedWrapper` prop：只在 `isAuthenticated=true` 时用 Wrapper 包裹 children
+  - `/auth/login` 路径直接渲染裸 children，跳过 Wrapper
+- **文件**：`frontend/components/common/ClientShell.tsx`
+  - 新增 `AuthenticatedShell` 内部组件（包含 `SettingsProvider` + `LogProvider` + `AiSidebar`）
+  - 通过 `authenticatedWrapper={AuthenticatedShell}` 传入 `AuthGuard`
+  - **效果**：`SettingsProvider` / `LogProvider` 只在认证通过后挂载，登录页零 API 轮询
+
+#### DB Schema 基准线重置
+- **文件**：`backend/app/infra/database/db_manager.py`
+  - 所有历史迁移字段合并进初始 `CREATE TABLE`，`media_archive` 表也在初始化时直接创建
+  - `schema_version` 初始值设为 `'1.0.0'`，新安装启动日志：`[INFO][DB] 数据库初始化完成 (Baseline Version 1.0.0)`
+  - `_register_migrations` 清空历史迁移注册，`MIGRATIONS = []`，新安装不出现任何迁移日志

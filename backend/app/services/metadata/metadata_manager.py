@@ -389,6 +389,18 @@ class MetadataManager:
         if imdb_id:
             ET.SubElement(root, "imdbid").text = imdb_id
 
+        # TMM 3.1.x 兼容：写入 <uniqueid> 节点
+        _tmdb_val = str(_safe_get(details, "id", default=""))
+        if _tmdb_val:
+            _uid_tmdb = ET.SubElement(root, "uniqueid")
+            _uid_tmdb.set("type", "tmdb")
+            _uid_tmdb.set("default", "true")
+            _uid_tmdb.text = _tmdb_val
+        if imdb_id:
+            _uid_imdb = ET.SubElement(root, "uniqueid")
+            _uid_imdb.set("type", "imdb")
+            _uid_imdb.text = imdb_id
+
         for genre in _safe_get(details, "genres", default=[]):
             name = _safe_get(genre, "name", default="")
             if name:
@@ -438,6 +450,18 @@ class MetadataManager:
         imdb_id = _safe_get(details, "external_ids", "imdb_id", default="")
         if imdb_id:
             ET.SubElement(root, "imdbid").text = imdb_id
+
+        # TMM compatibility: write <uniqueid> nodes
+        _tmdb_val = str(_safe_get(details, "id", default=""))
+        if _tmdb_val:
+            _uid_tmdb = ET.SubElement(root, "uniqueid")
+            _uid_tmdb.set("type", "tmdb")
+            _uid_tmdb.set("default", "true")
+            _uid_tmdb.text = _tmdb_val
+        if imdb_id:
+            _uid_imdb = ET.SubElement(root, "uniqueid")
+            _uid_imdb.set("type", "imdb")
+            _uid_imdb.text = imdb_id
 
         for genre in _safe_get(details, "genres", default=[]):
             name = _safe_get(genre, "name", default="")

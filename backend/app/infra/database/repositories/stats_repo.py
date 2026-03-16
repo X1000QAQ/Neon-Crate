@@ -40,12 +40,26 @@ class StatsRepo(BaseRepository):
             return {"movies": movies, "tv_shows": tv_shows, "pending": pending, "completed": completed}
 
     def get_all_data(self, search_keyword: Optional[str] = None, include_ignored: bool = False) -> List[Dict[str, Any]]:
-        """获取所有任务数据（含搜索过滤）。默认隐藏 ignored 记录，需显式传 include_ignored=True 才返回。"""
+        """
+        获取所有任务数据（含搜索过滤）。默认隐藏 ignored 记录，需显式传 include_ignored=True 才返回。
+        
+        ── 业务链路 ──
+        1. 构建双表 UNION ALL 查询（热表 tasks + 冷表 media_archive）-> 
+        2. 统一使用 original_task_id 作为冷表的对外 ID -> 
+        3. 应用搜索过滤（可选）-> 4. 按创建时间倒序排列 -> 
+        5. 将查询结果转换为字典列表 -> 6. 返回最终结果
+        """
         with self.db_lock:
             conn = self._get_conn()
+            # ── Step 1: 构建过滤条件 ──
+            # 业务链路：1. 若 include_ignored=False，则添加 status != 'ignored' 过滤 -> 
+            # 2. 否则返回所有记录（包括 ignored）
             ignored_clause = "" if include_ignored else " AND status != 'ignored'"
             
-            # 🚀 双表联合查询：统一使用 original_task_id 作为冷表的对外 ID
+            # ── Step 2: 构建双表 UNION ALL 查询 ──
+            # 业务链路：1. 查询热表 tasks（所有字段直接返回）-> 
+            # 2. 查询冷表 media_archive（将 original_task_id 映射为 id，status 固定为 'archived'）-> 
+            # 3. 使用 UNION ALL 合并两个查询结果（保留重复记录，后续去重）
             base_query = f"""
                 SELECT id, path, file_name, clean_name, type, status, tmdb_id, imdb_id, title, year, 
                        target_path, sub_status, last_sub_check, created_at, poster_path, local_poster_path, 
@@ -60,14 +74,21 @@ class StatsRepo(BaseRepository):
                 WHERE 1=1
             """
             
+            # ── Step 3: 应用搜索过滤（可选）──
+            # 业务链路：1. 若有搜索关键词，则在 file_name / clean_name / title 中模糊匹配 -> 
+            # 2. 使用 WITH 子句包装 UNION ALL 查询 -> 3. 在 WHERE 中应用搜索条件
             if search_keyword:
                 cursor = conn.execute(
                     f"WITH combined AS ({base_query}) SELECT * FROM combined WHERE file_name LIKE ? OR clean_name LIKE ? OR title LIKE ? ORDER BY created_at DESC",
                     (f"%{search_keyword}%", f"%{search_keyword}%", f"%{search_keyword}%")
                 )
             else:
+                # ── Step 4: 无搜索条件时直接返回所有记录 ──
+                # 业务链路：1. 执行 UNION ALL 查询 -> 2. 按创建时间倒序排列
                 cursor = conn.execute(f"WITH combined AS ({base_query}) SELECT * FROM combined ORDER BY created_at DESC")
             
+            # ── Step 5: 将查询结果转换为字典列表 ──
+            # 业务链路：1. 获取所有行 -> 2. 逐行转换为字典 -> 3. 返回字典列表
             rows = cursor.fetchall()
             return [
                 {

@@ -257,6 +257,26 @@ export default function MediaWall() {
     }
   };
 
+  const handleRebuild = async (params: {
+    task_id: number;
+    is_archive: boolean;
+    media_type: string;
+    refix_nfo: boolean;
+    refix_poster: boolean;
+    refix_subtitle: boolean;
+    keyword_hint?: string;
+    tmdb_id?: number;
+    nuclear_reset?: boolean;
+  }) => {
+    try {
+      const res = await api.rebuildTask(params);
+      showToast(res.message || '补录完成');
+      await loadTasks();
+    } catch (error) {
+      showToast(`补录失败: ${(error as Error)?.message ?? '未知错误'}`);
+    }
+  };
+
   return (
     <div className="w-full h-full flex flex-col">
       <div className="space-y-6 flex-1">
@@ -294,6 +314,7 @@ export default function MediaWall() {
             isSomeSelected={isSomeCurrentPageSelected}
             onRetry={handleRetry}
             onDelete={handleDelete}
+            onRebuild={handleRebuild}
           />
 
           {/* 批量删除二次确认弹窗 */}

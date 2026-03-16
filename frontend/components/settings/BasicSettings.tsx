@@ -1,8 +1,11 @@
 'use client';
 
+import { useState } from 'react';
 import type { I18nKey } from '@/lib/i18n';
 import { useSettings } from '@/hooks/useSettings';
+import { api } from '@/lib/api';
 import { NeuralCoreSwitch, NeuralInput, NeuralSection, NeuralSelect } from './NeuralPrimitives';
+import NeuralConfirmModal from './NeuralConfirmModal';
 
 interface Props {
   t: (key: I18nKey) => string;
@@ -39,7 +42,11 @@ function LangDualSwitch({ title, description, settingKey, value, onUpdate, t }: 
 }
 
 export default function BasicSettings({ t }: Props) {
-  const { config, updateSetting } = useSettings();
+  const { config, refreshSettings } = useSettings();
+  const { updateSetting } = useSettings();
+  const [formatResetModal, setFormatResetModal] = useState(false);
+  const [resetting, setResetting] = useState(false);
+
   if (!config) return null;
 
   const handleLogout = () => {
@@ -49,8 +56,36 @@ export default function BasicSettings({ t }: Props) {
     }
   };
 
+  const handleFormatReset = async () => {
+    setFormatResetModal(false);
+    setResetting(true);
+    try {
+      const res = await api.resetSettings('formats');
+      if (res.success) {
+        await refreshSettings();
+      } else {
+        alert(`重置失败: ${res.message || '未知错误'}`);
+      }
+    } catch (err) {
+      alert(`重置失败: ${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setResetting(false);
+    }
+  };
+
   return (
     <div className="space-y-8">
+      <NeuralConfirmModal
+        isOpen={formatResetModal}
+        title={t('modal_confirm')}
+        message={t('basic_format_reset_confirm')}
+        confirmLabel={t('modal_confirm')}
+        cancelLabel={t('modal_cancel')}
+        variant="warning"
+        onConfirm={handleFormatReset}
+        onCancel={() => setFormatResetModal(false)}
+      />
+
       <NeuralSection title={t('basic_interface')}>
         <NeuralSelect label={t('basic_ui_lang')} value={config.settings.ui_lang ?? 'zh'} onChange={(e) => updateSetting('ui_lang', e.target.value)}>
           <option value="zh">{t('basic_ui_lang_zh')}</option>
@@ -73,19 +108,19 @@ export default function BasicSettings({ t }: Props) {
               size={76} label={t('basic_cron_enabled')}
               statusText={`${t('basic_cron_enabled_desc')} · ${config.settings.cron_enabled ? t('basic_online') : t('basic_offline')}`}
             />
-            <NeuralCoreSwitch 
-              active={!!config.settings.auto_scrape} 
-              onToggle={() => updateSetting('auto_scrape', !config.settings.auto_scrape)} 
-              size={76} 
-              label={t('basic_auto_scrape_label')} 
-              statusText={t('basic_auto_scrape_desc')} 
+            <NeuralCoreSwitch
+              active={!!config.settings.auto_scrape}
+              onToggle={() => updateSetting('auto_scrape', !config.settings.auto_scrape)}
+              size={76}
+              label={t('basic_auto_scrape_label')}
+              statusText={t('basic_auto_scrape_desc')}
             />
-            <NeuralCoreSwitch 
-              active={!!config.settings.auto_subtitles} 
-              onToggle={() => updateSetting('auto_subtitles', !config.settings.auto_subtitles)} 
-              size={76} 
-              label={t('basic_auto_subtitles_label')} 
-              statusText={t('basic_auto_subtitles_desc')} 
+            <NeuralCoreSwitch
+              active={!!config.settings.auto_subtitles}
+              onToggle={() => updateSetting('auto_subtitles', !config.settings.auto_subtitles)}
+              size={76}
+              label={t('basic_auto_subtitles_label')}
+              statusText={t('basic_auto_subtitles_desc')}
             />
           </div>
           <div className="border-t border-cyber-cyan/10 pt-6">
@@ -96,6 +131,35 @@ export default function BasicSettings({ t }: Props) {
 
       <NeuralSection title={t('basic_section_filesize_filter')}>
         <NeuralInput label={t('basic_min_size')} type="number" min={0} value={String(config.settings.min_size_mb ?? 50)} onChange={(e) => { const val = parseInt(e.target.value, 10); updateSetting('min_size_mb', isNaN(val) ? 0 : val); }} hint={t('basic_min_size_hint')} />
+      </NeuralSection>
+
+      <NeuralSection title={t('basic_section_formats')}>
+        <p className="text-white/50 text-xs mb-3">{t('basic_format_desc')}</p>
+        <NeuralInput
+          label={t('basic_video_exts')}
+          type="text"
+          value={config.settings.supported_video_exts ?? ''}
+          onChange={(e) => updateSetting('supported_video_exts', e.target.value)}
+          hint=".mkv, .mp4, .avi, ..."
+        />
+        <NeuralInput
+          label={t('basic_subtitle_exts')}
+          type="text"
+          value={config.settings.supported_subtitle_exts ?? ''}
+          onChange={(e) => updateSetting('supported_subtitle_exts', e.target.value)}
+          hint=".srt, .ass, .vtt, ..."
+        />
+        <div className="mt-4 flex justify-start">
+          <button
+            type="button"
+            disabled={resetting}
+            onClick={() => setFormatResetModal(true)}
+            className="px-6 py-3 bg-transparent border-2 border-cyber-red text-cyber-red font-bold uppercase tracking-widest hover:bg-cyber-red hover:text-black transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{ boxShadow: '0 0 20px rgba(255, 1, 60, 0.35), inset 0 0 20px rgba(255, 1, 60, 0.08)' }}
+          >
+            {resetting ? '重置中...' : t('btn_reset_defaults')}
+          </button>
+        </div>
       </NeuralSection>
 
       <div className="pt-6 mt-6 border-t border-cyber-red/40">

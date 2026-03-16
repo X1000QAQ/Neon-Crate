@@ -1,730 +1,566 @@
 /**
- * ============================================================================
- * MediaTable - 媒体任务卡片列表组件
- * ============================================================================
- * 
- * [组件职责]
- * - 以卡片形式渲染任务列表（含海报、标题、状态、路径、操作按钮）
- * - 支持批量选择（全选 / 反选）及单条选择
- * - 对 ignored 状态任务渲染 VHS 磁带损坏特效（7 层叠加）
- * - 渲染流水线进度条（pending 30% → archived 60% → 字幕完成 100%）
- *
- * [布局架构]
- * 
- * 1. 批量操作工具栏
- *    ┌────────────────────────────────────────────────┐
- *    │ [✓] 全选本页 | 反选本页                        │
- *    └────────────────────────────────────────────────┘
- *    - 固定在列表顶部
- *    - 毛玻璃效果: blur(15px)
- *    - 底部边框: border-cyber-cyan/50
- * 
- * 2. 任务卡片 (Flex 横向布局)
- *    ┌──┬────────┬──────────────────────────────────────┬────────┬────────┐
- *    │☐ │ 海报区 │         任务信息区                   │ 时间戳 │ 操作区 │
- *    │  │ 64x96  │ 标题+文件名+路径+状态标签+外部链接   │        │ 按钮组 │
- *    └──┴────────┴──────────────────────────────────────┴────────┴────────┘
- *    
- *    海报区 (64x96px):
- *    - 固定宽度: w-16 h-24
- *    - VHS 特效层级 (仅 ignored 状态):
- *      1. 灰度滤镜 (CSS filter)
- *      2. 噪点纹理 (SVG, z-10)
- *      3. 扫描线 (z-15)
- *      4. 磁带拉伸 (z-20)
- *      5. 色彩分离 (z-25)
- *      6. 错误印章 (z-30)
- *      7. 时间码 (z-35)
- *    
- *    任务信息区 (flex-1):
- *    - 标题: text-base font-semibold (黄色发光)
- *    - 文件名: text-xs (青色半透明)
- *    - 路径: text-xs (原始路径 + 入库路径)
- *    - 状态标签: 横向排列 (主状态 + 字幕状态)
- *    - 外部链接: TMDB + IMDb 按钮
- *    
- *    操作区 (flex-shrink-0):
- *    - 重试按钮 (仅失败任务显示)
- *    - 删除按钮 (红色警示风格)
- * 
- * 3. 流水线进度条
- *    ┌────────────────────────────────────────────────┐
- *    │ ████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
- *    └────────────────────────────────────────────────┘
- *    - 高度: h-1
- *    - 位置: 卡片底部 (mt-2)
- *    - 进度: 30% (pending) → 60% (archived) → 100% (字幕完成)
- *    - 颜色: 青色渐变 (未完成) / 青绿渐变 (已完成)
- * 
- * [赛博视觉元素]
- * 
- * 卡片发光效果:
- * - 毛玻璃: blur(25px)
- * - 外层光晕: 0 0 40px rgba(6,182,212,0.2)
- * - Hover: 边框全亮 + 背景5%填充
- * 
- * VHS 磁带损坏特效 (ignored 状态):
- * - 7层叠加效果，z-index 从 10 到 35
- * - 灰度 + 对比度 + 棕褐色滤镜
- * - 噪点 + 扫描线 + 色彩分离
- * - TAPE ERROR 印章 + REC 时间码
- * 
- * [性能优化]
- * - 卡片入场动画延迟: idx * 0.1s (交错显示)
- * - 海报懒加载: SecureImage 组件处理
- * 
- * [架构说明]
- * 纯展示层组件，无内部状态，所有数据和回调由父组件 page.tsx 注入
- * 
- * ============================================================================
+ * MediaTable - 媒体任务三重折叠列表
+ * Level 1: 作品根节点 (电影/剧集)
+ * Level 2: 季节点 (仅剧集)
+ * Level 3: 单集节点 (仅剧集)
+ * 补录三剑客: 📄 NFO / 🖼️ 海报 / ⌨️ 字幕 — 放在"创建时间"时间戳正下方
  */
 'use client';
 
-import { useState, memo } from 'react';
-import { Film, Tv, RefreshCw, Trash2, AlertCircle } from 'lucide-react';
+import { useState, memo, useMemo, useCallback } from 'react';
+import {
+  Film, Tv, RefreshCw, Trash2, AlertCircle,
+  ChevronDown, ChevronRight, FileText, Image, Subtitles,
+} from 'lucide-react';
+import SecureImage from '@/components/common/SecureImage';
+import RebuildDialog, { type RebuildMode } from './RebuildDialog';
+import type { Task } from '@/types';
+import { cn, formatDate } from '@/lib/utils';
+import { useLanguage } from '@/hooks/useLanguage';
 
-/**
- * 根据任务主状态和字幕子状态计算流水线进度百分比
- *
- * 进度三段式定义：
- * - 30%  → pending：文件已扫描入库，等待刮削
- * - 60%  → archived（无字幕）：元数据已刮削，等待字幕
- * - 100% → archived + sub_status 完成：全流程完成
- * - 0%   → failed / ignored：不展示进度条
- *
- * 注意：scraped 是历史遗留状态值，等同于 archived，兼容保留
- */
+// ── 进度计算 ──────────────────────────────────────────────────────────
 function getProgress(status: string, subStatus?: string | null): number {
   const s = (status || '').toLowerCase();
   const ss = (subStatus || '').toLowerCase();
   if (s === 'pending') return 30;
   if (s === 'archived' || s === 'scraped') {
-    if (ss === 'scraped' || ss === 'found') return 100;
+    if (ss === 'scraped' || ss === 'found' || ss === 'success') return 100;
     return 60;
   }
   return 0;
 }
-import SecureImage from '@/components/common/SecureImage';
-import type { Task } from '@/types';
-import { cn, formatDate } from '@/lib/utils';
-import { useLanguage } from '@/hooks/useLanguage';
 
-interface MediaTableProps {
-  loading: boolean;           // 是否正在加载数据（显示骨架屏）
-  tasks: Task[];              // 任务列表数据
-  selectedIds: Set<number>;   // 已选中的任务 ID 集合
-  onToggleSelect: (id: number) => void;   // 切换单条选中状态
-  onSelectAll: () => void;               // 全选当前页
-  onInvertSelection: () => void;          // 反选当前页
-  isAllSelected: boolean;    // 当前页是否全部选中
-  isSomeSelected: boolean;   // 当前页是否有部分选中（用于 indeterminate 状态）
-  onRetry: (taskId: number) => void;   // 重试失败任务（重置为 pending，等待下次扫描处理）
-  onDelete: (taskId: number) => void;  // 删除单条任务记录（仅数据库，不删物理文件）
+// ── 分组数据结构 ──────────────────────────────────────────────────────
+interface MediaGroup {
+  key: string;
+  media_type: 'movie' | 'tv';
+  task?: Task;                       // 电影：直接存单条
+  seasons: Map<number, Task[]>;      // 剧集：season → episodes
+  total_count: number;
+  archived_count: number;
+  poster_path?: string;
+  tmdb_id?: number;
+  title?: string;
+  clean_name?: string;
 }
 
+// ── Props ─────────────────────────────────────────────────────────────
+export interface MediaTableProps {
+  loading: boolean;
+  tasks: Task[];
+  selectedIds: Set<number>;
+  onToggleSelect: (id: number) => void;
+  onSelectAll: () => void;
+  onInvertSelection: () => void;
+  isAllSelected: boolean;
+  isSomeSelected: boolean;
+  onRetry: (taskId: number) => void;
+  onDelete: (taskId: number) => void;
+  onRebuild: (params: {
+    task_id: number;
+    is_archive: boolean;
+    media_type: string;
+    refix_nfo: boolean;
+    refix_poster: boolean;
+    refix_subtitle: boolean;
+    keyword_hint?: string;
+    tmdb_id?: number;
+    nuclear_reset?: boolean;
+    season?: number;
+    episode?: number;
+  }) => Promise<void>;
+}
+
+// ── 状态色 ───────────────────────────────────────────────────────────
+function getStatusColor(status: string) {
+  const s = (status || '').toLowerCase();
+  if (s === 'archived') return 'border-cyber-cyan text-cyber-cyan bg-cyber-cyan/10';
+  if (s === 'failed') return 'border-cyber-red text-cyber-red bg-cyber-red/10';
+  if (s === 'ignored') return 'border-orange-400 text-orange-400 bg-orange-400/10 font-mono';
+  return 'border-cyber-cyan/30 text-cyber-cyan/70 bg-cyber-cyan/5';
+}
+function getSubStatusColor(sub?: string | null) {
+  const s = (sub ?? '').toLowerCase();
+  if (s === 'scraped' || s === 'success' || s === 'found') return 'border-cyber-cyan text-cyber-cyan bg-cyber-cyan/10';
+  if (s === 'failed' || s === 'missing') return 'border-cyber-red text-cyber-red bg-cyber-red/10';
+  return 'border-cyber-cyan/20 text-cyber-cyan/50 bg-cyber-cyan/5';
+}
+
+// ── 补录按钮是否可用 ─────────────────────────────────────────────────
+function canRebuild(status: string) {
+  const s = (status || '').toLowerCase();
+  return s === 'archived' || s === 'failed';
+}
+
+// ── 单集行（Level 3 / 电影叶节点）────────────────────────────────────
+interface TaskRowProps {
+  task: Task;
+  indent?: number;
+  onRetry: (id: number) => void;
+  onDelete: (id: number) => void;
+  onRebuildClick: (task: Task, mode: RebuildMode) => void;
+  rebuildingId: number | null;
+  processingId: number | null;
+  setProcessingId: (id: number | null) => void;
+}
+
+const TaskRow = memo(function TaskRow({
+  task, indent = 0, onRetry, onDelete, onRebuildClick,
+  rebuildingId, processingId, setProcessingId,
+}: TaskRowProps) {
+  const { t } = useLanguage();
+
+  const getPosterUrl = (t: Task) => t.local_poster_path || t.poster_path || '/placeholder-poster.jpg';
+
+  const rawName = task.file_name || task.file_path?.split(/[/\\]/).pop() || '-';
+  const noiseRe = /\b(4k|2160p|1080p|720p|480p|360p)\b/i;
+  const _bestName = task.title || task.clean_name;
+  const hasTitle = !!_bestName && _bestName !== rawName && !noiseRe.test(_bestName);
+  let displayTitle = hasTitle ? _bestName : rawName;
+  if (hasTitle) {
+    if (task.year) displayTitle += ` (${task.year})`;
+    if (task.media_type === 'tv') {
+      const s = task.season, e = task.episode;
+      if (s != null && e != null) displayTitle += ` S${String(s).padStart(2,'0')}E${String(e).padStart(2,'0')}`;
+      else if (s != null) displayTitle += ` Season ${s}`;
+    }
+  }
+
+  const isArchived = (task.status || '').toLowerCase() === 'archived';
+  const rebuildable = canRebuild(task.status);
+  const isRebuilding = rebuildingId === task.id;
+
+  const progress = getProgress(task.status, task.sub_status);
+  const progressColor = progress === 100
+    ? 'from-cyber-cyan to-green-400'
+    : 'from-cyber-cyan to-[rgba(0,230,246,0.5)]';
+
+  return (
+    <div
+      className="relative border border-cyber-cyan/30 p-3 hover:border-cyber-cyan hover:bg-cyber-cyan/5 transition-all"
+      style={{
+        marginLeft: indent,
+        backdropFilter: 'blur(25px)',
+        boxShadow: '0 0 30px rgba(6,182,212,0.15)',
+      }}
+    >
+      <div className="flex items-center gap-3">
+        {/* 海报 */}
+        <div className="relative w-14 h-20 flex-shrink-0 overflow-hidden border border-cyber-cyan/40">
+          <SecureImage
+            src={getPosterUrl(task)}
+            alt={task.title || task.clean_name || rawName}
+            width={56} height={80}
+            className="object-cover w-full h-full opacity-80"
+            fallback={
+              <div className="w-full h-full flex items-center justify-center bg-black/40">
+                {task.media_type === 'movie' ? <Film className="text-cyber-cyan/30" size={18}/> : <Tv className="text-cyber-cyan/30" size={18}/>}
+              </div>
+            }
+          />
+        </div>
+
+        {/* 信息区 */}
+        <div className="flex-1 min-w-0 flex items-center gap-3">
+          {/* 标题+路径 */}
+          <div className="flex-1 min-w-0">
+            {/* ── 标题行：TMDB 确认片名 + 年份 + 季集号 ──
+                业务链路：1. 判断是否有 TMDB 标题 -> 2. 若有则拼接年份和季集号 -> 3. 否则使用原始文件名
+            */}
+            <h4 className="font-semibold text-sm truncate text-cyber-yellow" style={{textShadow:'0 0 8px rgba(249,240,2,0.4)'}} title={displayTitle}>
+              {displayTitle}
+            </h4>
+            
+            {/* ── 原始文件名行：下载源中的原始文件名 ──
+                业务链路：1. 从 task.file_name 读取 -> 2. 若无则从 task.file_path 提取文件名 -> 3. 显示为灰色副标题
+            */}
+            <p className="text-xs truncate mt-0.5 text-cyber-cyan/50" title={rawName}>{rawName}</p>
+            
+            {/* 🚀 今生：目标入库路径 (置于上方)
+                业务链路：1. 检查 task.target_path 是否存在 -> 2. 若存在则显示为"入库路径" -> 3. 使用 t('path_dst') 获取多语言标签
+            */}
+            {task.target_path && (
+              <p className="text-cyber-cyan/30 text-xs truncate mt-1" title={task.target_path}>
+                <span className="text-cyber-cyan/50 font-mono mr-1">{t('path_dst')}:</span>{task.target_path}
+              </p>
+            )}
+            
+            {/* 前世：原始绝对路径 (置于下方)
+                业务链路：1. 显示 task.file_path（下载源中的原始路径）-> 2. 使用 t('path_src') 获取多语言标签 -> 3. 用于追溯文件来源
+            */}
+            <p className="text-cyber-cyan/40 text-xs truncate mt-0.5" title={task.file_path}>
+              <span className="text-cyber-cyan/60 font-mono mr-1">{t('path_src')}:</span>{task.file_path}
+            </p>
+          </div>
+
+          {/* 状态标签 */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <span className={cn('px-2 py-0.5 text-xs font-semibold border', getStatusColor(task.status))}>
+              {t(('status_' + task.status.toLowerCase()) as Parameters<typeof t>[0]) || task.status}
+            </span>
+            <span className={cn('px-2 py-0.5 text-xs font-semibold border', getSubStatusColor(task.sub_status))}>
+              {t(('sub_status_' + (task.sub_status || 'pending').toLowerCase()) as Parameters<typeof t>[0]) || task.sub_status || 'pending'}
+            </span>
+          </div>
+
+          {/* 外链 */}
+          <div className="flex items-center gap-1 flex-shrink-0">
+            {task.tmdb_id && (
+              <a href={`https://www.themoviedb.org/${task.media_type === 'tv' ? 'tv' : 'movie'}/${task.tmdb_id}`}
+                target="_blank" rel="noopener noreferrer"
+                className="px-2 py-0.5 text-xs border border-cyber-cyan/60 text-cyber-cyan/70 hover:bg-cyber-cyan hover:text-black transition-all">TMDB</a>
+            )}
+            {task.imdb_id && (
+              <a href={`https://www.imdb.com/title/${task.imdb_id}`}
+                target="_blank" rel="noopener noreferrer"
+                className="px-2 py-0.5 text-xs border border-yellow-400/60 text-yellow-400/70 hover:bg-yellow-400 hover:text-black transition-all">IMDb</a>
+            )}
+          </div>
+
+          {/* 时间戳 + 补录三剑客 — 绝对约束：三剑客在时间戳正下方 */}
+          <div className="flex-shrink-0 flex flex-col items-end gap-1">
+            <span className="text-cyber-cyan/50 text-xs whitespace-nowrap">
+              {task.created_at ? formatDate(task.created_at) : t('task_just_now')}
+            </span>
+            {/* 补录三剑客 */}
+            {rebuildable && (
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => onRebuildClick(task, 'nfo')}
+                  disabled={isRebuilding}
+                  title={t('tooltip_rebuild_nfo')}
+                  className={cn(
+                    'p-1 border text-xs transition-all',
+                    isRebuilding ? 'border-cyber-cyan/20 text-cyber-cyan/20 cursor-wait'
+                      : 'border-cyber-cyan/50 text-cyber-cyan/70 hover:border-cyber-cyan hover:bg-cyber-cyan/10'
+                  )}
+                >
+                  <FileText size={12}/>
+                </button>
+                <button
+                  onClick={() => onRebuildClick(task, 'poster')}
+                  disabled={isRebuilding}
+                  title={t('tooltip_rebuild_poster')}
+                  className={cn(
+                    'p-1 border text-xs transition-all',
+                    isRebuilding ? 'border-purple-400/20 text-purple-400/20 cursor-wait'
+                      : 'border-purple-400/50 text-purple-400/70 hover:border-purple-400 hover:bg-purple-400/10'
+                  )}
+                >
+                  <Image size={12}/>
+                </button>
+                <button
+                  onClick={() => onRebuildClick(task, 'subtitle')}
+                  disabled={isRebuilding}
+                  title={t('tooltip_trigger_subtitle')}
+                  className={cn(
+                    'p-1 border text-xs transition-all',
+                    isRebuilding ? 'border-green-400/20 text-green-400/20 cursor-wait'
+                      : 'border-green-400/50 text-green-400/70 hover:border-green-400 hover:bg-green-400/10'
+                  )}
+                >
+                  <Subtitles size={12}/>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* 操作按钮 */}
+          <div className="flex items-center gap-1 flex-shrink-0">
+            {task.status === 'failed' && (
+              <button
+                onClick={async () => { if (processingId !== null) return; setProcessingId(task.id); try { await Promise.resolve(onRetry(task.id)); } finally { setProcessingId(null); } }}
+                disabled={processingId === task.id}
+                className={cn('p-1.5 border border-cyber-cyan text-cyber-cyan hover:bg-cyber-cyan hover:text-black transition-all', processingId === task.id && 'opacity-50 cursor-not-allowed')}
+                title={t('btn_retry')}
+              >
+                <RefreshCw size={14} className={cn(processingId === task.id && 'animate-spin')}/>
+              </button>
+            )}
+            <button
+              onClick={async () => { if (processingId !== null) return; setProcessingId(task.id); try { await Promise.resolve(onDelete(task.id)); } finally { setProcessingId(null); } }}
+              disabled={processingId === task.id}
+              className={cn('p-1.5 border border-cyber-red text-cyber-red hover:bg-cyber-red hover:text-white transition-all', processingId === task.id && 'opacity-50 cursor-not-allowed')}
+              title={t('task_delete_record')}
+            >
+              <Trash2 size={14} className={cn(processingId === task.id && 'animate-pulse')}/>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* 进度条 */}
+      {progress > 0 && (
+        <div className="relative h-1 bg-cyber-cyan/10 border-t border-cyber-cyan/20 mt-2 overflow-hidden">
+          <div
+            className={`absolute inset-y-0 left-0 bg-gradient-to-r ${progressColor} transition-all duration-700`}
+            style={{ width: `${progress}%`, boxShadow: '0 0 8px rgba(0,230,246,0.8)' }}
+          />
+        </div>
+      )}
+    </div>
+  );
+});
+
+// ── 主组件 ───────────────────────────────────────────────────────────
 function MediaTable({
-  loading,
-  tasks,
-  selectedIds,
-  onToggleSelect,
-  onSelectAll,
-  onInvertSelection,
-  isAllSelected,
-  isSomeSelected,
-  onRetry,
-  onDelete,
+  loading, tasks, selectedIds,
+  onToggleSelect, onSelectAll, onInvertSelection,
+  isAllSelected, isSomeSelected,
+  onRetry, onDelete, onRebuild,
 }: MediaTableProps) {
   const { t } = useLanguage();
-  // 🚀 飞行期防护：记录正在处理中的任务 ID，防止连点重复请求
   const [processingId, setProcessingId] = useState<number | null>(null);
+  const [rebuildingId, setRebuildingId] = useState<number | null>(null);
 
-  /**
-   * 构建海报图片 URL
-   *
-   * 优先级：local_poster_path（本地缓存）> poster_path（远程/相对路径）
-   * - 在线 URL（http/https）：直接返回，由 SecureImage 处理跨域
-   * - 本地路径：转换为后端代理地址 /api/v1/public/image?path=...
-   * - 无海报：返回占位图 /placeholder-poster.jpg
-   */
-  const getPosterUrl = (task: Task): string => {
-    const posterPath = task.local_poster_path || task.poster_path;
-    if (!posterPath) return '/placeholder-poster.jpg';
-    // ✅ 直接返回原始路径，由 SecureImage 统一处理 URL 构建与鉴权
-    // 不在此处拼接，避免相对路径绕过 SecureImage 的绝对地址锁定逻辑
-    return posterPath;
-  };
+  // RebuildDialog state
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [dialogTask, setDialogTask] = useState<Task | null>(null);
+  const [dialogMode, setDialogMode] = useState<RebuildMode>('nfo');
 
-  const getStatusLabel = (status: string): string => {
-    const s = (status || '').toLowerCase();
-    if (s === 'archived') return t('status_archived');
-    if (s === 'match failed' || s === 'failed') return t('status_failed');
-    if (s === 'ignored') return 'TAPE CORRUPTED';  // 📼 VHS 风格标签
-    return t('status_pending');
-  };
+  // Accordion open state: Set of group keys (L1) and season keys "key:season" (L2)
+  const [openL1, setOpenL1] = useState<Set<string>>(new Set());
+  const [openL2, setOpenL2] = useState<Set<string>>(new Set());
 
-  const getSubStatusLabel = (subStatus: string | undefined | null): string => {
-    const s = (subStatus ?? '').toLowerCase();
-    if (s === 'scraped' || s === 'success' || s === 'found') return t('status_sub_ready');
-    if (s === 'failed' || s === 'match failed' || s === 'missing') return t('status_sub_missing');
-    return t('status_sub_finding');
-  };
+  // useMemo grouping — O(n) single pass
+  const groups = useMemo((): MediaGroup[] => {
+    const map = new Map<string, MediaGroup>();
+    for (const task of tasks) {
+      // 分组键加入 media_type 命名空间，防止同名电影与剧集被错误合并
+      const mtype = task.media_type || 'movie';
+      const key = `${mtype}::${(task.title || task.clean_name || task.file_name || String(task.id)).trim()}`;
+      if (!map.has(key)) {
+        map.set(key, {
+          key,
+          media_type: mtype as 'movie' | 'tv',
+          seasons: new Map(),
+          total_count: 0,
+          archived_count: 0,
+          poster_path: task.local_poster_path || task.poster_path,
+          tmdb_id: task.tmdb_id,
+          title: task.title,
+          clean_name: task.clean_name,
+        });
+      }
+      const g = map.get(key)!;
+      g.total_count++;
+      if ((task.status || '').toLowerCase() === 'archived') g.archived_count++;
+      if (!g.poster_path) g.poster_path = task.local_poster_path || task.poster_path;
+      if (mtype === 'movie') {
+        g.task = task;
+      } else {
+        const s = task.season ?? 1;
+        if (!g.seasons.has(s)) g.seasons.set(s, []);
+        g.seasons.get(s)!.push(task);
+      }
+    }
+    return Array.from(map.values());
+  }, [tasks]);
 
-  const getStatusColor = (status: string) => {
-    const s = (status || '').toLowerCase();
-    if (s === 'archived') return 'border-cyber-cyan text-cyber-cyan bg-cyber-cyan/10';
-    if (s === 'failed' || s === 'match failed') return 'border-cyber-red text-cyber-red bg-cyber-red/10';
-    if (s === 'ignored') return 'border-orange-400 text-orange-400 bg-orange-400/10 font-mono';  // 📼 VHS 风格
-    // pending/processing 属于常态流动信息，不使用黄色常亮
-    return 'border-cyber-cyan/30 text-cyber-cyan/70 bg-cyber-cyan/5';
-  };
+  const toggleL1 = useCallback((key: string) => {
+    setOpenL1(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
+  }, []);
+  const toggleL2 = useCallback((key: string) => {
+    setOpenL2(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
+  }, []);
 
-  const getSubStatusColor = (subStatus: string | undefined | null) => {
-    const s = (subStatus ?? '').toLowerCase();
-    if (s === 'scraped' || s === 'success' || s === 'found') return 'border-cyber-cyan text-cyber-cyan bg-cyber-cyan/10';
-    if (s === 'failed' || s === 'match failed' || s === 'missing') return 'border-cyber-red text-cyber-red bg-cyber-red/10';
-    // finding 属于常态过程，不用黄色占据注意力
-    return 'border-cyber-cyan/20 text-cyber-cyan/50 bg-cyber-cyan/5';
-  };
+  const handleRebuildClick = useCallback((task: Task, mode: RebuildMode) => {
+    setDialogTask(task);
+    setDialogMode(mode);
+    setDialogOpen(true);
+  }, []);
+
+  const handleRebuildConfirm = useCallback(async (params: { tmdb_id?: number; media_type: string; nuclear_reset: boolean; season?: number; episode?: number }) => {
+    if (!dialogTask) return;
+    setRebuildingId(dialogTask.id);
+    try {
+      await onRebuild({
+        task_id: dialogTask.id,
+        is_archive: (dialogTask.status || '').toLowerCase() === 'archived',
+        media_type: params.media_type,
+        refix_nfo: dialogMode === 'nfo',
+        refix_poster: dialogMode === 'poster',
+        refix_subtitle: dialogMode === 'subtitle',
+        tmdb_id: params.tmdb_id,
+        nuclear_reset: params.nuclear_reset,
+        season: params.season,
+        episode: params.episode,
+      });
+    } finally {
+      setRebuildingId(null);
+    }
+  }, [dialogTask, dialogMode, onRebuild]);
+
+  if (loading) {
+    return (
+      <div className="space-y-3">
+        {[...Array(5)].map((_, i) => (
+          <div key={i} className="border border-cyber-cyan/30 p-3 animate-pulse" style={{ backdropFilter: 'blur(25px)' }}>
+            <div className="flex gap-3">
+              <div className="w-14 h-20 bg-cyber-cyan/10 border border-cyber-cyan/30" />
+              <div className="flex-1 space-y-2 py-1">
+                <div className="h-4 bg-cyber-cyan/10 rounded w-2/3" />
+                <div className="h-3 bg-cyber-cyan/10 rounded w-1/2" />
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (tasks.length === 0) {
+    return (
+      <div className="border border-cyber-cyan/50 p-12 text-center" style={{ backdropFilter: 'blur(20px)', boxShadow: '0 0 40px rgba(6,182,212,0.4)' }}>
+        <AlertCircle className="mx-auto mb-4 text-cyber-cyan/60" size={48} />
+        <p className="text-cyber-cyan text-lg font-semibold">{t('no_data')}</p>
+        <p className="text-cyber-cyan/60 text-sm mt-2">{t('task_no_data_hint')}</p>
+      </div>
+    );
+  }
 
   return (
     <>
-      {loading ? (
-        /* 
-          加载骨架屏 (5个占位卡片)
-          - 垂直间距: space-y-4 (16px)
-          - 毛玻璃: blur(25px)
-          - 发光: 0 0 40px rgba(6,182,212,0.15)
-        */
-        <div className="space-y-4">
-          {[...Array(5)].map((_, i) => (
-            <div
-              key={i}
-              className="relative bg-transparent border border-cyber-cyan/30 p-3 animate-pulse"
-              style={{
-                backdropFilter: 'blur(25px)',
-                boxShadow: '0 0 40px rgba(6, 182, 212, 0.15)'
-              }}
-            >
-              <div className="flex items-center gap-3">
-                {/* 海报占位 */}
-                <div className="w-16 h-24 bg-cyber-cyan/10 border border-cyber-cyan/30" />
-                <div className="flex-1 space-y-2">
-                  {/* 标题占位 */}
-                  <div className="h-5 bg-cyber-cyan/10 rounded w-2/3" />
-                  {/* 文件名占位 */}
-                  <div className="h-4 bg-cyber-cyan/10 rounded w-1/2" />
-                </div>
-              </div>
-            </div>
-          ))}
+      {/* Batch toolbar */}
+      <div className="border-b border-cyber-cyan/50 p-2 mb-1" style={{ backdropFilter: 'blur(15px)' }}>
+        <div className="flex items-center gap-3">
+          <input type="checkbox" checked={isAllSelected}
+            onChange={() => isAllSelected ? onInvertSelection() : onSelectAll()}
+            ref={el => { if (el) el.indeterminate = isSomeSelected && !isAllSelected; }}
+            className="rounded border-cyber-cyan/40 bg-transparent text-cyber-cyan focus:ring-cyber-cyan"
+          />
+          <button onClick={onSelectAll} className="text-xs text-cyber-cyan/70 hover:text-cyber-cyan font-semibold">{t('select_all_page')}</button>
+          <span className="text-cyber-cyan/30">|</span>
+          <button onClick={onInvertSelection} className="text-xs text-cyber-cyan/70 hover:text-cyber-cyan font-semibold">{t('invert_page')}</button>
         </div>
-      ) : tasks.length === 0 ? (
-        /* 
-          空状态提示卡片
-          - 居中布局: text-center
-          - 毛玻璃: blur(20px)
-          - 双层发光: 外层40px + 内层40px
-        */
-        <div className="relative bg-transparent border border-cyber-cyan/50 p-12 text-center hover:border-cyber-cyan transition-all" style={{
-          backdropFilter: 'blur(20px)',
-          boxShadow: '0 0 40px rgba(6, 182, 212, 0.4), inset 0 0 40px rgba(6, 182, 212, 0.08)'
-        }}>
-          <AlertCircle className="mx-auto mb-4 text-cyber-cyan/60" size={48} />
-          <p className="text-cyber-cyan text-lg font-semibold">{t('no_data')}</p>
-          <p className="text-cyber-cyan/60 text-sm mt-2">{t('task_no_data_hint')}</p>
-        </div>
-      ) : (
-        <>
-          {/* 
-            ═══════════════════════════════════════════════════════════════
-            批量操作工具栏
-            ═══════════════════════════════════════════════════════════════
-            布局: Flex 横向
-            - Checkbox: 全选/半选状态（indeterminate）
-            - 按钮: 全选本页 | 反选本页
-            
-            样式:
-            - 毛玻璃: blur(15px)
-            - 底部边框: border-cyber-cyan/50
-            - 发光: 0 0 30px rgba(6,182,212,0.2)
-            - 内边距: p-2
-            - 底部间距: mb-1
-            ═══════════════════════════════════════════════════════════════
-          */}
-          <div className="relative bg-transparent border-b border-cyber-cyan/50 p-2 mb-1" style={{
-            backdropFilter: 'blur(15px)',
-            boxShadow: '0 0 30px rgba(6, 182, 212, 0.2)'
-          }}>
-            <div className="flex items-center gap-3">
-              {/* 全选 Checkbox（支持 indeterminate 半选状态）*/}
-              <input
-                type="checkbox"
-                checked={isAllSelected}
-                onChange={() => (isAllSelected ? onInvertSelection() : onSelectAll())}
-                ref={(el) => {
-                  if (el) el.indeterminate = isSomeSelected && !isAllSelected;
-                }}
-                className="rounded border-cyber-cyan/40 bg-transparent text-cyber-cyan focus:ring-cyber-cyan"
-              />
-              <button
-                type="button"
-                onClick={onSelectAll}
-                className="text-xs text-cyber-cyan/70 hover:text-cyber-cyan transition-colors font-semibold"
-              >
-                {t('select_all_page')}
-              </button>
-              <span className="text-cyber-cyan/30">|</span> {/* 分隔符 */}
-              <button
-                type="button"
-                onClick={onInvertSelection}
-                className="text-xs text-cyber-cyan/70 hover:text-cyber-cyan transition-colors font-semibold"
-              >
-                {t('invert_page')}
-              </button>
-            </div>
-          </div>
+      </div>
 
-          {/* 
-            ═══════════════════════════════════════════════════════════════
-            任务卡片列表
-            ═══════════════════════════════════════════════════════════════
-            布局: 垂直堆叠
-            - 卡片间距: space-y-4 (16px)
-            - 入场动画: 交错延迟 idx * 0.1s
-            ═══════════════════════════════════════════════════════════════
-          */}
-          <div className="space-y-4">
-            {tasks.map((task, idx) => {
-              const rawFallbackName =
-                task.file_name ||
-                task.file_path?.split(/[/\\]/).pop() ||
-                '-';
-              const originalName = task.file_path ? task.file_path.split(/[/\\]/).pop() || rawFallbackName : rawFallbackName;
-              const normalizedTitle = (task.title ?? '').trim();
-              const noisePattern = /\b(4k|2160p|1080p|720p|480p|360p)\b/i;
-              const hasRealTitle =
-                !!normalizedTitle &&
-                normalizedTitle !== rawFallbackName &&
-                normalizedTitle !== originalName &&
-                !noisePattern.test(normalizedTitle);
+      {/* Groups */}
+      <div className="space-y-2">
+        {groups.map(group => {
+          const l1Open = openL1.has(group.key);
+          const posterSrc = group.poster_path || '/placeholder-poster.jpg';
 
-              // 构建上方展示标题：刮削名 + 年份 + 剧集季集信息
-              // 构建展示标题：优先使用刮削后的 title，降级使用原始文件名
-              // 有效 title 条件：非空 + 不等于文件名 + 不含分辨率噪音词（如 1080p/4K）
-              // 剧集追加：S01E01 格式（season + episode 均有值）或 Season N（仅 season）
-              let displayTitle: string;
-              if (hasRealTitle) {
-                let titleParts = normalizedTitle;
-                if (task.year) titleParts += ` (${task.year})`;
-                // 剧集追加季集信息
-                if (task.media_type === 'tv') {
-                  const season = task.season;
-                  const episode = task.episode;
-                  if (season != null && episode != null) {
-                    titleParts += ` S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
-                  } else if (season != null) {
-                    titleParts += ` Season ${season}`;
-                  }
-                }
-                displayTitle = titleParts;
-              } else {
-                displayTitle = rawFallbackName;
-              }
+          return (
+            <div key={group.key} className="border border-cyber-cyan/40" style={{ backdropFilter: 'blur(20px)' }}>
+              {/* ── Level 1: 作品根节点 ── */}
 
-              return (
-                /* 
-                  ═══════════════════════════════════════════════════════════════
-                  任务卡片 Flex 布局
-                  ═══════════════════════════════════════════════════════════════
-                  主容器: flex items-center gap-3
-                  - 列1: Checkbox (flex-shrink-0)
-                  - 列2: 海报区 (w-16 h-24, 固定尺寸)
-                  - 列3: 任务信息区 (flex-1, 占用剩余空间)
-                  
-                  任务信息区内部 Flex 布局:
-                  - 标题+文件名+路径 (flex-1 min-w-0, 允许截断)
-                  - 状态标签 (flex-shrink-0, 横向排列)
-                  - 外部链接 (flex-shrink-0, TMDB + IMDb)
-                  - 时间戳 (flex-shrink-0)
-                  - 操作按钮 (flex-shrink-0, 重试 + 删除)
-                  
-                  视觉效果:
-                  - 毛玻璃: blur(25px)
-                  - 发光: 0 0 40px rgba(6,182,212,0.2)
-                  - Hover: 边框全亮 + 背景5%填充
-                  - 入场动画延迟: idx * 0.1s
-                  ═══════════════════════════════════════════════════════════════
-                */
-                <div
-                  key={task.id}
-                  className="relative bg-transparent border border-cyber-cyan/30 p-3 hover:border-cyber-cyan hover:bg-cyber-cyan/5 transition-all group"
-                  style={{
-                    backdropFilter: 'blur(25px)', // 毛玻璃: 25px模糊半径
-                    boxShadow: '0 0 40px rgba(6, 182, 212, 0.2)', // 外层发光: 40px扩散
-                    animationDelay: `${idx * 0.1}s` // 入场动画交错延迟
-                  }}
-                >
-                  {/* 主 Flex 容器: 横向布局，间距12px */}
-                  <div className="flex items-center gap-3">
-                    {/* 列1: 选择框 (固定宽度) */}
-                    <div className="flex items-center">
-                      <input
-                        type="checkbox"
-                        checked={selectedIds.has(task.id)}
-                        onChange={() => onToggleSelect(task.id)}
-                        className="rounded border-cyber-cyan/40 bg-transparent text-cyber-cyan focus:ring-cyber-cyan"
+              {/* 电影：直接平铺，无折叠箭头，无手风琴 */}
+              {group.media_type === 'movie' && group.task && (
+                <TaskRow
+                  task={group.task}
+                  indent={0}
+                  onRetry={onRetry}
+                  onDelete={onDelete}
+                  onRebuildClick={handleRebuildClick}
+                  rebuildingId={rebuildingId}
+                  processingId={processingId}
+                  setProcessingId={setProcessingId}
+                />
+              )}
+
+              {/* 剧集：折叠按钮 + Level 2/3 嵌套手风琴 */}
+              {group.media_type === 'tv' && (
+                <>
+                  <button
+                    onClick={() => toggleL1(group.key)}
+                    className="w-full flex items-center gap-3 p-3 hover:bg-cyber-cyan/5 transition-all text-left"
+                  >
+                    {l1Open ? <ChevronDown size={16} className="text-cyber-cyan/60 flex-shrink-0" /> : <ChevronRight size={16} className="text-cyber-cyan/60 flex-shrink-0" />}
+                    {/* 缩略海报 */}
+                    <div className="w-10 h-14 flex-shrink-0 border border-cyber-cyan/40 overflow-hidden">
+                      <SecureImage src={posterSrc} alt={group.title || group.key}
+                        width={40} height={56} className="object-cover w-full h-full opacity-80"
+                        fallback={<div className="w-full h-full flex items-center justify-center bg-black/40"><Tv size={14} className="text-cyber-cyan/40"/></div>}
                       />
                     </div>
-
-                    {/* 列2: 全息海报区 (64x96px 固定尺寸) */}
-                    <div className="relative w-16 h-24 flex-shrink-0 group/poster">
-                      <div className="absolute inset-0 bg-cyber-cyan/10 border border-cyber-cyan/50 overflow-hidden transition-all group-hover/poster:border-cyber-cyan group-hover/poster:shadow-[0_0_15px_rgba(6,182,212,0.4)]">
-                        {task.poster_path || task.local_poster_path ? (
-                          <>
-                        {/*
-                          📼 VHS 磁带损坏特效系统（仅 ignored 状态触发）
-                          特效层级（z-index 从低到高）：
-                            1. 灰度/对比度滤镜（CSS filter，基础层）
-                            2. 噪点纹理（SVG feTurbulence，z-10）
-                            3. 扫描线（repeating-linear-gradient，z-15）
-                            4. 磁带拉伸条纹（两条 div，z-20）
-                            5. 色彩分离（红蓝 mix-blend-screen，z-25）
-                            6. 错误印章（TAPE ERROR 标签，z-30）
-                            7. 顶部时间码（REC 00:00:00:00，z-35）
-                        */}
-                        {/* 📼 VHS 滤镜包装层 */}
-                            <div
-                              className={cn(
-                                "w-full h-full",
-                                task.status === 'ignored' && 'grayscale-[0.7] contrast-110 brightness-80 sepia-[.4] saturate-150 opacity-70'
-                              )}
-                            >
-                              <SecureImage
-                                src={getPosterUrl(task)}
-                                alt={task.title || t('task_unknown')}
-                                width={64}
-                                height={96}
-                                className="object-cover w-full h-full opacity-80 group-hover/poster:opacity-100 group-hover/poster:scale-110 transition-all duration-300"
-                                fallback={
-                                  <div className="w-full h-full flex flex-col items-center justify-center bg-black/40">
-                                    {task.media_type === 'movie' ? (
-                                      <Film className="text-cyber-cyan/30" size={20} />
-                                    ) : (
-                                      <Tv className="text-cyber-cyan/30" size={20} />
-                                    )}
-                                    {task.status === 'ignored' && (
-                                      <span className="text-[8px] mt-1 font-mono text-cyber-cyan/40 tracking-wider">DUPLICATE</span>
-                                    )}
-                                  </div>
-                                }
-                              />
-                            </div>
-
-                            {/* 📼 VHS 噪点纹理 - 只在 ignored 状态显示 */}
-                            {task.status === 'ignored' && (
-                              <div
-                                className="absolute inset-0 pointer-events-none z-10 opacity-30"
-                                style={{
-                                  backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E")`,
-                                  backgroundSize: '100px 100px',
-                                }}
-                              />
-                            )}
-
-                            {/* 📼 VHS 扫描线（粗糙） - 只在 ignored 状态显示 */}
-                            {task.status === 'ignored' && (
-                              <div
-                                className="absolute inset-0 pointer-events-none z-15 opacity-40"
-                                style={{
-                                  background:
-                                    'repeating-linear-gradient(0deg, rgba(0,0,0,0.5), rgba(0,0,0,0.5) 2px, transparent 2px, transparent 5px)',
-                                  backgroundSize: '100% 5px',
-                                }}
-                              />
-                            )}
-
-                            {/* 📼 磁带拉伸效果（横向条纹） - 只在 ignored 状态显示 */}
-                            {task.status === 'ignored' && (
-                              <>
-                                <div
-                                  className="absolute left-0 right-0 h-8 pointer-events-none z-20 opacity-60"
-                                  style={{
-                                    top: '30%',
-                                    background:
-                                      'linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.1) 20%, rgba(255,255,255,0.2) 50%, rgba(255,255,255,0.1) 80%, transparent 100%)',
-                                    transform: 'scaleX(1.1)',
-                                  }}
-                                />
-                                <div
-                                  className="absolute left-0 right-0 h-6 pointer-events-none z-20 opacity-40"
-                                  style={{
-                                    top: '60%',
-                                    background:
-                                      'linear-gradient(90deg, transparent 0%, rgba(0,0,0,0.3) 30%, rgba(0,0,0,0.5) 50%, rgba(0,0,0,0.3) 70%, transparent 100%)',
-                                  }}
-                                />
-                              </>
-                            )}
-
-                            {/* 📼 VHS 色彩分离（红蓝偏移） - 只在 ignored 状态显示 */}
-                            {task.status === 'ignored' && (
-                              <>
-                                <div
-                                  className="absolute inset-0 pointer-events-none z-25 mix-blend-screen opacity-20"
-                                  style={{
-                                    background: 'linear-gradient(90deg, #ff0000 0%, transparent 100%)',
-                                    transform: 'translateX(-2px)',
-                                  }}
-                                />
-                                <div
-                                  className="absolute inset-0 pointer-events-none z-25 mix-blend-screen opacity-20"
-                                  style={{
-                                    background: 'linear-gradient(90deg, transparent 0%, #0000ff 100%)',
-                                    transform: 'translateX(2px)',
-                                  }}
-                                />
-                              </>
-                            )}
-
-                            {/* 📼 VHS 时间码错误印章 - 只在 ignored 状态显示 */}
-                            {task.status === 'ignored' && (
-                              <div className="absolute inset-0 flex items-center justify-center z-30">
-                                <div
-                                  className="px-2 py-1.5 bg-orange-600/80 border-2 border-orange-400 text-white font-mono text-[10px] backdrop-blur-sm"
-                                  style={{
-                                    textShadow: '0 0 8px rgba(251, 146, 60, 0.8)',
-                                    boxShadow: '0 0 15px rgba(251, 146, 60, 0.6)',
-                                    transform: 'rotate(-8deg)',
-                                  }}
-                                >
-                                  <div className="flex flex-col items-center gap-0.5">
-                                    <span className="font-bold">TAPE ERROR</span>
-                                    <span className="opacity-70">00:00:00:00</span>
-                                  </div>
-                                </div>
-                              </div>
-                            )}
-
-                            {/* 📼 VHS 顶部时间码 - 只在 ignored 状态显示 */}
-                            {task.status === 'ignored' && (
-                              <div className="absolute top-0.5 left-0.5 right-0.5 z-35">
-                                <div className="px-1.5 py-0.5 bg-black/70 backdrop-blur-sm text-orange-400 text-[8px] font-mono">
-                                  ▶ REC 00:00:00:00 [CORRUPTED]
-                                </div>
-                              </div>
-                            )}
-                          </>
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center">
-                            {task.media_type === 'movie' ? (
-                              <Film className="text-cyber-cyan/40" size={20} />
-                            ) : (
-                              <Tv className="text-cyber-cyan/40" size={20} />
-                            )}
-                          </div>
-                        )}
-                      </div>
+                    {/* 作品信息 */}
+                    <div className="flex-1 min-w-0">
+                      <p className="font-bold text-cyber-cyan truncate" style={{ textShadow: '0 0 8px rgba(0,230,246,0.5)' }}>
+                        {group.title || group.clean_name || group.key.split('::')[1]}
+                      </p>
+                      <p className="text-xs text-cyber-cyan/50 mt-0.5">
+                        {t('text_tv_episodes_count').replace('{count}', String(group.total_count))}
+                        {' · '}
+                        <span className="text-cyber-cyan/70">{group.archived_count}/{group.total_count} {t('text_archived')}</span>
+                      </p>
                     </div>
-
-                    {/* 列3: 任务信息区 (flex-1 弹性布局，占用剩余空间) */}
-                    {/* min-w-0: 允许子元素截断 */}
-                    <div className="flex-1 min-w-0 flex items-center gap-4">
-                      {/* 子区域1: 标题与文件名 (flex-1, 允许截断) */}
-                      <div className="flex-1 min-w-0">
-                        {/* 主标题: 刮削后的标题 + 年份 + 季集信息 */}
-                        <h3 
-                          className={cn(
-                            "font-semibold text-base truncate", // truncate: 超长截断显示省略号
-                            task.status === 'ignored' ? 'text-orange-400/60' : 'text-cyber-yellow'
-                          )}
-                          style={
-                            task.status === 'ignored'
-                              ? {}
-                              : { textShadow: '0 0 8px rgba(249, 240, 2, 0.4)' } // 黄色发光: 8px扩散
-                          }
-                          title={displayTitle} // Hover 显示完整标题
-                        >
-                          {displayTitle}
-                        </h3>
-                        {/* 副标题: 原始文件名 */}
-                        <p 
-                          className={cn(
-                            "text-xs truncate mt-0.5",
-                            task.status === 'ignored' ? 'text-orange-300/40 font-mono' : 'text-cyber-cyan/50'
-                          )}
-                          title={originalName}
-                        >
-                          {originalName}
-                        </p>
-                        {/* 路径信息: 入库地址 + 原始地址 */}
-                        {/* 垂直间距: 2px */}
-                        <div className="mt-1 space-y-0.5">
-                          {task.target_path && (
-                            <p className="text-cyber-cyan/30 text-xs truncate" title={task.target_path}>
-                              <span className="text-cyber-cyan/50 font-mono mr-1">{t('path_dst')}:</span>
-                              {task.target_path}
-                            </p>
-                          )}
-                          <p className="text-cyber-cyan/30 text-xs truncate" title={task.file_path || ''}>
-                            <span className="text-cyber-cyan/50 font-mono mr-1">{t('path_src')}:</span>
-                            {task.file_path || '-'}
-                          </p>
-                        </div>
-                      </div>
-
-                      {/* 子区域2: 状态标签 (flex-shrink-0, 横向排列) */}
-                      <div className="flex items-center gap-2 flex-shrink-0">
-                        {/* 主状态标签 (archived/pending/failed/ignored) */}
-                        <span 
-                          className={cn(
-                            "px-2.5 py-1 text-xs font-semibold border transition-all",
-                            getStatusColor(task.status)
-                          )}
-                          style={{ 
-                            backdropFilter: 'blur(10px)', // 标签毛玻璃: 10px模糊
-                          }}
-                        >
-                          {getStatusLabel(task.status)}
-                        </span>
-                        {/* 字幕状态标签 (ready/missing/finding) */}
-                        <span 
-                          className={cn(
-                            "px-2.5 py-1 text-xs font-semibold border transition-all",
-                            getSubStatusColor(task.sub_status)
-                          )}
-                          style={{ 
-                            backdropFilter: 'blur(10px)',
-                          }}
-                        >
-                          {getSubStatusLabel(task.sub_status)}
-                        </span>
-                      </div>
-
-                      {/* 子区域3: 外部链接 (flex-shrink-0) */}
-                      <div className="flex items-center gap-2 flex-shrink-0">
-                        {/* TMDB 链接按钮 */}
-                        {task.tmdb_id != null && String(task.tmdb_id).trim() !== '' && (
-                          <a
-                            href={
-                              task.media_type === 'tv'
-                                ? `https://www.themoviedb.org/tv/${task.tmdb_id}`
-                                : `https://www.themoviedb.org/movie/${task.tmdb_id}`
-                            }
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="px-2.5 py-1 text-xs font-semibold bg-transparent border border-cyber-cyan text-cyber-cyan hover:bg-cyber-cyan hover:text-black transition-all"
-                            style={{ 
-                              backdropFilter: 'blur(10px)',
-                            }}
-                          >
-                            TMDB
-                          </a>
-                        )}
-                        {/* IMDb 链接按钮 */}
-                        {task.imdb_id != null && String(task.imdb_id).trim() !== '' && String(task.imdb_id).toUpperCase() !== 'N/A' && (
-                          <a
-                            href={`https://www.imdb.com/title/${String(task.imdb_id).startsWith('tt') ? task.imdb_id : 'tt' + task.imdb_id}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="px-2.5 py-1 text-xs font-semibold bg-transparent border border-cyber-cyan text-cyber-cyan hover:bg-cyber-cyan hover:text-black transition-all"
-                            style={{ 
-                              backdropFilter: 'blur(10px)',
-                            }}
-                          >
-                            IMDb
-                          </a>
-                        )}
-                      </div>
-
-                      {/* 子区域4: 时间戳 (flex-shrink-0) */}
-                      <span className="text-cyber-cyan/50 text-xs flex-shrink-0">
-                        {task.created_at ? formatDate(task.created_at) : t('task_just_now')}
-                      </span>
-
-                      {/* 子区域5: 操作按钮组 (flex-shrink-0) */}
-                      {/* 按钮间距: 6px */}
-                      <div className="flex items-center gap-1.5 flex-shrink-0">
-                        {/* 重试按钮 (仅失败任务显示) */}
-                        {(task.status === 'failed' || (task.status || '').toLowerCase() === 'match failed') && (
-                          <button
-                            onClick={async () => {
-                              if (processingId !== null) return;
-                              setProcessingId(task.id);
-                              try { await Promise.resolve(onRetry(task.id)); }
-                              finally { setProcessingId(null); }
-                            }}
-                            disabled={processingId === task.id}
-                            className={cn(
-                              "p-2 bg-transparent border border-cyber-cyan text-cyber-cyan hover:bg-cyber-cyan hover:text-black transition-all group/btn",
-                              processingId === task.id && "opacity-50 cursor-not-allowed"
-                            )}
-                            style={{ backdropFilter: 'blur(10px)' }}
-                            title="将任务状态重置为待处理，下次扫描时会重新处理"
-                          >
-                            <RefreshCw size={16} className={cn("transition-transform duration-500", processingId === task.id ? "animate-spin" : "group-hover/btn:rotate-180")} />
-                          </button>
-                        )}
-
-                        {/* 删除按钮 (红色警示风格) */}
-                        <button
-                          onClick={async () => {
-                            if (processingId !== null) return;
-                            setProcessingId(task.id);
-                            try { await Promise.resolve(onDelete(task.id)); }
-                            finally { setProcessingId(null); }
-                          }}
-                          disabled={processingId === task.id}
-                          className={cn(
-                            "p-2 bg-transparent border border-cyber-red text-cyber-red hover:bg-cyber-red hover:text-white transition-all",
-                            processingId === task.id && "opacity-50 cursor-not-allowed"
-                          )}
-                          style={{ backdropFilter: 'blur(10px)' }}
-                          title={t('task_delete_record')}
-                        >
-                          <Trash2 size={16} className={cn(processingId === task.id && "animate-pulse")} />
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 
-                    流水线进度条
-                    - 位置: 卡片底部 (mt-2)
-                    - 高度: h-1 (4px)
-                    - 背景: cyber-cyan/10
-                    - 进度条: 渐变填充 + 发光效果
-                    - 进度: 30% (pending) → 60% (archived) → 100% (字幕完成)
-                    - 颜色: 青色渐变 (未完成) / 青绿渐变 (已完成)
-                  */}
-                  {(() => {
-                    const progress = getProgress(task.status, task.sub_status);
-                    if (progress === 0) return null; // 失败/忽略状态不显示进度条
-                    const color = progress === 100
-                      ? 'from-cyber-cyan to-green-400' // 完成: 青色→绿色渐变
-                      : 'from-cyber-cyan to-[rgba(0,230,246,0.5)]'; // 进行中: 青色渐变
-                    return (
-                      <div className="relative h-1 bg-cyber-cyan/10 border-t border-cyber-cyan/20 mt-2 overflow-hidden">
+                    {/* 总进度条 */}
+                    <div className="flex-shrink-0 w-24">
+                      <div className="h-1.5 bg-cyber-cyan/10 rounded-full overflow-hidden">
                         <div
-                          className={`absolute inset-y-0 left-0 bg-gradient-to-r ${color} transition-all duration-700`} // 进度变化动画: 700ms
-                          style={{
-                            width: `${progress}%`,
-                            boxShadow: '0 0 8px rgba(0, 230, 246, 0.8)', // 进度条发光: 8px扩散
-                          }}
+                          className="h-full bg-gradient-to-r from-cyber-cyan to-green-400 transition-all duration-700"
+                          style={{ width: `${group.total_count ? Math.round(group.archived_count / group.total_count * 100) : 0}%` }}
                         />
                       </div>
-                    );
-                  })()}
+                    </div>
+                  </button>
 
+                  {/* Level 2/3 展开内容 */}
+                  <div
+                    className="overflow-hidden transition-all duration-300 ease-in-out"
+                    style={{ maxHeight: l1Open ? '9999px' : '0px' }}
+                  >
+                    <div className="border-t border-cyber-cyan/20">
+                      {Array.from(group.seasons.entries()).sort(([a],[b]) => a-b).map(([season, episodes]) => {
+                        const l2Key = `${group.key}:${season}`;
+                        const l2Open = openL2.has(l2Key);
+                        return (
+                          <div key={season} className="border-b border-cyber-cyan/10 last:border-0">
+                            {/* ── Level 2: 季节点 ── */}
+                            <button
+                              onClick={() => toggleL2(l2Key)}
+                              className="w-full flex items-center gap-2 px-4 py-2 hover:bg-cyber-cyan/5 transition-all text-left"
+                            >
+                              {l2Open ? <ChevronDown size={14} className="text-cyber-cyan/50 flex-shrink-0" /> : <ChevronRight size={14} className="text-cyber-cyan/50 flex-shrink-0" />}
+                              <span className="text-sm font-semibold text-cyber-cyan/80 uppercase tracking-wider">{`Season ${season}`}</span>
+                              <span className="text-xs text-cyber-cyan/40 ml-2">{episodes.length} {t('text_episodes_count').replace('{count}', String(episodes.length))}</span>
+                            </button>
+                            {/* ── Level 3: 单集 ── */}
+                            <div
+                              className="overflow-hidden transition-all duration-300 ease-in-out"
+                              style={{ maxHeight: l2Open ? '9999px' : '0px' }}
+                            >
+                              <div className="space-y-1 p-1 border-t border-cyber-cyan/10">
+                                {episodes.sort((a,b) => (a.episode??0)-(b.episode??0)).map(ep => (
+                                  <TaskRow
+                                    key={ep.id}
+                                    task={ep}
+                                    indent={8}
+                                    onRetry={onRetry}
+                                    onDelete={onDelete}
+                                    onRebuildClick={handleRebuildClick}
+                                    rebuildingId={rebuildingId}
+                                    processingId={processingId}
+                                    setProcessingId={setProcessingId}
+                                  />
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          );
+        })}
+      </div>
 
-                </div>
-              );
-            })}
-          </div>
-        </>
+      {/* RebuildDialog */}
+      {dialogTask && (
+        <RebuildDialog
+          open={dialogOpen}
+          task={dialogTask}
+          mode={dialogMode}
+          onConfirm={handleRebuildConfirm}
+          onClose={() => setDialogOpen(false)}
+        />
       )}
     </>
   );
 }
 
-// 🚀 React.memo 包裹：父组件 toast/scanning 等无关状态更新时，MediaTable 不重绘
 export default memo(MediaTable);

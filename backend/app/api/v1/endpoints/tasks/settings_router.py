@@ -250,9 +250,11 @@ async def reset_settings(payload: ResetSettingsRequest, db: DbDep):
     """
     target = payload.target.strip().lower()
 
-    if target not in ["ai", "regex"]:
-        logger.error(f"[API] 重置配置失败: target 必须为 'ai' 或 'regex'，收到: {target}")
-        return {"success": False, "message": "target 必须为 'ai' 或 'regex'"}
+    from app.infra.database.repositories.config_repo import RESET_TARGETS_MAP
+    if target not in RESET_TARGETS_MAP:
+        valid = ", ".join(RESET_TARGETS_MAP.keys())
+        logger.error(f"[API] 重置配置失败: target 必须为 {valid}，收到: {target}")
+        return {"success": False, "message": f"target 必须为 {valid}"}
 
     try:
         db.reset_settings_to_defaults(target)

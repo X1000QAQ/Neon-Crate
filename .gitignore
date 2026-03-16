@@ -35,6 +35,14 @@ data/
 .env.production
 .env.staging
 
+# 前端各环境变量文件（含本地开发专用，均不提交）
+frontend/.env
+frontend/.env.local
+frontend/.env.local.bak
+frontend/.env.development.local
+frontend/.env.production.local
+frontend/.env.test.local
+
 
 # =============================================================================
 # 【Python 后端】构建产物与缓存
@@ -71,6 +79,9 @@ lib/
 lib64/
 parts/
 var/
+
+# 前端 lib/ 目录是源代码，必须纳入版本控制（排除上方 lib/ 的误匹配）
+!frontend/lib/
 
 # 测试与覆盖率
 .pytest_cache/

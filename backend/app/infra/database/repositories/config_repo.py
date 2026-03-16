@@ -34,6 +34,13 @@ from .base import BaseRepository
 
 logger = logging.getLogger(__name__)
 
+# ── 重置目标映射表（数据驱动，新增分类只需加一行）──────────────────────
+RESET_TARGETS_MAP: dict[str, list[str]] = {
+    "ai":      ["ai_name", "ai_persona", "expert_archive_rules", "master_router_rules"],
+    "regex":   ["filename_clean_regex"],
+    "formats": ["supported_video_exts", "supported_subtitle_exts"],
+}
+
 # 敏感密钥列表（与 DatabaseManager.SENSITIVE_KEYS 保持一致）
 SENSITIVE_KEYS = [
     "tmdb_api_key",
@@ -126,6 +133,11 @@ class ConfigRepo(BaseRepository):
                 encrypted = secure_data.get(key, "")
                 if encrypted:
                     config["settings"][key] = crypto.decrypt_api_key(encrypted)
+        # 补全缺失/空值字段：用 DEFAULT_CONFIG 填充，确保前端首次加载时输入框有值
+        settings = config.setdefault("settings", {})
+        for k, v in DEFAULT_CONFIG.items():
+            if k not in settings or settings[k] is None or settings[k] == "":
+                settings[k] = v
         return config
 
     def save_all_config(self, config: Dict[str, Any]):
@@ -169,21 +181,15 @@ class ConfigRepo(BaseRepository):
         }
 
     def reset_settings_to_defaults(self, target: str):
-        """重置配置为工业级默认值，target: 'ai' 或 'regex'"""
+        """重置配置为工业级默认值，target 由 RESET_TARGETS_MAP 动态驱动"""
         target = str(target).strip().lower()
+        if target not in RESET_TARGETS_MAP:
+            valid = ", ".join(RESET_TARGETS_MAP.keys())
+            raise ValueError(f"[ERROR] target 必须为 {valid}，收到: {target}")
         defaults = self._load_defaults()
-
-        if target == "ai":
-            self.set_config("ai_name", defaults.get("ai_name", "AI 智能助理"))
-            self.set_config("ai_persona", defaults.get("ai_persona", ""))
-            self.set_config("expert_archive_rules", defaults.get("expert_archive_rules", ""))
-            self.set_config("master_router_rules", defaults.get("master_router_rules", ""))
-            logger.info("[ConfigRepo] AI 规则已重置为工业级默认值")
-        elif target == "regex":
-            self.set_config("filename_clean_regex", defaults.get("filename_clean_regex", ""))
-            logger.info("[ConfigRepo] 正则清洗规则已重置为工业级默认值（15条规则）")
-        else:
-            raise ValueError(f"[ERROR] target 必须为 'ai' 或 'regex'，收到: {target}")
+        for key in RESET_TARGETS_MAP[target]:
+            self.set_config(key, defaults.get(key, ""))
+        logger.info(f"[ConfigRepo] '{target}' 相关配置已重置为工业级默认值: {RESET_TARGETS_MAP[target]}")
 
     # ==========================================
     # 私有辅助方法
@@ -204,7 +210,8 @@ class ConfigRepo(BaseRepository):
         defaults = self._load_defaults()
         injected_fields = []
 
-        for key in ["ai_name", "ai_persona", "expert_archive_rules", "master_router_rules", "filename_clean_regex"]:
+        for key in ["ai_name", "ai_persona", "expert_archive_rules", "master_router_rules", "filename_clean_regex",
+                    "supported_video_exts", "supported_subtitle_exts"]:
             if key in defaults and not self.get_config(key, "").strip():
                 self.set_config(key, defaults[key])
                 injected_fields.append(key)

@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 import type { I18nKey } from '@/lib/i18n';
 import { useSettings } from '@/hooks/useSettings';
 import { NeuralInput, NeuralSection, NeuralTextarea } from './NeuralPrimitives';
+import NeuralConfirmModal from './NeuralConfirmModal';
 
 interface Props {
   t: (key: I18nKey) => string;
@@ -13,11 +14,12 @@ interface Props {
 export default function PersonaSettings({ t }: Props) {
   const { config, updateSetting, refreshSettings } = useSettings();
   const [resetting, setResetting] = useState(false);
+  const [resetModal, setResetModal] = useState(false);
 
   if (!config) return null;
 
   const handleReset = async () => {
-    if (!confirm(t('persona_reset_confirm'))) return;
+    setResetModal(false);
     setResetting(true);
     try {
       const result = await api.resetSettings('ai');
@@ -36,6 +38,17 @@ export default function PersonaSettings({ t }: Props) {
 
   return (
     <div className="space-y-6">
+      <NeuralConfirmModal
+        isOpen={resetModal}
+        title={t('modal_confirm')}
+        message={t('persona_reset_confirm')}
+        confirmLabel={t('modal_confirm')}
+        cancelLabel={t('modal_cancel')}
+        variant="warning"
+        onConfirm={handleReset}
+        onCancel={() => setResetModal(false)}
+      />
+
       <NeuralSection title={t('persona_identity')}>
         <NeuralInput label={t('persona_ai_name')} type="text" value={config.settings.ai_name || ''} onChange={(e) => updateSetting('ai_name', e.target.value)} placeholder={t('persona_ai_name_placeholder')} />
       </NeuralSection>
@@ -54,7 +67,7 @@ export default function PersonaSettings({ t }: Props) {
 
       <div className="flex gap-4">
         <button
-          onClick={handleReset}
+          onClick={() => setResetModal(true)}
           disabled={resetting}
           className="px-6 py-3 bg-transparent border-2 border-cyber-red text-cyber-red font-bold uppercase tracking-widest hover:bg-cyber-red hover:text-black transition-all disabled:opacity-50 disabled:cursor-not-allowed"
           style={{ boxShadow: '0 0 20px rgba(255, 1, 60, 0.35), inset 0 0 20px rgba(255, 1, 60, 0.08)' }}

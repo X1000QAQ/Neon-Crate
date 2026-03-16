@@ -106,36 +106,46 @@ class ArchiveRepo(BaseRepository):
     # ==========================================
 
     def get_archived_data(self, search_keyword: Optional[str] = None) -> List[Dict[str, Any]]:
-        """获取 media_archive 表中的归档数据（媒体墙展示用）"""
+        """获取 media_archive 表中的归档数据（媒体墙展示用）
+
+        Bug 2b 修复：SELECT 加入 original_task_id，并映射为 "id" 返回前端。
+        前端持有的 task.id 永远是全局唯一身份证（original_task_id），
+        update_any_task_metadata(is_archive=True) 用 original_task_id 匹配，链路完全闭环。
+        """
         with self.db_lock:
             conn = self._get_conn()
+            # r[0]=id(冷表自增), r[1]=original_task_id, r[2]=path, r[3]=file_name
+            # r[4]=clean_name, r[5]=type, r[6]=tmdb_id, r[7]=imdb_id, r[8]=title
+            # r[9]=year, r[10]=target_path, r[11]=sub_status, r[12]=created_at
+            # r[13]=poster_path, r[14]=local_poster_path, r[15]=season, r[16]=episode
+            sql_select = (
+                "SELECT id, original_task_id, path, file_name, clean_name, type, "
+                "tmdb_id, imdb_id, title, year, "
+                "target_path, sub_status, created_at, poster_path, local_poster_path, season, episode "
+                "FROM media_archive"
+            )
             if search_keyword:
                 cursor = conn.execute(
-                    "SELECT id, path, file_name, clean_name, type, tmdb_id, imdb_id, title, year, "
-                    "target_path, sub_status, created_at, poster_path, local_poster_path, season, episode "
-                    "FROM media_archive "
-                    "WHERE file_name LIKE ? OR clean_name LIKE ? OR title LIKE ? "
-                    "ORDER BY archived_at DESC",
+                    sql_select + " WHERE file_name LIKE ? OR clean_name LIKE ? OR title LIKE ? ORDER BY archived_at DESC",
                     (f"%{search_keyword}%", f"%{search_keyword}%", f"%{search_keyword}%")
                 )
             else:
-                cursor = conn.execute(
-                    "SELECT id, path, file_name, clean_name, type, tmdb_id, imdb_id, title, year, "
-                    "target_path, sub_status, created_at, poster_path, local_poster_path, season, episode "
-                    "FROM media_archive ORDER BY archived_at DESC"
-                )
+                cursor = conn.execute(sql_select + " ORDER BY archived_at DESC")
             rows = cursor.fetchall()
             return [
                 {
-                    "id": r[0], "path": r[1], "file_name": r[2], "clean_name": r[3],
-                    "type": r[4], "status": "archived", "tmdb_id": r[5], "imdb_id": r[6],
-                    "title": r[7], "year": r[8], "target_path": r[9],
-                    "sub_status": r[10], "last_sub_check": None, "created_at": r[11],
-                    "poster_path": r[12], "local_poster_path": r[13],
-                    "season": r[14], "episode": r[15]
+                    # ✅ "id" 映射为 original_task_id（全局唯一身份证），前端所有增删改查以此为准
+                    "id": r[1], "path": r[2], "file_name": r[3], "clean_name": r[4],
+                    "type": r[5], "status": "archived", "tmdb_id": r[6], "imdb_id": r[7],
+                    "title": r[8], "year": r[9], "target_path": r[10],
+                    "sub_status": r[11], "last_sub_check": None, "created_at": r[12],
+                    "poster_path": r[13], "local_poster_path": r[14],
+                    "season": r[15], "episode": r[16],
+                    "media_archive_pk": r[0],   # 冷表自增 PK，仅供调试，业务逻辑勿用
                 }
                 for r in rows
             ]
+
 
     def get_archive_data(self, search_keyword: Optional[str] = None) -> List[Dict[str, Any]]:
         """查询归档历史记录（归档管理页面用）"""

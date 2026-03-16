@@ -69,14 +69,16 @@ class LLMClient:
         Raises:
             RuntimeError: 所有重试耗尽后抛出
         """
+        # 🛡️ 网络防火墙：强制 timeout 最小值为 15s，最大值为 120s
+        httpx_timeout = max(15.0, min(httpx_timeout, 120.0))
+        
         for attempt in range(max(retries, 1)):
             try:
-                async with httpx.AsyncClient(follow_redirects=True) as client:
+                async with httpx.AsyncClient(follow_redirects=True, timeout=httpx_timeout) as client:
                     resp = await client.post(
                         api_url,
                         headers=headers,
                         json=payload,
-                        timeout=httpx_timeout,
                     )
                     # 就地拦截 429 限流，等待策略：10s / 20s / 40s
                     if resp.status_code == 429:

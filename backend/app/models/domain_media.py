@@ -63,7 +63,7 @@ class Task(BaseModel):
     file_path: str
     file_name: Optional[str] = None
     media_type: str = Field(..., description="媒体类型: movie | tv")
-    status: str = Field(default="pending", description="任务状态: pending | archived | failed | ignored | match failed | scraped")
+    status: str = Field(default="pending", description="任务状态: pending | archived | failed | ignored | scraped")
     tmdb_id: Optional[int] = None
     imdb_id: Optional[str] = None
     title: Optional[str] = None
@@ -75,3 +75,4 @@ class Task(BaseModel):
     season: Optional[int] = None
     episode: Optional[int] = None
     created_at: str = Field(default="", description="创建时间（ISO格式），空串为兜底")
+    is_archive: bool = Field(default=False, description="冷热表寻址标志：True 为冷表(media_archive)，False 为热表(tasks)")

@@ -15,15 +15,16 @@ _RETRY_BASE_WAIT = 2.0
 def http_get_with_retry(
     url: str,
     params: dict = None,
-    timeout: float = 10.0
+    timeout: float = 15.0
 ) -> Optional[httpx.Response]:
     """
-    带 429 重试的同步 HTTP GET 请求
+    带 429 重试的同步 HTTP GET 请求（网络防火墙 v1.0）
     
     设计目标：
     - 自动处理 API 限流（429 Too Many Requests）
     - 指数退避重试，避免频繁请求
     - 超时自动重试，提高成功率
+    - 强制 timeout 保护，防止网络请求裸奔
     
     重试策略：
     - 429 限流：2s、4s、8s 指数退避
@@ -38,11 +39,14 @@ def http_get_with_retry(
     Args:
         url: 请求 URL
         params: 查询参数（可选）
-        timeout: 超时时间（秒）
+        timeout: 超时时间（秒，默认 15s）
     
     Returns:
         Optional[httpx.Response]: 成功返回响应对象，失败返回 None
     """
+    # 🛡️ 网络防火墙：强制 timeout 最小值为 10s，最大值为 60s
+    timeout = max(10.0, min(timeout, 60.0))
+    
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             with httpx.Client(timeout=timeout) as client:
@@ -57,7 +61,7 @@ def http_get_with_retry(
             logger.error(f"[HTTP] 错误 {resp.status_code}: {url}")
             return None
         except httpx.TimeoutException:
-            logger.warning(f"[HTTP] 超时（第 {attempt} 次）: {url}")
+            logger.warning(f"[HTTP] 超时（第 {attempt} 次，timeout={timeout}s）: {url}")
             if attempt < _MAX_RETRIES:
                 time.sleep(_RETRY_BASE_WAIT)
         except Exception as e:

@@ -24,57 +24,54 @@ DEFAULT_CONFIG: dict = {
 
     "expert_archive_rules": (
         "核心任务：智能影视归档专家\n"
-        "你负责将杂乱的影视文件路径清洗为标准的结构化数据。\n\n"
-        "【标准数据契约 - 必须严格遵守】\n"
-        "你必须输出 JSON 格式，包含以下字段：\n\n"
-        "1. clean_name (字符串，必填)：\n"
-        "   - 最通用、最纯净的作品名称\n"
-        "   - 绝对禁止包含 4 位数年份\n"
-        "   - 处理点号：必须将英文名中的点号替换为空格（例如 The.Legend.of.Hei.2 -> The Legend of Hei 2）\n"
-        "   - 保留续集数字：务必保留名称后的数字（如 2, 3, Part II）\n\n"
-        "2. chinese_title (字符串，可选)：\n"
-        "   - 豆瓣/B站官方中文译名\n"
-        "   - 如果原文件路径中包含清晰的中文片名，提取出来\n"
-        "   - 如果没有中文，请务必留空！绝对不要尝试自己翻译英文片名！\n"
-        "   - 知名IP翻译特权：如果你极其确定该英文是某部著名非英语作品的官方英文名"
-        "（例如 Your Name 是《你的名字》，Spirited Away 是《千与千寻》），可以填入中文官方名称\n\n"
-        "3. original_title (字符串，可选)：\n"
-        "   - 原产地名称（日语原名、韩语原名等）\n"
-        "   - 如果无法确定，留空\n\n"
-        "4. year (字符串，可选)：\n"
-        "   - 年份（4位数字）\n"
-        "   - 如果无法确定，留空\n\n"
-        "5. type (字符串，必填)：\n"
-        '   - "movie" (电影)\n'
-        '   - "tv" (剧集)\n'
-        '   - "IGNORE" (纯广告/废片)\n\n'
-        "6. season (整数，可选)：\n"
-        "   - 季数（仅剧集需要）\n"
+        "你负责将杂乱的影视文件路径清洗为标准的结构化数据，供 TMDB 搜索使用。\n\n"
+        "【强制输出契约 - 必须严格遵守】\n"
+        "你必须且只能输出包含以下 5 个键的 JSON 对象，禁止增减字段：\n\n"
+        "1. query (字符串，必填)：\n"
+        "   - 唯一的片名字段，聚合所有名称职能\n"
+        "   - 解决'是什么片子'的问题\n"
+        "   - 华语中文电影优先中文名称的铁律（最高优先级）：\n"
+        "     严禁输出英文译名、拼音或中英混合。\n"
+        "     提取时必须去除中括号[]、制作组名（HDSky/VXT/OurBits/CHD/WiKi等）等噪音。\n"
+        "     只有文件路径和文件名中完全不含中文字符或者是英美电影时，才允许使用英文。\n"
+        "   - 英文片名规则：将点号替换为空格（The.Boys -> The Boys）\n"
+        "   - 保留续集数字（如 2, 3, Part II）\n"
+        "   - 绝对禁止包含年份、分辨率、编码格式等技术标签\n"
+        "   - 禁止输出空字符串、None、Unknown、N/A\n\n"
+        "2. year (字符串，必填，可为空)：\n"
+        "   - 解决'哪个版本'的问题，是数据库索引的必填项\n"
+        "   - 只能填写文件名或路径中明确出现的年份（4位数字）\n"
+        "   - 无法确定时填写空字符串 \"\"，严禁推断或编造\n\n"
+        "3. type (字符串，必填)：\n"
+        "   - 解决'什么物种'的问题，是数据库索引的必填项\n"
+        '   - 取值："movie"（电影）/ "tv"（剧集）/ "IGNORE"（纯广告/废片）\n\n'
+        "4. season (整数，可选)：\n"
+        "   - 仅剧集需要，是剧集定位的必要索引\n"
         "   - 如果是剧集但无法确定季数，默认为 1\n\n"
-        "7. episode (整数，可选)：\n"
-        "   - 集数（仅剧集需要）\n\n"
+        "5. episode (整数，可选)：\n"
+        "   - 仅剧集需要，是剧集定位的必要索引\n\n"
         "【剧集识别关键逻辑】\n"
-        "遇到剧集时，必须确保 clean_name 是剧集名而非单集名：\n"
-        "- 例如路径为 .../Attack on Titan/Season 3/S03E10 - Friends.mkv\n"
-        "- 你绝对不能把单集片名（如 Friends）当成剧名！\n"
-        "- 你必须从完整路径中提取父文件夹名称（如 Attack on Titan）作为 clean_name\n"
+        "遇到剧集时，query 必须是剧集名而非单集名：\n"
+        "- 路径：.../进击的巨人/Season 3/S03E10.mkv\n"
+        "- query 必须是父文件夹名'进击的巨人'，而非单集标题\n"
         "- 季集信息存入 season 和 episode 字段\n\n"
         "【广告与废片拦截】\n"
         "1. 含广告的电影（处理它）：\n"
         "   - 文件名如：[澳门首家]复仇者联盟4.mp4\n"
-        '   - 提取：clean_name = "复仇者联盟" 或 "Avengers Endgame"，丢弃广告词\n'
-        '   - type = "movie"\n'
+        '   - 提取：query = "复仇者联盟4"，丢弃广告词，type = "movie"\n'
         "2. 纯广告/废片（丢弃它）：\n"
-        "   - 文件名如：澳门首家上线.mp4、最新地址发布.mkv\n"
-        '   - 如果完全无法识别出任何影视剧名称，设置 type = "IGNORE"\n\n'
-        "【最重要的生存法则 - 严禁放弃】\n"
-        "无论文件名多混乱，你都必须给出一个最可能的猜测，严禁输出空字符串、None、Unknown 或 N/A。\n"
-        "即便不确定，也要将文件名中看起来最像片名的词语填入 clean_name。\n"
-        "宁可猜错，绝不放弃！猜错只是 TMDB 搜索无结果，放弃会让整个归档任务失败。\n\n"
-        "【输出示例】\n"
-        '{"clean_name": "Dune Part Two", "chinese_title": "沙丘2", "year": "2024", "type": "movie"}\n'
-        '{"clean_name": "Attack on Titan", "chinese_title": "进击的巨人", "year": "2013", "type": "tv", "season": 3, "episode": 10}\n'
-        '{"clean_name": "", "type": "IGNORE"}'
+        "   - 文件名如：澳门首家上线.mp4\n"
+        '   - 设置 type = "IGNORE", query = ""\n\n'
+        "【生存法则 - 严禁放弃】\n"
+        "无论文件名多混乱，必须给出最可能的猜测，禁止输出空字符串（IGNORE 除外）。\n"
+        "宁可猜错，绝不放弃！\n\n"
+        "【强制范例】\n"
+        '{"query": "刺杀小说家", "year": "2021", "type": "movie"}\n'
+        '{"query": "沙丘2", "year": "2024", "type": "movie"}\n'
+        '{"query": "凡人修仙传", "year": "", "type": "tv", "season": 1, "episode": 1}\n'
+        '{"query": "Dune Part Two", "year": "2024", "type": "movie"}\n'
+        '{"query": "The Boys", "year": "", "type": "tv", "season": 3, "episode": 10}\n'
+        '{"query": "", "year": "", "type": "IGNORE"}'
     ),
 
     "master_router_rules": (
@@ -235,4 +232,8 @@ DEFAULT_CONFIG: dict = {
         "# 15. 动漫番剧特殊格式\n"
         r"[-\s](\d{2,4})(?=\s*\[)"
     ),
+
+    "supported_video_exts": ".mkv, .mp4, .avi, .ts, .m2ts, .mov, .wmv, .flv, .rmvb, .webm, .iso, .vob, .mpg, .mpeg, .m4v",
+
+    "supported_subtitle_exts": ".srt, .ass, .vtt, .sub, .idx",
 }

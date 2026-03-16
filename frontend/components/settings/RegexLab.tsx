@@ -5,6 +5,7 @@ import type { I18nKey } from '@/lib/i18n';
 import { useSettings } from '@/hooks/useSettings';
 import { NeuralInput, NeuralSection, NeuralTextarea } from './NeuralPrimitives';
 import { api } from '@/lib/api';
+import NeuralConfirmModal from './NeuralConfirmModal';
 
 interface Props {
   t: (key: I18nKey) => string;
@@ -17,6 +18,7 @@ export default function RegexLab({ t }: Props) {
   const [result, setResult] = useState('');
   const [highlightParts, setHighlightParts] = useState<{ text: string; matched: boolean }[] | null>(null);
   const [resetting, setResetting] = useState(false);
+  const [resetModal, setResetModal] = useState(false);
 
   if (!config) return null;
 
@@ -56,7 +58,7 @@ export default function RegexLab({ t }: Props) {
   };
 
   const handleReset = async () => {
-    if (!confirm(t('regex_reset_confirm'))) return;
+    setResetModal(false);
     setResetting(true);
     try {
       const res = await api.resetSettings('regex');
@@ -75,6 +77,16 @@ export default function RegexLab({ t }: Props) {
 
   return (
     <div className="space-y-6">
+      <NeuralConfirmModal
+        isOpen={resetModal}
+        title={t('modal_confirm')}
+        message={t('regex_reset_confirm')}
+        confirmLabel={t('modal_confirm')}
+        cancelLabel={t('modal_cancel')}
+        variant="warning"
+        onConfirm={handleReset}
+        onCancel={() => setResetModal(false)}
+      />
       <NeuralSection title={t('regex_lab_title')}>
         <p className="text-cyber-cyan/70 text-sm">{t('regex_lab_desc')}</p>
       </NeuralSection>
@@ -113,7 +125,7 @@ export default function RegexLab({ t }: Props) {
       )}
 
       <div className="flex gap-4">
-        <button onClick={handleReset} disabled={resetting} className="px-6 py-3 bg-transparent border-2 border-cyber-red text-cyber-red font-bold uppercase tracking-widest hover:bg-cyber-red hover:text-black transition-all disabled:opacity-50 disabled:cursor-not-allowed" style={{ boxShadow: '0 0 20px rgba(255, 1, 60, 0.35), inset 0 0 20px rgba(255, 1, 60, 0.08)' }}>
+        <button onClick={() => setResetModal(true)} disabled={resetting} className="px-6 py-3 bg-transparent border-2 border-cyber-red text-cyber-red font-bold uppercase tracking-widest hover:bg-cyber-red hover:text-black transition-all disabled:opacity-50 disabled:cursor-not-allowed" style={{ boxShadow: '0 0 20px rgba(255, 1, 60, 0.35), inset 0 0 20px rgba(255, 1, 60, 0.08)' }}>
           {resetting ? '重置中...' : t('btn_reset_defaults')}
         </button>
       </div>

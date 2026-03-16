@@ -321,59 +321,82 @@ def perform_scan_task_sync():
                 }
 
                 # ==========================================
-                # 🎁 失忆救援机制（Amnesia Recovery）+ 白嫖逻辑（Eager Binding）
+                # 🧬 左移注入与优雅降级协议（三层架构）
                 # ==========================================
-                # 触发条件：扫描到 library 目录中的文件（default_status="archived"）
-                # 
-                # 失忆救援场景：
-                # - 数据库被误删或损坏，但媒体库文件完好
-                # - 重新扫描时，系统会发现这些"孤儿文件"
-                # - 通过目录结构和文件名，自动恢复元数据
-                # 
-                # 白嫖逻辑（零成本元数据提取）：
-                # 1. 从父目录名提取片名和年份
-                #    - 标准格式：The Matrix (1999)
-                #    - 剧集格式：Breaking Bad (2008)/Season 1/S01E01.mkv
-                # 2. 自动绑定本地海报（poster.jpg/poster.png）
-                # 3. 直接标记为 archived 状态，跳过刮削流程
-                # 4. target_path 设为当前路径（就地归档）
-                # 
-                # 优势：
-                # - 无需重新刮削，节省 API 配额
-                # - 保留原有目录结构和海报
-                # - 支持 Plex/Jellyfin/Emby 标准命名规范
+                # [优先层] NFO Shift-Left → [兜底层] 失忆救援 → [通用层] 海报绑定
                 # ==========================================
-                if default_status == "archived":
-                    import re as _re_scan
-                    parent_dir = os.path.dirname(file_path)
-                    parent_name = os.path.basename(parent_dir)
+                has_nfo = False
 
-                    # 🚀 剧集目录层级修正：如果父目录是 Season 文件夹，再向上一级寻找真正的剧集根目录
-                    if _re_scan.match(r'^(Season|S)\s*\d+$|^Specials$', parent_name, _re_scan.IGNORECASE):
-                        parent_dir = os.path.dirname(parent_dir)
-                        parent_name = os.path.basename(parent_dir)
-                    # 尝试从父目录名提取「片名 (年份)」结构
-                    _dir_match = _re_scan.match(r'^(.+?)\s*\((\d{4})\)\s*$', parent_name)
+                # ── [优先层] NFO 左移注入 ─────────────────────────────────
+                try:
+                    from app.services.metadata.nfo_parser import find_nfo, parse_nfo as _parse_nfo_scan
+                    _nfo_path_scan = find_nfo(file_path)
+                    if _nfo_path_scan:
+                        _nfo_scan = _parse_nfo_scan(_nfo_path_scan)
+                        if _nfo_scan.get("tmdb_id"):
+                            task_data["tmdb_id"] = _nfo_scan["tmdb_id"]
+                            task_data["imdb_id"] = _nfo_scan.get("imdb_id") or None
+                            if _nfo_scan.get("title"):
+                                task_data["clean_name"] = _nfo_scan["title"]
+                            if _nfo_scan.get("year"):
+                                task_data["year"] = _nfo_scan["year"]
+                            task_data["status"] = "archived"
+                            task_data["target_path"] = file_path
+                            has_nfo = True
+                            logger.info(
+                                f"[SCAN] [NFO Shift-Left] 越级归档: "
+                                f"tmdb={task_data['tmdb_id']}, title={task_data['clean_name']}"
+                            )
+                except Exception as _nfo_scan_err:
+                    logger.debug(f"[SCAN] [NFO Shift-Left] 跳过（{_nfo_scan_err}）")
+
+                # ── [兜底层] 失忆救援降级（仅在无 NFO 时触发）────────────
+                if not has_nfo and default_status == "archived":
+                    import re as _re_scan
+                    _fb_parent_dir = os.path.dirname(file_path)
+                    _fb_parent_name = os.path.basename(_fb_parent_dir)
+                    # 季目录层级修正
+                    if _re_scan.match(r'^(Season|S)\s*\d+$|^Specials$', _fb_parent_name, _re_scan.IGNORECASE):
+                        _fb_parent_dir = os.path.dirname(_fb_parent_dir)
+                        _fb_parent_name = os.path.basename(_fb_parent_dir)
+                    # 白嫖逻辑1：从目录名提取 clean_name / year（兜底防白板）
+                    _dir_match = _re_scan.match(r'^(.+?)\s*\((\d{4})\)\s*$', _fb_parent_name)
                     if _dir_match:
-                        extracted_name = _dir_match.group(1).strip()
-                        extracted_year = _dir_match.group(2).strip()
-                        task_data["clean_name"] = extracted_name
-                        task_data["year"] = extracted_year
-                        logger.info(f"[SCAN] [白嫖] 从目录名提取: clean_name='{extracted_name}', year={extracted_year}")
-                    # 检查同级目录是否有 poster.jpg / poster.png
+                        task_data["clean_name"] = _dir_match.group(1).strip()
+                        task_data["year"] = _dir_match.group(2).strip()
+                        logger.info(
+                            f"[SCAN] [失忆兜底] 从目录名提取: "
+                            f"clean_name='{task_data['clean_name']}', year={task_data['year']}"
+                        )
+                    task_data["target_path"] = file_path
+
+                # ── [通用层] 白嫖逻辑2：本地海报绑定（archived 均适用）────
+                if task_data.get("status") == "archived":
+                    import re as _re_poster
+                    _poster_dir = os.path.dirname(task_data.get("target_path") or file_path)
+                    if _re_poster.match(r'^(Season|S)\s*\d+$|^Specials$', os.path.basename(_poster_dir), _re_poster.IGNORECASE):
+                        _poster_dir = os.path.dirname(_poster_dir)
                     for _poster_name in ["poster.jpg", "poster.png"]:
-                        _poster_candidate = os.path.join(parent_dir, _poster_name)
+                        _poster_candidate = os.path.join(_poster_dir, _poster_name)
                         if os.path.exists(_poster_candidate):
                             task_data["local_poster_path"] = _poster_candidate
-                            logger.info(f"[SCAN] [白嫖] 本地海报已绑定: {_poster_candidate}")
+                            logger.info(f"[SCAN] [白嫖2] 本地海报已绑定: {_poster_candidate}")
                             break
-                    # 就地归档：target_path 即为文件当前物理路径
-                    task_data["target_path"] = file_path
+
+                # ── [通用层] 片名后缀净化（防止 .mkv/.mp4 污染 clean_name）─
+                import re as _re_suffix
+                if task_data.get("clean_name"):
+                    task_data["clean_name"] = _re_suffix.sub(
+                        r'\.(mkv|mp4|avi|ts|rmvb|iso|wmv|m2ts|mov|flv|webm|mpg|mpeg|m4v)$',
+                        '',
+                        task_data["clean_name"],
+                        flags=_re_suffix.IGNORECASE
+                    ).strip()
 
                 try:
                     task_id = db.insert_task(task_data)
                     # 🚀 关键修复：存量库文件插入后，立刻流转至 media_archive 冷表
-                    if default_status == "archived" and task_id:
+                    if task_data.get("status") == "archived" and task_id:
                         try:
                             db.archive_task(task_id)
                             logger.info(f"[SCAN] [生命周期] 存量库文件已流转至 media_archive: task_id={task_id}")

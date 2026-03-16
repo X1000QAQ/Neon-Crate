@@ -128,6 +128,10 @@ class SystemSettings(BaseModel):
     poster_lang: str = "zh"
     rename_lang: str = "zh"
 
+    # 文件格式过滤
+    supported_video_exts: str = ""
+    supported_subtitle_exts: str = ""
+
 
 class SettingsConfig(BaseModel):
     """

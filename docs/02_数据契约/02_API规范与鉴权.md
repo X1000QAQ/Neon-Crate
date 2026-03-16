@@ -49,16 +49,17 @@
 | GET | `/tasks/find_subtitles/status` | 字幕状态 |
 
 ### 媒体库操作
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/tasks/` | 列表（分页+搜索+过滤）|
-| GET | `/tasks/{id}` | 单条详情 |
-| DELETE | `/tasks/{id}` | 删除（双表清理）|
-| POST | `/tasks/delete_batch` | `{ids:[…]}` 批量删除 |
-| POST | `/tasks/purge` | `{confirm:'CONFIRM'}` 清空 |
-| POST | `/tasks/{id}/retry` | 重试失败任务 |
-| POST | `/tasks/{id}/ignore` | 标记 ignored |
-| POST | `/tasks/{id}/archive` | 手动归档 |
+| 方法 | 路径 | 说明 | is_archive 传递 |
+|------|------|------|----------------|
+| GET | `/tasks/` | 列表（分页+搜索+过滤）| 响应包含 is_archive |
+| GET | `/tasks/{id}` | 单条详情 | 响应包含 is_archive |
+| DELETE | `/tasks/{id}` | 删除（双表清理）| 请求体需包含 is_archive |
+| POST | `/tasks/delete_batch` | `{ids:[…], is_archive: bool}` 批量删除 | 🚨 必须传递 |
+| POST | `/tasks/purge` | `{confirm:'CONFIRM'}` 清空 | 无 |
+| POST | `/tasks/{id}/retry` | 重试失败任务 | 请求体需包含 is_archive |
+| POST | `/tasks/{id}/ignore` | 标记 ignored | 请求体需包含 is_archive |
+| POST | `/tasks/{id}/archive` | 手动归档 | 请求体需包含 is_archive |
+| POST | `/tasks/manual_rebuild` | 核级重构 | 🚨 必须传递 is_archive |
 
 ### 设置
 | 方法 | 路径 | 说明 |
@@ -69,7 +70,68 @@
 
 ---
 
-## 四、系统端点（/api/v1/system）
+## 五、核级重构端点（/api/v1/tasks/manual_rebuild）— v1.0.1-Enhanced
+
+### POST /tasks/manual_rebuild
+
+**请求体**：
+```json
+{
+  "task_id": 123,
+  "is_archive": true,              // 🚨 必须传递：0=热表，1=冷表
+  "tmdb_id": 550,
+  "keyword_hint": "The Matrix",
+  "media_type": "movie",
+  "refix_nfo": true,
+  "refix_poster": true,
+  "refix_subtitle": true,
+  "nuclear_reset": true,           // 核级清理标志
+  "season": 1,                     // TV 专用
+  "episode": 1                     // TV 专用
+}
+```
+
+**响应体**：
+```json
+{
+  "success": true,
+  "task_id": 123,
+  "title": "The Matrix",
+  "tmdb_id": 550,
+  "rebuilt": {
+    "nfo": true,                   // NFO 是否成功写入
+    "poster": true,                // 海报是否成功下载
+    "subtitle": "success",         // 字幕状态：success/pending/failed
+    "nuclear": true                // 核级清理是否执行
+  },
+  "message": "核级重构完成"
+}
+```
+
+**业务链路**：
+1. 根据 `is_archive` 选择查询表（热表 tasks 或冷表 media_archive）
+2. 校验 `target_path` 有效性
+3. 初始化 TMDB 适配器
+4. 金标准防重预检（检查本地 NFO 中的 IMDb ID）
+5. 核级清理（删除旧 NFO、海报、Fanart）
+6. 视频文件重命名
+7. 文件夹土木工程
+8. 调用 `update_any_task_metadata()`（更新元数据）
+9. 调用 `update_task_status()`（触发归档流程）
+10. NFO 生成与写入
+11. 海报下载与存储
+12. 字幕检测（本地白嫖）
+13. 返回重建结果
+
+**关键设计**：
+- **is_archive 致命重要**：决定操作哪张表，若未传递则后端无法确定
+- **核级清理**：删除旧元数据文件，确保新数据写入无冲突
+- **原子性**：所有操作在单个事务内完成，失败则全部回滚
+- **字幕白嫖**：归档完成后立即检测本地字幕，零 API 消耗
+
+---
+
+## 六、系统端点（/api/v1/system）
 
 ### GET /system/stats
 
@@ -93,7 +155,7 @@ Query: `?path=<URL编码路径>`
 
 ---
 
-## 五、AI 对话端点（/api/v1/agent）
+## 七、AI 对话端点（/api/v1/agent）
 
 ### POST /agent/chat
 
@@ -119,7 +181,7 @@ Query: `?path=<URL编码路径>`
 
 ---
 
-## 六、前端调用规范
+## 八、前端调用规范
 
 ```typescript
 // ✅ 正确：通过 lib/api.ts 调用

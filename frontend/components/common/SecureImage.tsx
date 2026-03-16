@@ -15,16 +15,16 @@ interface SecureImageProps {
 /**
  * SecureImage — 带鉴权的图片组件
  *
- * 双模式自适应：
- * - 开发模式（3000+8000）：API_BASE = 'http://localhost:8000/api/v1'（绝对路径）
- *   → fetch + Authorization header → Blob URL 渲染
- * - AIO 生产模式（单端口 8000）：API_BASE = '/api/v1'（相对路径）
- *   → 同样走 fetch + Authorization header → Blob URL 渲染
- *   → ⚠️ 不能用 <img src> 直接渲染，因为图片代理路由有 JWT 鉴权
+ * 路由规则（优先级从高到低）：
+ * 1. 占位图 / 空路径 → 原生 <img> 直渲染，绝不走代理（防 403 风暴）
+ * 2. http/https 外部链接（TMDB 等）→ 直通，不走鉴权代理
+ * 3. 已含 /public/image?path= 的路径 → 直接使用（防重复拼接）
+ * 4. 任何物理绝对路径（/ 开头，含 /storage/... 和 /home/...）
+ *    → 拼接 API_BASE/public/image?path= 走后端代理引擎（携带 JWT）
+ * 5. 其他未知格式 → 原生直通降级兜底
  *
- * 核心约束：
- * - 上游（MediaTable.getPosterUrl）必须传入原始物理路径，严禁提前拼接 /api/v1/public/image?path=
- * - 外部链接（TMDB 等 http/https）直通，不做鉴权处理
+ * Bug 1 修复：原来只判断 /storage 前缀，/home/... 测试路径被旁路导致 404。
+ * 现在统一：以 / 开头的所有物理路径都走代理。
  */
 export default function SecureImage({
   src,
@@ -43,28 +43,39 @@ export default function SecureImage({
   useEffect(() => {
     if (!src) return;
 
-    // 外部图片（TMDB 等）直通，不走鉴权代理
-    if (src.startsWith('http')) {
+    // Rule 1: 占位图 — 原生直渲染，绝不走代理
+    if (src === '/placeholder-poster.jpg') {
+      setBlobUrl(src);
+      return;
+    }
+
+    // Rule 2: 外部图片（TMDB 等 http/https）— 直通
+    if (src.startsWith('http://') || src.startsWith('https://')) {
       setFinalUrl(src);
       return;
     }
 
-    // 本地物理路径 → 拼接后端代理地址
-    // API_BASE 在开发模式为绝对路径，AIO 模式为相对路径，两种情况都需要 fetch+token
-    const targetPath = src.includes('/public/image?path=')
-      ? src
-      : `${API_BASE}/public/image?path=${encodeURIComponent(src)}`;
+    // Rule 3: 已拼接过代理路径 — 防重复拼接
+    if (src.includes('/public/image?path=')) {
+      setFinalUrl(src);
+      return;
+    }
 
-    setFinalUrl(targetPath);
-    console.warn('🚀 [SecureImage] 目标地址:', targetPath);
+    // Rule 4: 任何物理绝对路径（/storage/... 或 /home/... 等）— 走代理
+    if (src.startsWith('/')) {
+      setFinalUrl(`${API_BASE}/public/image?path=${encodeURIComponent(src)}`);
+      return;
+    }
+
+    // Rule 5: 未知格式 — 原生兜底
+    setBlobUrl(src);
   }, [src]);
 
   // Step 2: 用 fetch + Authorization 获取图片，转为 Blob URL
   useEffect(() => {
     if (!finalUrl) return;
 
-    // 外部图片（已在 Step 1 判断为 http 开头的绝对 URL 且非本站）直接渲染
-    // 判断条件：绝对 URL 且不包含 /public/image（即不是本站代理路径）
+    // 外部图片直接渲染（绝对 URL 且不含本站代理路径）
     const isExternalImage =
       (finalUrl.startsWith('http://') || finalUrl.startsWith('https://')) &&
       !finalUrl.includes('/public/image?path=');
@@ -74,18 +85,16 @@ export default function SecureImage({
       return;
     }
 
-    // 本站图片代理（无论相对路径还是绝对路径）：必须携带 token
-    // AIO 模式下 <img src> 标签不携带 Authorization，直接渲染会 401
+    // 本站代理路径：必须携带 token（AIO 模式下 <img src> 不携带 Authorization 会 401）
     let cancelled = false;
 
     const fetchImage = async () => {
       try {
         const token = localStorage.getItem('token');
         if (!token) {
-          console.warn('🔑 [SecureImage] 无 token，请先登录');
+          console.warn('[SecureImage] 无 token，请先登录');
         }
 
-        // 相对路径需补全为绝对 URL 才能 fetch（浏览器 fetch 支持相对路径，无需处理）
         const res = await fetch(finalUrl, {
           headers: { Authorization: `Bearer ${token ?? ''}` },
         });

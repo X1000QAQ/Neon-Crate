@@ -64,15 +64,34 @@ class DatabaseManager:
     def _get_conn(self) -> sqlite3.Connection:
         """
         获取当前线程的持久化 SQLite 连接（线程级连接池核心方法）
-
-        - 若当前线程已有连接，直接复用，零开销
-        - 否则创建新连接，设置 WAL 模式 + row_factory 并缓存到线程本地存储
+        
+        ── 业务链路 ──
+        1. 检查当前线程是否已有缓存连接 -> 2. 若有则直接复用（零开销）-> 
+        3. 若无则创建新连接 -> 4. 配置 WAL 模式和行工厂 -> 5. 缓存到线程本地存储 -> 6. 返回连接
+        
+        设计目标：
+        - 消除高频 connect/close 开销（每次查询都要建立连接的性能灾难）
+        - 线程安全（每个线程独立连接，无竞态条件）
+        - 自动连接复用（同一线程的多次查询共享一个连接）
+        
+        Returns:
+            sqlite3.Connection: 当前线程的持久化连接
         """
+        # ── Step 1: 检查线程本地存储中是否已有连接 ──
+        # 1. 从 threading.local() 中读取 conn 属性 -> 2. 若存在则直接返回（零开销）
         conn = getattr(self._local, "conn", None)
         if conn is None:
+            # ── Step 2: 创建新连接 ──
+            # 1. 连接到 SQLite 数据库文件 -> 2. 设置 check_same_thread=False（允许跨线程使用，但由 db_lock 保护）
             conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            # ── Step 3: 配置 WAL 模式 ──
+            # 1. 启用 WAL（Write-Ahead Logging）模式 -> 2. 提升并发读写性能（读不阻塞写）
             conn.execute("PRAGMA journal_mode=WAL")
+            # ── Step 4: 配置行工厂 ──
+            # 1. 设置 row_factory=sqlite3.Row -> 2. 使查询结果可按列名访问（r["column_name"]）
             conn.row_factory = sqlite3.Row
+            # ── Step 5: 缓存到线程本地存储 ──
+            # 1. 将连接对象存储到 self._local.conn -> 2. 下次同线程调用时直接复用
             self._local.conn = conn
         return conn
 
@@ -87,35 +106,85 @@ class DatabaseManager:
 
     @classmethod
     def _register_migrations(cls):
-        """注册所有版本迁移任务（按版本号升序排列）"""
+        """
+        注册所有版本迁移任务（按版本号升序排列）
 
-        def migrate_v1_1(conn: sqlite3.Connection):
-            """V1.0 -> V1.1：补齐扫描阶段新增字段"""
-            cursor = conn.execute("PRAGMA table_info(tasks)")
-            existing = {row[1] for row in cursor.fetchall()}
-            columns_to_add = {
-                "clean_name":       "TEXT",
-                "season":           "INTEGER",
-                "episode":          "INTEGER",
-                "poster_path":      "TEXT",
-                "local_poster_path": "TEXT",
-            }
-            for col, col_type in columns_to_add.items():
-                if col not in existing:
-                    conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {col_type}")
-                    logger.info(f"[DB][V1.1] 新增字段: {col}")
+        [2026-03-15 基准线升级]
+        历史迁移逻辑已全部合并进 _init_database 的初始 CREATE TABLE 语句，
+        不再需要这些补丁迁移。
+        新安装从 Baseline 1.0.0 直接启动，schema_version 初始值为 '1.0.0'，
+        _migrate_database 扫描时发现无 > 1.0.0 的任务，静默跳过，日志不再出现迁移字样。
 
-        def migrate_v1_2(conn: sqlite3.Connection):
-            """V1.1 -> V1.2：新增 is_active 字段，支持逻辑删除"""
-            cursor = conn.execute("PRAGMA table_info(tasks)")
-            existing = {row[1] for row in cursor.fetchall()}
-            if "is_active" not in existing:
-                conn.execute("ALTER TABLE tasks ADD COLUMN is_active INTEGER DEFAULT 1")
-                logger.info("[DB][V1.2] 新增字段: is_active (逻辑删除支持)")
+        Legacy 迁移保留注释仅供历史追溯，实际不注册到 MIGRATIONS。
+        如需为已有线上数据库新增字段，在此处追加新版本（>1.0.0）迁移即可。
+        """
 
-        def migrate_v1_3(conn: sqlite3.Connection):
-            """V1.2 -> V1.3：新增 media_archive 归档表（任务流转冷存储）"""
-            conn.execute(
+        # ── Legacy (已合并入基准线，不再注册) ────────────────────────────
+        # def _legacy_migrate_v1_1(conn): ...  # 补齐 clean_name/season/episode/poster_path/local_poster_path
+        # def _legacy_migrate_v1_2(conn): ...  # 新增 is_active
+        # def _legacy_migrate_v1_3(conn): ...  # 新增 media_archive 归档表
+        # ─────────────────────────────────────────────────────────────────
+
+        # 当前无待注册迁移（基准线已是 1.0.0）
+        # 下一个版本迁移在此追加，例如：
+        # cls.MIGRATIONS = [
+        #     ("1.0.1", "描述", migrate_v1_0_1),
+        # ]
+
+        # ── v1.0.1: 归一化 match failed → failed ─────────────────────────
+        def _migrate_v1_0_1(conn):
+            """将历史遗留的 'match failed' 状态归一化为 'failed'"""
+            conn.execute("UPDATE tasks SET status = 'failed' WHERE status = 'match failed'")
+            conn.execute("UPDATE media_archive SET status = 'failed' WHERE status = 'match failed'")
+        # ─────────────────────────────────────────────────────────────────
+
+        cls.MIGRATIONS = [
+            ("1.0.1", "归一化 match failed → failed", _migrate_v1_0_1),
+        ]
+
+    def _init_database(self):
+        """
+        初始化数据库基础表结构（Baseline Version 1.0.0）
+
+        [2026-03-15 基准线升级]
+        所有历史迁移字段（clean_name/season/episode/poster_path/local_poster_path/is_active）
+        已直接合并到 tasks 的 CREATE TABLE 语句。
+        media_archive 归档表也直接在此创建。
+        schema_version 初始值设为 '1.0.0'，新安装不再触发任何迁移补丁。
+        """
+        with self.db_lock:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+
+            # ── 业务表：tasks（Baseline 1.0.0，含全部历史字段）───────────
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path              TEXT UNIQUE NOT NULL,
+                    file_name         TEXT,
+                    clean_name        TEXT,
+                    type              TEXT DEFAULT 'movie',
+                    status            TEXT DEFAULT 'pending',
+                    tmdb_id           TEXT,
+                    imdb_id           TEXT,
+                    title             TEXT,
+                    year              TEXT,
+                    target_path       TEXT,
+                    sub_status        TEXT DEFAULT 'pending',
+                    last_sub_check    TEXT,
+                    created_at        TEXT DEFAULT CURRENT_TIMESTAMP,
+                    poster_path       TEXT,
+                    local_poster_path TEXT,
+                    season            INTEGER,
+                    episode           INTEGER,
+                    is_active         INTEGER DEFAULT 1
+                )
+                """
+            )
+
+            # ── 归档冷存储表：media_archive（Baseline 1.0.0）──────────────
+            cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS media_archive (
                     id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,121 +208,95 @@ class DatabaseManager:
                 )
                 """
             )
-            conn.execute(
+            cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_media_archive_imdb_id ON media_archive (imdb_id)"
             )
-            conn.execute(
+            cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_media_archive_tmdb_id ON media_archive (tmdb_id)"
             )
-            conn.execute(
+            cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_media_archive_type ON media_archive (type)"
             )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_media_archive_archived_at ON media_archive (archived_at)"
-            )
-            logger.info("[DB][V1.3] 新增表: media_archive (归档冷存储) + 4个索引")
-
-        cls.MIGRATIONS = [
-            ("1.1", "补齐扫描阶段字段 (clean_name/season/episode/poster_path/local_poster_path)", migrate_v1_1),
-            ("1.2", "新增 is_active 字段（逻辑删除预留）", migrate_v1_2),
-            ("1.3", "新增 media_archive 归档表（任务流转冷存储）", migrate_v1_3),
-        ]
-
-    def _init_database(self):
-        """初始化数据库基础表结构（含 system_meta 元数据表）"""
-        with self.db_lock:
-            conn = self._get_conn()
-            cursor = conn.cursor()
-
-            # ── 业务表：tasks ────────────────────────────────────────────
             cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS tasks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    path TEXT UNIQUE NOT NULL,
-                    file_name TEXT,
-                    clean_name TEXT,
-                    type TEXT DEFAULT 'movie',
-                    status TEXT DEFAULT 'pending',
-                    tmdb_id TEXT,
-                    imdb_id TEXT,
-                    title TEXT,
-                    year TEXT,
-                    target_path TEXT,
-                    sub_status TEXT DEFAULT 'pending',
-                    last_sub_check TEXT,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                    poster_path TEXT,
-                    local_poster_path TEXT,
-                    season INTEGER,
-                    episode INTEGER,
-                    is_active INTEGER DEFAULT 1
-                )
-                """
+                "CREATE INDEX IF NOT EXISTS idx_media_archive_archived_at ON media_archive (archived_at)"
             )
 
             # ── 元数据表：system_meta（存储 schema_version 等系统级 KV）──
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS system_meta (
-                    key TEXT PRIMARY KEY,
+                    key   TEXT PRIMARY KEY,
                     value TEXT
                 )
                 """
             )
 
-            # 仅在首次创建时写入初始版本号（INSERT OR IGNORE 保证幂等）
+            # 新安装直接以 1.0.0 为基准线（INSERT OR IGNORE 保证幂等，不覆盖已有版本）
             cursor.execute(
-                "INSERT OR IGNORE INTO system_meta (key, value) VALUES ('schema_version', '1.0')"
+                "INSERT OR IGNORE INTO system_meta (key, value) VALUES ('schema_version', '1.0.0')"
             )
 
             conn.commit()
-            logger.info("[DB] 数据库初始化完成 (WAL 模式 + system_meta)")
+            logger.info("[INFO][DB] 数据库初始化完成 (Baseline Version 1.0.0)")
 
     def _migrate_database(self):
         """
         原子化版本迁移引擎
 
-        流程：
-        1. 读取 system_meta 中的当前 schema_version
-        2. 遍历 MIGRATIONS，执行所有版本号 > 当前版本的任务
-        3. 每个迁移任务独占一个事务（BEGIN ... COMMIT / ROLLBACK）
-        4. 迁移完成后更新 schema_version
+        ── 业务链路 ──
+        1. 读取 system_meta 中的当前 schema_version -> 
+        2. 遍历 MIGRATIONS，执行所有版本号 > 当前版本的任务 -> 
+        3. 每个迁移任务独占一个事务（BEGIN ... COMMIT / ROLLBACK）-> 
+        4. 迁移完成后更新 schema_version -> 
         5. 任何迁移失败立即 rollback 并抛出异常，阻止系统启动
         """
         with self.db_lock:
             conn = self._get_conn()
 
-            # ── 读取当前版本 ─────────────────────────────────────────────
+            # ── Step 1: 读取当前版本 ──
+            # 业务链路：1. 查询 system_meta 表中的 schema_version -> 2. 若无记录则默认为 1.0
             row = conn.execute(
                 "SELECT value FROM system_meta WHERE key = 'schema_version'"
             ).fetchone()
             current_version = row[0] if row else "1.0"
 
-            # ── 遍历迁移任务 ─────────────────────────────────────────────
+            # ── Step 2: 遍历迁移任务 ──
+            # 业务链路：1. 遍历 MIGRATIONS 列表 -> 2. 版本比较（跳过已完成的迁移）-> 
+            # 3. 执行迁移函数 -> 4. 更新版本号 -> 5. 异常处理与回滚
             for target_version, description, migrate_fn in self.MIGRATIONS:
-                # 版本比较：使用 tuple 数值比较，避免字符串排序陷阱
+                # ── 版本比较逻辑 ──
+                # 业务链路：1. 将版本字符串转换为元组（如 "1.0.1" -> (1, 0, 1)）-> 
+                # 2. 使用元组数值比较（避免字符串排序陷阱）
                 def _ver(v: str):
                     return tuple(int(x) for x in v.split("."))
 
+                # 1. 若目标版本 <= 当前版本，说明迁移已完成，跳过
                 if _ver(target_version) <= _ver(current_version):
                     continue  # 已完成的迁移跳过
 
                 logger.info(f"[DB] 执行迁移 {current_version} -> {target_version}: {description}")
 
                 try:
+                    # ── Step 3: 事务开启与迁移执行 ──
+                    # 业务链路：1. 开启事务（BEGIN）-> 2. 执行迁移函数 -> 
+                    # 3. 在同一事务内更新版本号 -> 4. 提交事务（COMMIT）
                     conn.execute("BEGIN")
+                    # 1. 执行迁移函数（由子类实现具体迁移逻辑）
                     migrate_fn(conn)
-                    # 更新版本号（在同一事务内）
+                    # 2. 更新版本号（在同一事务内，确保原子性）
                     conn.execute(
                         "INSERT OR REPLACE INTO system_meta (key, value) VALUES ('schema_version', ?)",
                         (target_version,)
                     )
+                    # 3. 提交事务
                     conn.commit()
                     current_version = target_version
                     logger.info(f"[DB] 迁移完成，当前版本: {current_version}")
 
                 except Exception as e:
+                    # ── Step 4: 异常处理与回滚 ──
+                    # 业务链路：1. 捕获迁移异常 -> 2. 回滚事务（ROLLBACK）-> 
+                    # 3. 记录错误日志 -> 4. 抛出异常，阻止系统启动
                     conn.rollback()
                     error_msg = (
                         f"[FATAL] [DB] 迁移 {current_version} -> {target_version} 失败，"
@@ -266,48 +309,64 @@ class DatabaseManager:
         """
         自动迁移明文密钥到加密存储（首次启动时执行）
         
-        迁移流程：
-        1. 扫描 config.json 中的 SENSITIVE_KEYS
-        2. 将非空明文密钥加密后写入 secure_keys.json
-        3. 清空 config.json 中的明文密钥（设为空字符串）
-        4. 后续读取时，ConfigRepo 会自动从 secure_keys.json 解密
+        ── 业务链路 ──
+        1. 读取 config.json 文件 -> 2. 扫描 SENSITIVE_KEYS 列表中的明文密钥 -> 
+        3. 将非空明文密钥加密后写入 secure_keys.json -> 4. 清空 config.json 中的明文密钥 -> 
+        5. 后续读取时，ConfigRepo 会自动从 secure_keys.json 解密
         
         幂等性：多次执行不会重复迁移（已加密的密钥会被跳过）
         """
+        # ── Step 1: 校验配置文件存在性 ──
+        # 业务链路：1. 检查 config.json 是否存在 -> 2. 若不存在则直接返回
         if not os.path.exists(self.config_path):
             return
+        
+        # ── Step 2: 读取配置文件 ──
+        # 业务链路：1. 打开 config.json -> 2. 解析 JSON -> 3. 提取 settings 字段
         with open(self.config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
         settings = config.get("settings", {})
         crypto = get_crypto_manager()
         
-        # 收集需要迁移的明文密钥
+        # ── Step 3: 扫描明文密钥 ──
+        # 业务链路：1. 遍历 SENSITIVE_KEYS 列表 -> 2. 检查每个密钥是否在 settings 中存在且非空 -> 
+        # 3. 收集需要迁移的明文密钥
         keys_to_migrate = {}
         for key in self.SENSITIVE_KEYS:
             value = settings.get(key, "")
             if value and value.strip():
                 keys_to_migrate[key] = value
         
+        # ── Step 4: 若无需迁移则直接返回 ──
         if not keys_to_migrate:
             return  # 无需迁移
         
-        # 加载现有的加密存储（如果存在）
+        # ── Step 5: 加载现有的加密存储 ──
+        # 业务链路：1. 检查 secure_keys.json 是否存在 -> 2. 若存在则读取现有加密数据 -> 
+        # 3. 若不存在则初始化为空字典
         secure_data = {}
         if os.path.exists(self.secure_keys_path):
             with open(self.secure_keys_path, "r", encoding="utf-8") as f:
                 secure_data = json.load(f)
         
-        # 加密并存储
+        # ── Step 6: 加密并存储密钥 ──
+        # 业务链路：1. 遍历需要迁移的密钥 -> 2. 使用加密管理器加密明文 -> 
+        # 3. 存储到 secure_data -> 4. 清空 config.json 中的明文密钥
         for key, value in keys_to_migrate.items():
+            # 1. 加密明文密钥
             encrypted = crypto.encrypt_api_key(value)
+            # 2. 存储到加密数据字典
             secure_data[key] = encrypted
+            # 3. 清空 config.json 中的明文密钥（设为空字符串）
             settings[key] = ""  # 清空明文
         
-        # 原子写入加密文件
+        # ── Step 7: 原子写入加密文件 ──
+        # 业务链路：1. 打开 secure_keys.json 文件 -> 2. 写入加密数据 -> 3. 关闭文件
         with open(self.secure_keys_path, "w", encoding="utf-8") as f:
             json.dump(secure_data, f, indent=4)
         
-        # 原子写入配置文件
+        # ── Step 8: 原子写入配置文件 ──
+        # 业务链路：1. 打开 config.json 文件 -> 2. 写入更新后的配置（明文密钥已清空）-> 3. 关闭文件
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
         
@@ -355,8 +414,8 @@ class DatabaseManager:
 
     def update_task_sub_status(self, task_id: int, sub_status: str):          return self._task_repo.update_task_sub_status(task_id, sub_status)
 
-    def update_any_task_metadata(self, task_id: int, is_archive: bool, imdb_id=None, tmdb_id=None, sub_status=None, title=None, year=None):
-        return self._task_repo.update_any_task_metadata(task_id, is_archive, imdb_id=imdb_id, tmdb_id=tmdb_id, sub_status=sub_status, title=title, year=year)
+    def update_any_task_metadata(self, task_id: int, is_archive: bool, imdb_id=None, tmdb_id=None, sub_status=None, title=None, year=None, local_poster_path=None, target_path=None, clean_name=None, season=None, episode=None):
+        return self._task_repo.update_any_task_metadata(task_id, is_archive, imdb_id=imdb_id, tmdb_id=tmdb_id, sub_status=sub_status, title=title, year=year, local_poster_path=local_poster_path, target_path=target_path, clean_name=clean_name, season=season, episode=episode)
 
     def update_task_title_year(self, task_id: int, title=None, year=None, season=None): return self._task_repo.update_task_title_year(task_id, title=title, year=year, season=season)
     def get_tasks_needing_scrape(self) -> List[Dict[str, Any]]:                      return self._task_repo.get_tasks_needing_scrape()
