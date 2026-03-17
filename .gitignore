@@ -290,3 +290,7 @@ backend/static/
 
 # 第三道防线：Node.js 依赖缓存
 frontend/node_modules/
+
+# AI Agent Instructions
+AGENTS.md
+CLAUDE.md
