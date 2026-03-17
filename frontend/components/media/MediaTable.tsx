@@ -1,21 +1,31 @@
 /**
- * MediaTable - 媒体任务三重折叠列表
- * Level 1: 作品根节点 (电影/剧集)
- * Level 2: 季节点 (仅剧集)
- * Level 3: 单集节点 (仅剧集)
- * 补录三剑客: 📄 NFO / 🖼️ 海报 / ⌨️ 字幕 — 放在"创建时间"时间戳正下方
+ * MediaTable — 等高扁平折叠列表（Flat Hierarchical List, v1.0.0）
+ *
+ * 业务定位：
+ * - 将“电影单体任务 + 电视剧（剧 → 季 → 集）”统一压平到同一种 Row 渲染模型，层级仅由缩进表达。
+ * - 为 `/tasks/manual_rebuild` 提供“补录三剑客”入口：📄 NFO / 🖼️ 海报 / ⌨️ 字幕（位于创建时间下方）。
+ *
+ * v1.0.0 架构语义对齐：
+ * - **ignored = VHS 故障态**：当 `status === 'ignored'` 时，UI 叠加 VHS 噪点/扫描线/RGB 分离/印章层，
+ *   并依赖后端在重复媒体拦截时继承 `local_poster_path`（否则会出现白板破图）。
+ * - **分组状态传播**：TV 组/季状态根据子集聚合（如全 ignored 则父级也为 ignored，以维持语义一致）。
+ *
+ * 稳定性红线（DO NOT BREAK）：
+ * - 复杂派生（分组、计数、聚合）必须由 `useMemo` 输出，避免父组件刷新造成全量重算与 UI 抖动。
+ * - 任何与“ignored VHS 叠层”的结构改动，都必须保持 `pointer-events: none`，禁止阻断交互。
  */
 'use client';
 
-import { useState, memo, useMemo, useCallback } from 'react';
+import { useState, memo, useMemo, useCallback, Fragment } from 'react';
 import {
-  Film, Tv, RefreshCw, Trash2, AlertCircle,
+  Film, Tv, RefreshCw, Trash2, AlertCircle, AlertOctagon,
   ChevronDown, ChevronRight, FileText, Image, Subtitles,
 } from 'lucide-react';
 import SecureImage from '@/components/common/SecureImage';
 import RebuildDialog, { type RebuildMode } from './RebuildDialog';
 import type { Task } from '@/types';
 import { cn, formatDate } from '@/lib/utils';
+import type { I18nKey } from '@/lib/i18n';
 import { useLanguage } from '@/hooks/useLanguage';
 
 // ── 进度计算 ──────────────────────────────────────────────────────────
@@ -38,6 +48,7 @@ interface MediaGroup {
   seasons: Map<number, Task[]>;      // 剧集：season → episodes
   total_count: number;
   archived_count: number;
+  ignored_count: number;
   poster_path?: string;
   tmdb_id?: number;
   title?: string;
@@ -56,6 +67,7 @@ export interface MediaTableProps {
   isSomeSelected: boolean;
   onRetry: (taskId: number) => void;
   onDelete: (taskId: number) => void;
+  onDeleteBatch: (ids: number[]) => void;
   onRebuild: (params: {
     task_id: number;
     is_archive: boolean;
@@ -86,234 +98,330 @@ function getSubStatusColor(sub?: string | null) {
   return 'border-cyber-cyan/20 text-cyber-cyan/50 bg-cyber-cyan/5';
 }
 
+// ── sub_status 复合字符串解析器 ──────────────────────────────────────
+// 后端 rebuild 操作写入复合结构：rebuild_complete:nfo:ok;subtitle:triggered
+// 此函数拦截该格式，转换为本地化标签；普通枚举值走原有 sub_status_ 路径
+function formatSubStatus(raw: string | null | undefined, t: (k: I18nKey) => string): string {
+  if (!raw) return t('sub_status_pending');
+  // 1. 复合重构状态：rebuild_complete:nfo:ok;subtitle:triggered
+  if (raw.startsWith('rebuild_complete:')) {
+    const payload = raw.slice('rebuild_complete:'.length);
+    const labels: string[] = [];
+    for (const part of payload.split(';')) {
+      if (part.startsWith('nfo:')) {
+        const st = part.slice(4);
+        labels.push(t('msg_nfo_rebuild').replace('{status}', st === 'ok' ? '✅' : '❌'));
+      } else if (part.startsWith('poster:')) {
+        const st = part.slice(7);
+        labels.push(t('msg_poster_rebuild').replace('{status}', st === 'ok' ? '✅' : '❌'));
+      } else if (part.startsWith('subtitle:')) {
+        const st = part.slice(9);
+        labels.push(st === 'triggered' ? t('msg_subtitle_triggered') : t('msg_nfo_rebuild').replace('{status}', st));
+      }
+    }
+    return labels.length
+      ? t('msg_rebuild_complete') + labels.join(' | ')
+      : t('msg_rebuild_complete');
+  }
+  // 2. 标准枚举映射：直接查 sub_status_{raw}
+  //    找不到时严禁显示 key 名，直接返回原始值（不带前缀）
+  const key = ('sub_status_' + raw.toLowerCase()) as I18nKey;
+  const trans = (t as (k: string) => string)(key);
+  return trans !== key ? trans : raw;
+}
+
 // ── 补录按钮是否可用 ─────────────────────────────────────────────────
 function canRebuild(status: string) {
   const s = (status || '').toLowerCase();
   return s === 'archived' || s === 'failed';
 }
 
-// ── 单集行（Level 3 / 电影叶节点）────────────────────────────────────
-interface TaskRowProps {
-  task: Task;
-  indent?: number;
-  onRetry: (id: number) => void;
-  onDelete: (id: number) => void;
-  onRebuildClick: (task: Task, mode: RebuildMode) => void;
-  rebuildingId: number | null;
-  processingId: number | null;
-  setProcessingId: (id: number | null) => void;
+// ── UniversalMediaRow Props ─────────────────────────────────────────
+interface UniversalMediaRowProps {
+  level: 0 | 1 | 2;
+  isExpandable?: boolean;
+  isExpanded?: boolean;
+  onToggle?: () => void;
+  posterSrc?: string;
+  title: string;
+  subtitle: string;
+  status?: string;
+  progress?: number;
+  onDelete: () => void;
+  task?: Task;
+  onRebuildClick?: (task: Task, mode: RebuildMode) => void;
+  rebuildingId?: number | null;
+  processingId?: number | null;
+  setProcessingId?: (id: number | null) => void;
+  onRetry?: (id: number) => void;
 }
 
-const TaskRow = memo(function TaskRow({
-  task, indent = 0, onRetry, onDelete, onRebuildClick,
-  rebuildingId, processingId, setProcessingId,
-}: TaskRowProps) {
+// ── UniversalMediaRow — 等高行组件（所有层级共用）────────────────────
+const UniversalMediaRow = memo(function UniversalMediaRow({
+  level, isExpandable, isExpanded, onToggle,
+  posterSrc, title, subtitle, status = 'pending', progress,
+  onDelete, task, onRebuildClick, rebuildingId, processingId,
+  setProcessingId, onRetry,
+}: UniversalMediaRowProps) {
   const { t } = useLanguage();
 
-  const getPosterUrl = (t: Task) => t.local_poster_path || t.poster_path || '/placeholder-poster.jpg';
+  const effectiveStatus = (task?.status ?? status ?? 'pending').toLowerCase();
+  const isIgnored = effectiveStatus === 'ignored';
 
-  const rawName = task.file_name || task.file_path?.split(/[/\\]/).pop() || '-';
-  const noiseRe = /\b(4k|2160p|1080p|720p|480p|360p)\b/i;
-  const _bestName = task.title || task.clean_name;
-  const hasTitle = !!_bestName && _bestName !== rawName && !noiseRe.test(_bestName);
-  let displayTitle = hasTitle ? _bestName : rawName;
-  if (hasTitle) {
-    if (task.year) displayTitle += ` (${task.year})`;
-    if (task.media_type === 'tv') {
-      const s = task.season, e = task.episode;
-      if (s != null && e != null) displayTitle += ` S${String(s).padStart(2,'0')}E${String(e).padStart(2,'0')}`;
-      else if (s != null) displayTitle += ` Season ${s}`;
-    }
-  }
+  const resolvedProgress = progress !== undefined
+    ? progress
+    : getProgress(task?.status ?? '', task?.sub_status);
 
-  const isArchived = (task.status || '').toLowerCase() === 'archived';
-  const rebuildable = canRebuild(task.status);
-  const isRebuilding = rebuildingId === task.id;
-
-  const progress = getProgress(task.status, task.sub_status);
-  const progressColor = progress === 100
+  const progressColor = resolvedProgress === 100
     ? 'from-cyber-cyan to-green-400'
     : 'from-cyber-cyan to-[rgba(0,230,246,0.5)]';
 
   return (
     <div
-      className="relative border border-cyber-cyan/30 p-3 hover:border-cyber-cyan hover:bg-cyber-cyan/5 transition-all"
+      className={cn(
+        "relative border border-cyber-cyan/30 p-3 hover:border-cyber-cyan hover:bg-cyber-cyan/5 transition-all",
+        isIgnored && "border-orange-400/70 bg-orange-400/5 hover:border-orange-400 hover:bg-orange-400/10"
+      )}
       style={{
-        marginLeft: indent,
+        marginLeft: level * 32,
         backdropFilter: 'blur(25px)',
         boxShadow: '0 0 30px rgba(6,182,212,0.15)',
       }}
     >
       <div className="flex items-center gap-3">
-        {/* 海报 */}
-        <div className="relative w-14 h-20 flex-shrink-0 overflow-hidden border border-cyber-cyan/40">
+        {/* 折叠箭头占位 */}
+        <div className="flex-shrink-0 w-5 flex items-center justify-center">
+          {isExpandable ? (
+            <button onClick={onToggle} className="text-cyber-cyan/60 hover:text-cyber-cyan transition-colors">
+              {isExpanded ? <ChevronDown size={16}/> : <ChevronRight size={16}/>}
+            </button>
+          ) : null}
+        </div>
+
+        {/* 海报：严格 w-14 h-20，全层级一致 */}
+        <div
+          className={cn(
+            "relative w-14 h-20 flex-shrink-0 overflow-hidden border border-cyber-cyan/40",
+            isIgnored && "border-orange-400/70"
+          )}
+        >
           <SecureImage
-            src={getPosterUrl(task)}
-            alt={task.title || task.clean_name || rawName}
+            src={posterSrc || task?.local_poster_path || task?.poster_path || '/placeholder-poster.jpg'}
+            alt={title}
             width={56} height={80}
-            className="object-cover w-full h-full opacity-80"
+            className={cn(
+              "object-cover w-full h-full opacity-80",
+              isIgnored && "vhs-filter"
+            )}
             fallback={
               <div className="w-full h-full flex items-center justify-center bg-black/40">
-                {task.media_type === 'movie' ? <Film className="text-cyber-cyan/30" size={18}/> : <Tv className="text-cyber-cyan/30" size={18}/>}
+                {task?.media_type === 'tv'
+                  ? <Tv className="text-cyber-cyan/30" size={18}/>
+                  : <Film className="text-cyber-cyan/30" size={18}/>}
               </div>
             }
           />
+
+          {/* VHS Glitch — 仅 ignored 状态激活 */}
+          {isIgnored && (
+            <div className="absolute inset-0 pointer-events-none vhs-ignored">
+              {/* VHS 噪点纹理（Demo：SVG turbulence） */}
+              <div className="absolute inset-0 z-10 opacity-30 vhs-noise" />
+
+              {/* VHS 扫描线（Demo：粗糙 5px 间距） */}
+              <div className="absolute inset-0 z-20 opacity-40 vhs-scanlines" />
+
+              {/* 磁带拉伸条（Demo：横向 tracking bar） */}
+              <div className="absolute left-0 right-0 h-6 z-20 opacity-60 vhs-tracking-bar" style={{ top: '30%' }} />
+              <div
+                className="absolute left-0 right-0 h-5 z-20 opacity-40"
+                style={{
+                  top: '60%',
+                  background:
+                    'linear-gradient(90deg, transparent 0%, rgba(0,0,0,0.3) 30%, rgba(0,0,0,0.5) 50%, rgba(0,0,0,0.3) 70%, transparent 100%)',
+                }}
+              />
+
+              {/* VHS 色彩分离（Demo：红/蓝偏移） */}
+              <div className="absolute inset-0 z-25 mix-blend-screen opacity-20 vhs-rgb-red" />
+              <div className="absolute inset-0 z-25 mix-blend-screen opacity-20 vhs-rgb-blue" />
+
+              {/* 顶部时间码（Demo：REC bar） */}
+              <div className="absolute top-0.5 left-0.5 right-0.5 z-30">
+                <div className="px-1 py-[1px] bg-black/70 backdrop-blur-sm text-orange-400 text-[7px] font-mono leading-none">
+                  ▶ REC 00:00:00:00 [CORRUPTED]
+                </div>
+              </div>
+
+              {/* VHS 时间码错误印章（Demo：橙色 TAPE ERROR） */}
+              <div className="absolute inset-0 flex items-center justify-center z-30">
+                <div
+                  className="px-1.5 py-1 bg-orange-600/80 border border-orange-400 text-white font-mono text-[8px] backdrop-blur-sm"
+                  style={{
+                    textShadow: '0 0 8px rgba(251, 146, 60, 0.8)',
+                    boxShadow: '0 0 12px rgba(251, 146, 60, 0.55)',
+                    transform: 'rotate(-8deg)',
+                  }}
+                >
+                  <div className="flex flex-col items-center gap-0.5">
+                    <AlertOctagon size={10} />
+                    <span className="leading-none">TAPE ERROR</span>
+                    <span className="text-[7px] opacity-70 leading-none">00:00:00:00</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* 信息区 */}
         <div className="flex-1 min-w-0 flex items-center gap-3">
-          {/* 标题+路径 */}
           <div className="flex-1 min-w-0">
-            {/* ── 标题行：TMDB 确认片名 + 年份 + 季集号 ──
-                业务链路：1. 判断是否有 TMDB 标题 -> 2. 若有则拼接年份和季集号 -> 3. 否则使用原始文件名
-            */}
-            <h4 className="font-semibold text-sm truncate text-cyber-yellow" style={{textShadow:'0 0 8px rgba(249,240,2,0.4)'}} title={displayTitle}>
-              {displayTitle}
+            <h4 className="font-semibold text-sm truncate text-cyber-yellow"
+              style={{ textShadow: '0 0 8px rgba(249,240,2,0.4)' }} title={title}>
+              {title}
             </h4>
-            
-            {/* ── 原始文件名行：下载源中的原始文件名 ──
-                业务链路：1. 从 task.file_name 读取 -> 2. 若无则从 task.file_path 提取文件名 -> 3. 显示为灰色副标题
-            */}
-            <p className="text-xs truncate mt-0.5 text-cyber-cyan/50" title={rawName}>{rawName}</p>
-            
-            {/* 🚀 今生：目标入库路径 (置于上方)
-                业务链路：1. 检查 task.target_path 是否存在 -> 2. 若存在则显示为"入库路径" -> 3. 使用 t('path_dst') 获取多语言标签
-            */}
-            {task.target_path && (
+            <p className="text-xs truncate mt-0.5 text-cyber-cyan/50" title={subtitle}>{subtitle}</p>
+            {task?.target_path && (
               <p className="text-cyber-cyan/30 text-xs truncate mt-1" title={task.target_path}>
                 <span className="text-cyber-cyan/50 font-mono mr-1">{t('path_dst')}:</span>{task.target_path}
               </p>
             )}
-            
-            {/* 前世：原始绝对路径 (置于下方)
-                业务链路：1. 显示 task.file_path（下载源中的原始路径）-> 2. 使用 t('path_src') 获取多语言标签 -> 3. 用于追溯文件来源
-            */}
-            <p className="text-cyber-cyan/40 text-xs truncate mt-0.5" title={task.file_path}>
-              <span className="text-cyber-cyan/60 font-mono mr-1">{t('path_src')}:</span>{task.file_path}
-            </p>
+            {task?.file_path && (
+              <p className="text-cyber-cyan/40 text-xs truncate mt-0.5" title={task.file_path}>
+                <span className="text-cyber-cyan/60 font-mono mr-1">{t('path_src')}:</span>{task.file_path}
+              </p>
+            )}
           </div>
 
           {/* 状态标签 */}
-          <div className="flex items-center gap-1.5 flex-shrink-0">
-            <span className={cn('px-2 py-0.5 text-xs font-semibold border', getStatusColor(task.status))}>
-              {t(('status_' + task.status.toLowerCase()) as Parameters<typeof t>[0]) || task.status}
+          {task ? (
+            <div className="flex items-center gap-1.5 flex-shrink-0">
+              <span className={cn('px-2 py-0.5 text-xs font-semibold border', getStatusColor(task.status))}>
+                {t(('status_' + task.status.toLowerCase()) as Parameters<typeof t>[0]) || task.status}
+              </span>
+              <span className={cn('px-2 py-0.5 text-xs font-semibold border', getSubStatusColor(task.sub_status))}>
+                {formatSubStatus(task.sub_status, t)}
+              </span>
+            </div>
+          ) : (
+            <span className={cn('px-2 py-0.5 text-xs font-semibold border flex-shrink-0', getStatusColor(status))}>
+              {t(('status_' + status.toLowerCase()) as Parameters<typeof t>[0]) || status}
             </span>
-            <span className={cn('px-2 py-0.5 text-xs font-semibold border', getSubStatusColor(task.sub_status))}>
-              {t(('sub_status_' + (task.sub_status || 'pending').toLowerCase()) as Parameters<typeof t>[0]) || task.sub_status || 'pending'}
-            </span>
-          </div>
+          )}
 
           {/* 外链 */}
-          <div className="flex items-center gap-1 flex-shrink-0">
-            {task.tmdb_id && (
-              <a href={`https://www.themoviedb.org/${task.media_type === 'tv' ? 'tv' : 'movie'}/${task.tmdb_id}`}
-                target="_blank" rel="noopener noreferrer"
-                className="px-2 py-0.5 text-xs border border-cyber-cyan/60 text-cyber-cyan/70 hover:bg-cyber-cyan hover:text-black transition-all">TMDB</a>
-            )}
-            {task.imdb_id && (
-              <a href={`https://www.imdb.com/title/${task.imdb_id}`}
-                target="_blank" rel="noopener noreferrer"
-                className="px-2 py-0.5 text-xs border border-yellow-400/60 text-yellow-400/70 hover:bg-yellow-400 hover:text-black transition-all">IMDb</a>
-            )}
-          </div>
+          {task && (
+            <div className="flex items-center gap-1 flex-shrink-0">
+              {task.tmdb_id && (
+                <a href={`https://www.themoviedb.org/${task.media_type === 'tv' ? 'tv' : 'movie'}/${task.tmdb_id}`}
+                  target="_blank" rel="noopener noreferrer"
+                  className="px-2 py-0.5 text-xs border border-cyber-cyan/60 text-cyber-cyan/70 hover:bg-cyber-cyan hover:text-black transition-all">TMDB</a>
+              )}
+              {task.imdb_id && (
+                <a href={`https://www.imdb.com/title/${task.imdb_id}`}
+                  target="_blank" rel="noopener noreferrer"
+                  className="px-2 py-0.5 text-xs border border-yellow-400/60 text-yellow-400/70 hover:bg-yellow-400 hover:text-black transition-all">IMDb</a>
+              )}
+            </div>
+          )}
 
-          {/* 时间戳 + 补录三剑客 — 绝对约束：三剑客在时间戳正下方 */}
-          <div className="flex-shrink-0 flex flex-col items-end gap-1">
-            <span className="text-cyber-cyan/50 text-xs whitespace-nowrap">
-              {task.created_at ? formatDate(task.created_at) : t('task_just_now')}
-            </span>
-            {/* 补录三剑客 */}
-            {rebuildable && (
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={() => onRebuildClick(task, 'nfo')}
-                  disabled={isRebuilding}
-                  title={t('tooltip_rebuild_nfo')}
-                  className={cn(
-                    'p-1 border text-xs transition-all',
-                    isRebuilding ? 'border-cyber-cyan/20 text-cyber-cyan/20 cursor-wait'
-                      : 'border-cyber-cyan/50 text-cyber-cyan/70 hover:border-cyber-cyan hover:bg-cyber-cyan/10'
-                  )}
-                >
-                  <FileText size={12}/>
-                </button>
-                <button
-                  onClick={() => onRebuildClick(task, 'poster')}
-                  disabled={isRebuilding}
-                  title={t('tooltip_rebuild_poster')}
-                  className={cn(
-                    'p-1 border text-xs transition-all',
-                    isRebuilding ? 'border-purple-400/20 text-purple-400/20 cursor-wait'
-                      : 'border-purple-400/50 text-purple-400/70 hover:border-purple-400 hover:bg-purple-400/10'
-                  )}
-                >
-                  <Image size={12}/>
-                </button>
-                <button
-                  onClick={() => onRebuildClick(task, 'subtitle')}
-                  disabled={isRebuilding}
-                  title={t('tooltip_trigger_subtitle')}
-                  className={cn(
-                    'p-1 border text-xs transition-all',
-                    isRebuilding ? 'border-green-400/20 text-green-400/20 cursor-wait'
-                      : 'border-green-400/50 text-green-400/70 hover:border-green-400 hover:bg-green-400/10'
-                  )}
-                >
-                  <Subtitles size={12}/>
-                </button>
-              </div>
-            )}
-          </div>
+          {/* 时间戳 + 补录三剑客（仅 task 节点）*/}
+          {task && onRebuildClick && (
+            <div className="flex-shrink-0 flex flex-col items-end gap-1">
+              <span className="text-cyber-cyan/50 text-xs whitespace-nowrap">
+                {task.created_at ? formatDate(task.created_at) : t('task_just_now')}
+              </span>
+              {canRebuild(task.status) && (
+                <div className="flex items-center gap-1">
+                  <button onClick={(e) => { e.stopPropagation(); onRebuildClick(task, 'nfo'); }} disabled={rebuildingId === task.id}
+                    title={t('tooltip_rebuild_nfo')}
+                    className={cn('p-1 border text-xs transition-all',
+                      rebuildingId === task.id ? 'border-cyber-cyan/20 text-cyber-cyan/20 cursor-wait'
+                        : 'border-cyber-cyan/50 text-cyber-cyan/70 hover:border-cyber-cyan hover:bg-cyber-cyan/10')}>
+                    <FileText size={12}/>
+                  </button>
+                  <button onClick={(e) => { e.stopPropagation(); onRebuildClick(task, 'poster'); }} disabled={rebuildingId === task.id}
+                    title={t('tooltip_rebuild_poster')}
+                    className={cn('p-1 border text-xs transition-all',
+                      rebuildingId === task.id ? 'border-purple-400/20 text-purple-400/20 cursor-wait'
+                        : 'border-purple-400/50 text-purple-400/70 hover:border-purple-400 hover:bg-purple-400/10')}>
+                    <Image size={12}/>
+                  </button>
+                  <button onClick={(e) => { e.stopPropagation(); onRebuildClick(task, 'subtitle'); }} disabled={rebuildingId === task.id}
+                    title={t('tooltip_trigger_subtitle')}
+                    className={cn('p-1 border text-xs transition-all',
+                      rebuildingId === task.id ? 'border-green-400/20 text-green-400/20 cursor-wait'
+                        : 'border-green-400/50 text-green-400/70 hover:border-green-400 hover:bg-green-400/10')}>
+                    <Subtitles size={12}/>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
-          {/* 操作按钮 */}
+          {/* 操作按钮：重试（仅 failed task）+ 常驻红色删除 */}
           <div className="flex items-center gap-1 flex-shrink-0">
-            {task.status === 'failed' && (
+            {task?.status === 'failed' && onRetry && (
               <button
-                onClick={async () => { if (processingId !== null) return; setProcessingId(task.id); try { await Promise.resolve(onRetry(task.id)); } finally { setProcessingId(null); } }}
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  if (processingId !== null) return;
+                  setProcessingId?.(task.id);
+                  try { await Promise.resolve(onRetry(task.id)); }
+                  finally { setProcessingId?.(null); }
+                }}
                 disabled={processingId === task.id}
-                className={cn('p-1.5 border border-cyber-cyan text-cyber-cyan hover:bg-cyber-cyan hover:text-black transition-all', processingId === task.id && 'opacity-50 cursor-not-allowed')}
+                className={cn('p-1.5 border border-cyber-cyan text-cyber-cyan hover:bg-cyber-cyan hover:text-black transition-all',
+                  processingId === task.id && 'opacity-50 cursor-not-allowed')}
                 title={t('btn_retry')}
               >
                 <RefreshCw size={14} className={cn(processingId === task.id && 'animate-spin')}/>
               </button>
             )}
+            {/* ★ 常驻红色删除按钮 — 所有层级必显示 */}
             <button
-              onClick={async () => { if (processingId !== null) return; setProcessingId(task.id); try { await Promise.resolve(onDelete(task.id)); } finally { setProcessingId(null); } }}
-              disabled={processingId === task.id}
-              className={cn('p-1.5 border border-cyber-red text-cyber-red hover:bg-cyber-red hover:text-white transition-all', processingId === task.id && 'opacity-50 cursor-not-allowed')}
+              onClick={async (e) => {
+                e.stopPropagation();
+                if (task && processingId !== null) return;
+                if (task) setProcessingId?.(task.id);
+                try { await Promise.resolve(onDelete()); }
+                finally { if (task) setProcessingId?.(null); }
+              }}
+              disabled={task ? processingId === task.id : false}
+              className={cn('p-1.5 border border-cyber-red text-cyber-red hover:bg-cyber-red hover:text-white transition-all',
+                task && processingId === task.id && 'opacity-50 cursor-not-allowed')}
               title={t('task_delete_record')}
             >
-              <Trash2 size={14} className={cn(processingId === task.id && 'animate-pulse')}/>
+              <Trash2 size={14}/>
             </button>
           </div>
         </div>
       </div>
 
       {/* 进度条 */}
-      {progress > 0 && (
+      {resolvedProgress > 0 && (
         <div className="relative h-1 bg-cyber-cyan/10 border-t border-cyber-cyan/20 mt-2 overflow-hidden">
           <div
             className={`absolute inset-y-0 left-0 bg-gradient-to-r ${progressColor} transition-all duration-700`}
-            style={{ width: `${progress}%`, boxShadow: '0 0 8px rgba(0,230,246,0.8)' }}
+            style={{ width: `${resolvedProgress}%`, boxShadow: '0 0 8px rgba(0,230,246,0.8)' }}
           />
         </div>
       )}
     </div>
   );
 });
-
 // ── 主组件 ───────────────────────────────────────────────────────────
 function MediaTable({
   loading, tasks, selectedIds,
   onToggleSelect, onSelectAll, onInvertSelection,
   isAllSelected, isSomeSelected,
-  onRetry, onDelete, onRebuild,
+  onRetry, onDelete, onDeleteBatch, onRebuild,
 }: MediaTableProps) {
   const { t } = useLanguage();
   const [processingId, setProcessingId] = useState<number | null>(null);
   const [rebuildingId, setRebuildingId] = useState<number | null>(null);
 
-  // RebuildDialog state
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogTask, setDialogTask] = useState<Task | null>(null);
   const [dialogMode, setDialogMode] = useState<RebuildMode>('nfo');
@@ -336,6 +444,7 @@ function MediaTable({
           seasons: new Map(),
           total_count: 0,
           archived_count: 0,
+          ignored_count: 0,
           poster_path: task.local_poster_path || task.poster_path,
           tmdb_id: task.tmdb_id,
           title: task.title,
@@ -345,6 +454,7 @@ function MediaTable({
       const g = map.get(key)!;
       g.total_count++;
       if ((task.status || '').toLowerCase() === 'archived') g.archived_count++;
+      if ((task.status || '').toLowerCase() === 'ignored') g.ignored_count++;
       if (!g.poster_path) g.poster_path = task.local_poster_path || task.poster_path;
       if (mtype === 'movie') {
         g.task = task;
@@ -435,120 +545,126 @@ function MediaTable({
         </div>
       </div>
 
-      {/* Groups */}
+      {/* Groups — 扁平化渲染，仅通过 marginLeft 体现层级 */}
       <div className="space-y-2">
         {groups.map(group => {
           const l1Open = openL1.has(group.key);
-          const posterSrc = group.poster_path || '/placeholder-poster.jpg';
 
-          return (
-            <div key={group.key} className="border border-cyber-cyan/40" style={{ backdropFilter: 'blur(20px)' }}>
-              {/* ── Level 1: 作品根节点 ── */}
+          // ── 电影：level=0 直接渲染 ──
+          if (group.media_type === 'movie' && group.task) {
+            return (
+              <UniversalMediaRow
+                key={group.key}
+                level={0}
+                task={group.task}
+                title={group.title || group.clean_name || ''}
+                subtitle={group.task.file_name || ''}
+                onDelete={() => onDelete(group.task!.id)}
+                onRetry={onRetry}
+                onRebuildClick={handleRebuildClick}
+                rebuildingId={rebuildingId}
+                processingId={processingId}
+                setProcessingId={setProcessingId}
+              />
+            );
+          }
 
-              {/* 电影：直接平铺，无折叠箭头，无手风琴 */}
-              {group.media_type === 'movie' && group.task && (
-                <TaskRow
-                  task={group.task}
-                  indent={0}
-                  onRetry={onRetry}
-                  onDelete={onDelete}
-                  onRebuildClick={handleRebuildClick}
-                  rebuildingId={rebuildingId}
-                  processingId={processingId}
-                  setProcessingId={setProcessingId}
-                />
-              )}
+          // ── 剧集：Fragment 拍扁，消除 wrapper border ──
+          if (group.media_type === 'tv') {
+            const allEpisodeIds = Array.from(group.seasons.values()).flat().map(e => e.id);
+            const tvProgress = group.total_count
+              ? Math.round(group.archived_count / group.total_count * 100)
+              : 0;
+            const tvAllIgnored = group.ignored_count > 0 && group.ignored_count === group.total_count;
+            const tvRootStatus = tvAllIgnored
+              ? 'ignored'
+              : (group.archived_count === group.total_count ? 'archived' : 'pending');
 
-              {/* 剧集：折叠按钮 + Level 2/3 嵌套手风琴 */}
-              {group.media_type === 'tv' && (
-                <>
-                  <button
-                    onClick={() => toggleL1(group.key)}
-                    className="w-full flex items-center gap-3 p-3 hover:bg-cyber-cyan/5 transition-all text-left"
-                  >
-                    {l1Open ? <ChevronDown size={16} className="text-cyber-cyan/60 flex-shrink-0" /> : <ChevronRight size={16} className="text-cyber-cyan/60 flex-shrink-0" />}
-                    {/* 缩略海报 */}
-                    <div className="w-10 h-14 flex-shrink-0 border border-cyber-cyan/40 overflow-hidden">
-                      <SecureImage src={posterSrc} alt={group.title || group.key}
-                        width={40} height={56} className="object-cover w-full h-full opacity-80"
-                        fallback={<div className="w-full h-full flex items-center justify-center bg-black/40"><Tv size={14} className="text-cyber-cyan/40"/></div>}
-                      />
-                    </div>
-                    {/* 作品信息 */}
-                    <div className="flex-1 min-w-0">
-                      <p className="font-bold text-cyber-cyan truncate" style={{ textShadow: '0 0 8px rgba(0,230,246,0.5)' }}>
-                        {group.title || group.clean_name || group.key.split('::')[1]}
-                      </p>
-                      <p className="text-xs text-cyber-cyan/50 mt-0.5">
-                        {t('text_tv_episodes_count').replace('{count}', String(group.total_count))}
-                        {' · '}
-                        <span className="text-cyber-cyan/70">{group.archived_count}/{group.total_count} {t('text_archived')}</span>
-                      </p>
-                    </div>
-                    {/* 总进度条 */}
-                    <div className="flex-shrink-0 w-24">
-                      <div className="h-1.5 bg-cyber-cyan/10 rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-gradient-to-r from-cyber-cyan to-green-400 transition-all duration-700"
-                          style={{ width: `${group.total_count ? Math.round(group.archived_count / group.total_count * 100) : 0}%` }}
-                        />
-                      </div>
-                    </div>
-                  </button>
+            const tvRoot = (
+              <UniversalMediaRow
+                level={0}
+                isExpandable={true}
+                isExpanded={l1Open}
+                onToggle={() => toggleL1(group.key)}
+                posterSrc={group.poster_path}
+                title={group.title || group.clean_name || ''}
+                subtitle={`共 ${group.total_count} 集`}
+                status={tvRootStatus}
+                progress={tvProgress}
+                onDelete={() => onDeleteBatch(allEpisodeIds)}
+              />
+            );
 
-                  {/* Level 2/3 展开内容 */}
-                  <div
-                    className="overflow-hidden transition-all duration-300 ease-in-out"
-                    style={{ maxHeight: l1Open ? '9999px' : '0px' }}
-                  >
-                    <div className="border-t border-cyber-cyan/20">
-                      {Array.from(group.seasons.entries()).sort(([a],[b]) => a-b).map(([season, episodes]) => {
-                        const l2Key = `${group.key}:${season}`;
-                        const l2Open = openL2.has(l2Key);
-                        return (
-                          <div key={season} className="border-b border-cyber-cyan/10 last:border-0">
-                            {/* ── Level 2: 季节点 ── */}
-                            <button
-                              onClick={() => toggleL2(l2Key)}
-                              className="w-full flex items-center gap-2 px-4 py-2 hover:bg-cyber-cyan/5 transition-all text-left"
-                            >
-                              {l2Open ? <ChevronDown size={14} className="text-cyber-cyan/50 flex-shrink-0" /> : <ChevronRight size={14} className="text-cyber-cyan/50 flex-shrink-0" />}
-                              <span className="text-sm font-semibold text-cyber-cyan/80 uppercase tracking-wider">{`Season ${season}`}</span>
-                              <span className="text-xs text-cyber-cyan/40 ml-2">{episodes.length} {t('text_episodes_count').replace('{count}', String(episodes.length))}</span>
-                            </button>
-                            {/* ── Level 3: 单集 ── */}
-                            <div
-                              className="overflow-hidden transition-all duration-300 ease-in-out"
-                              style={{ maxHeight: l2Open ? '9999px' : '0px' }}
-                            >
-                              <div className="space-y-1 p-1 border-t border-cyber-cyan/10">
-                                {episodes.sort((a,b) => (a.episode??0)-(b.episode??0)).map(ep => (
-                                  <TaskRow
-                                    key={ep.id}
-                                    task={ep}
-                                    indent={8}
-                                    onRetry={onRetry}
-                                    onDelete={onDelete}
-                                    onRebuildClick={handleRebuildClick}
-                                    rebuildingId={rebuildingId}
-                                    processingId={processingId}
-                                    setProcessingId={setProcessingId}
-                                  />
-                                ))}
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-          );
+            if (!l1Open) return tvRoot;
+
+            return (
+              <Fragment key={group.key}>
+                {tvRoot}
+                {Array.from(group.seasons.entries()).sort(([a],[b]) => a - b).map(([season, episodes]) => {
+                  const l2Key = `${group.key}:${season}`;
+                  const l2Open = openL2.has(l2Key);
+                  const seasonIds = episodes.map(e => e.id);
+                  const seasonArchived = episodes.filter(e =>
+                    (e.status || '').toLowerCase() === 'archived'
+                  ).length;
+                  const seasonIgnored = episodes.filter(e =>
+                    (e.status || '').toLowerCase() === 'ignored'
+                  ).length;
+                  const seasonProgress = episodes.length
+                    ? Math.round(seasonArchived / episodes.length * 100)
+                    : 0;
+                  const seasonAllIgnored = seasonIgnored > 0 && seasonIgnored === episodes.length;
+                  const seasonStatus = seasonAllIgnored
+                    ? 'ignored'
+                    : (seasonArchived === episodes.length ? 'archived' : 'pending');
+
+                  const seasonRow = (
+                    <UniversalMediaRow
+                      level={1}
+                      isExpandable={true}
+                      isExpanded={l2Open}
+                      onToggle={() => toggleL2(l2Key)}
+                      posterSrc={group.poster_path}
+                      title={`Season ${season}`}
+                      subtitle={`${episodes.length} 集`}
+                      status={seasonStatus}
+                      progress={seasonProgress}
+                      onDelete={() => onDeleteBatch(seasonIds)}
+                    />
+                  );
+
+                  if (!l2Open) return seasonRow;
+
+                  return (
+                    <Fragment key={l2Key}>
+                      {seasonRow}
+                      {episodes
+                        .sort((a, b) => (a.episode ?? 0) - (b.episode ?? 0))
+                        .map(ep => (
+                          <UniversalMediaRow
+                            key={ep.id}
+                            level={2}
+                            task={ep}
+                            title={`E${String(ep.episode ?? 0).padStart(2, '0')} ${ep.title || ''}`}
+                            subtitle={ep.file_name || ''}
+                            onDelete={() => onDelete(ep.id)}
+                            onRetry={onRetry}
+                            onRebuildClick={handleRebuildClick}
+                            rebuildingId={rebuildingId}
+                            processingId={processingId}
+                            setProcessingId={setProcessingId}
+                          />
+                        ))}
+                    </Fragment>
+                  );
+                })}
+              </Fragment>
+            );
+          }
+
+          return null;
         })}
       </div>
-
       {/* RebuildDialog */}
       {dialogTask && (
         <RebuildDialog

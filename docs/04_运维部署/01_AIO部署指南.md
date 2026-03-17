@@ -59,82 +59,41 @@ python3 -c "import secrets; print(secrets.token_hex(64))"
 
 ```
 启动时自动执行：
-1. SQLite WAL + 建表 + 历史明文密钥迁移 + 注入 AI 规则/15条正则
-2. secret.key 不存在 → 自动生成（0o600）
-3. 浏览器访问 :8000 → AuthGuard 检测未初始化 → 创建管理员账号
+1. SQLite WAL + 建表（v1.0.0 为物理基准线，MIGRATIONS=[]，零迁移补丁）
+2. 历史明文密钥迁移（_migrate_sensitive_keys）
+3. 创世配置自愈注入（_inject_ai_defaults，Genesis Config Healing）
+4. secret.key 不存在 → 自动生成（0o600）
+5. 浏览器访问 :8000 → AuthGuard 检测未初始化 → 创建管理员账号
 ```
+
+**Genesis Config Healing（创世自愈注入）要点**：
+- **绕过内存兜底**：不能通过 `get_config()` 判断“是否缺失”，因为 `get_config()` 会用 `DEFAULT_CONFIG` 屏蔽真实空值
+- **物理注入到磁盘**：直接读取/写回 `config.json`，对 7 大核心默认值执行“缺啥补啥”（AI 人格、意图路由规则、归档专家规则、去噪正则、支持的媒体/字幕后缀等）
+- **幂等安全**：只补缺失项，用户已有的非空值绝不覆盖
 
 正常启动日志：
 ```
+[INFO][DB] 数据库初始化完成 (Baseline Version 1.0.0)
+[ConfigRepo] 创世自愈注入完成，补全 7 个字段: ['ai_name', 'ai_persona', ...]
 [OK] 前端静态文件已挂载: static -> /   ← AIO 已启用
-[OK] AI 规则注入完成
 ```
 
 ---
 
-## 五、数据库自动迁移引擎（v1.0.1-Enhanced）
+## 五、数据库初始化与密钥加密
 
-### 版本迁移机制（_migrate_database）
+### 数据库基准线（_init_database）
 
-**业务链路**：
+系统以 **v1.0.0** 为唯一基准线全新建表，`schema_version` 初始值直接写入 `'1.0.0'`，启动时不触发任何迁移补丁。`MIGRATIONS = []` 为空，`_migrate_database` 静默跳过。
+
+**启动日志**：
 ```
-1. 读取 system_meta 中的当前 schema_version -> 
-2. 遍历 MIGRATIONS，执行所有版本号 > 当前版本的任务 -> 
-3. 每个迁移任务独占一个事务（BEGIN ... COMMIT / ROLLBACK）-> 
-4. 迁移完成后更新 schema_version -> 
-5. 任何迁移失败立即 rollback 并抛出异常，阻止系统启动
+[INFO][DB] 数据库初始化完成 (Baseline Version 1.0.0)
 ```
 
-**实现细节**：
-```python
-# db_manager.py: _migrate_database()
-def _migrate_database(self):
-    with self.db_lock:
-        conn = self._get_conn()
-        
-        # Step 1: 读取当前版本
-        row = conn.execute(
-            "SELECT value FROM system_meta WHERE key = 'schema_version'"
-        ).fetchone()
-        current_version = row[0] if row else "1.0"
-        
-        # Step 2: 遍历迁移任务
-        for target_version, description, migrate_fn in self.MIGRATIONS:
-            # 版本比较：使用 tuple 数值比较，避免字符串排序陷阱
-            def _ver(v: str):
-                return tuple(int(x) for x in v.split("."))
-            
-            if _ver(target_version) <= _ver(current_version):
-                continue  # 已完成的迁移跳过
-            
-            try:
-                # Step 3: 事务开启与迁移执行
-                conn.execute("BEGIN")
-                migrate_fn(conn)
-                # Step 4: 更新版本号（在同一事务内）
-                conn.execute(
-                    "INSERT OR REPLACE INTO system_meta (key, value) VALUES ('schema_version', ?)",
-                    (target_version,)
-                )
-                conn.commit()
-                current_version = target_version
-                
-            except Exception as e:
-                # Step 5: 异常处理与回滚
-                conn.rollback()
-                error_msg = f"[FATAL] 迁移 {current_version} -> {target_version} 失败，已回滚。错误: {e}"
-                logger.error(error_msg)
-                raise RuntimeError(error_msg) from e
-```
+如需在未来版本新增字段，在 `_register_migrations()` 中追加 `> 1.0.0` 的迁移条目即可，引擎会自动执行增量迁移并更新 `schema_version`。
 
-**启动日志示例**：
-```
-[INFO][DB] 执行迁移 1.0 -> 1.0.1: 添加 is_archive 字段
-[INFO][DB] 迁移完成，当前版本: 1.0.1
-[INFO][DB] 数据库初始化完成 (Baseline Version 1.0.1)
-```
-
-### 敏感密钥明文转密文迁移（_migrate_sensitive_keys）
+### 敏感密钥明文转密文（_migrate_sensitive_keys）
 
 **业务链路**：
 ```
@@ -467,8 +426,7 @@ curl -H "Authorization: Bearer <your-token>" http://<NAS-IP>:8000/api/v1/system/
   - 通过 `authenticatedWrapper={AuthenticatedShell}` 传入 `AuthGuard`
   - **效果**：`SettingsProvider` / `LogProvider` 只在认证通过后挂载，登录页零 API 轮询
 
-#### DB Schema 基准线重置
+#### DB Schema 基准线（v1.0.0）
 - **文件**：`backend/app/infra/database/db_manager.py`
-  - 所有历史迁移字段合并进初始 `CREATE TABLE`，`media_archive` 表也在初始化时直接创建
-  - `schema_version` 初始值设为 `'1.0.0'`，新安装启动日志：`[INFO][DB] 数据库初始化完成 (Baseline Version 1.0.0)`
-  - `_register_migrations` 清空历史迁移注册，`MIGRATIONS = []`，新安装不出现任何迁移日志
+  - `schema_version` 初始值 `'1.0.0'`，启动日志：`[INFO][DB] 数据库初始化完成 (Baseline Version 1.0.0)`
+  - `MIGRATIONS = []`，新安装不触发任何迁移补丁

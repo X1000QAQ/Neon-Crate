@@ -21,21 +21,22 @@ router = APIRouter()
 @router.get("/settings", response_model=SettingsConfig)
 async def get_settings(db: DbDep):
     """
-    GET /settings - 获取完整系统配置
-    
-    功能说明：
-    - 返回完整的系统配置（settings + paths）
-    - 不脱敏：前端负责隐藏敏感信息
-    - 支持编辑：用户可以修改已保存的密钥
-    
-    为什么不脱敏？
-    - 前端在显示时用 *** 替换敏感信息
-    - 编辑时需要获取真实值，否则无法修改
-    - 安全性：通过 HTTPS 传输，前端不缓存
-    
-    返回结构：
-    - settings: 系统设置（API 密钥、质量配置等）
-    - paths: 路径配置（下载目录、媒体库目录等）
+    获取完整系统配置（settings + paths）。
+
+    业务链路：
+    从配置仓储读取 `config.json/secure_keys.json` → 组合为 SettingsConfig 返回 → 前端按 UI 规则对敏感值做展示遮罩。
+
+    Args:
+        db: 数据库依赖注入（DbDep），提供 `get_all_config()` 读取能力。
+
+    Returns:
+        SettingsConfig: 完整配置对象，包含：
+            - settings: 系统设置（含各类 API Key、偏好与策略）
+            - paths: 路径配置（download/library 等）
+
+    Raises:
+        HTTPException:
+            - 500: 配置读取失败（I/O 或 JSON 损坏等异常链路）。
     """
     config = db.get_all_config()
 
@@ -55,19 +56,25 @@ async def get_settings(db: DbDep):
 @router.post("/settings")
 async def update_settings(config: SettingsConfig, db: DbDep):
     """
-    更新系统配置
+    更新系统配置并持久化（写入 config.json/secure_keys.json）。
 
-    功能说明：
-    - 接收前端发来的完整配置对象
-    - 持久化保存到 config.json
-    - 执行路径校验（如果配置了路径，则必须有1个电影库和1个剧集库）
+    业务链路：
+    接收 SettingsConfig → 前置校验（启用的媒体库配置必须满足约束）→ 持久化落盘 →
+    触发仪表盘媒体库数量缓存更新（避免配置变更后大屏显示为 0）。
 
-    参数：
-    - config: 包含 settings 和 paths 的完整配置对象
+    Args:
+        config: SettingsConfig，请求体包含 `settings` 与 `paths`。
+        db: 数据库依赖注入（DbDep），提供 `save_all_config()` 写盘能力。
 
-    返回：
-    - success: 是否成功
-    - message: 操作结果描述
+    Returns:
+        Dict[str, Any]:
+            - success: 是否成功
+            - message: 人类可读提示
+
+    Raises:
+        HTTPException:
+            - 400: 配置校验失败（媒体库数量/类型约束不满足）。
+            - 500: 写盘失败或运行时异常。
     """
     # 转换为字典
     config_dict = {
@@ -124,31 +131,25 @@ async def update_settings(config: SettingsConfig, db: DbDep):
 @router.post("/settings/verify-key")
 async def verify_api_key(payload: dict, db: DbDep):
     """
-    POST /tasks/settings/verify-key - 验证 API 密钥有效性
-    
-    功能说明：
-    - 验证用户输入的 API 密钥是否有效
-    - 不返回密钥本身，只返回验证结果
-    - 支持多种 API 类型
-    
-    支持的密钥类型：
-    - tmdb_api_key：TMDB API 密钥
-    - sonarr_api_key：Sonarr API 密钥
-    - radarr_api_key：Radarr API 密钥
-    - os_api_key：OpenSubtitles API 密钥
-    
-    验证策略：
-    - TMDB：调用搜索 API 测试
-    - Sonarr/Radarr：调用 /api/v3/system/status 测试
-    - OpenSubtitles：检查密钥长度和格式（无公开验证端点）
-    
-    参数：
-    - key_type: 密钥类型
-    - key_value: 密钥值
-    - url: 服务地址（Sonarr/Radarr 需要）
-    
-    返回：
-    - valid: 密钥是否有效
+    验证第三方 API 密钥有效性（不回显密钥本身）。
+
+    业务链路：
+    根据 key_type 选择验证策略 → 发起最小化探测请求（或格式校验）→ 返回 `{valid: bool}`。
+
+    Body:
+        payload: dict，关键字段：
+            - key_type: 密钥类型（tmdb_api_key/sonarr_api_key/radarr_api_key/os_api_key）
+            - key_value: 密钥值
+            - url: 可选，Sonarr/Radarr 服务地址（未提供则尝试从配置读取）
+
+    Returns:
+        Dict[str, bool]:
+            - valid: 是否有效
+
+    Raises:
+        HTTPException:
+            - 400: 缺少 key_type/key_value 等必要字段。
+            - 500: 运行时异常（理论上函数内部尽量吞并并返回 valid=false，但仍可能有极端异常）。
     """
     import httpx
     
@@ -240,13 +241,22 @@ async def verify_api_key(payload: dict, db: DbDep):
 @router.post("/settings/reset")
 async def reset_settings(payload: ResetSettingsRequest, db: DbDep):
     """
-    POST /tasks/settings/reset - 重置配置为工业级默认值
+    重置指定配置分区为工业级默认值（仅重置白名单字段）。
+
+    业务链路：
+    校验 target（ai/regex/formats...）→ 读取重置映射表 → 对该分区字段执行默认值覆盖 → 返回结果。
 
     Args:
-        payload: {"target": "ai" | "regex"}
+        payload: ResetSettingsRequest，请求体包含 `target`（如 ai/regex）。
+        db: 数据库依赖注入（DbDep）。
 
     Returns:
-        操作结果
+        Dict[str, Any]: 操作结果，包含 success/message。
+
+    Raises:
+        HTTPException:
+            - 400: target 不在允许范围（映射表不支持）。
+            - 500: 写盘失败或运行时异常。
     """
     target = payload.target.strip().lower()
 

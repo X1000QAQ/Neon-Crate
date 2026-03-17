@@ -88,6 +88,11 @@ export default function MediaWall() {
     loadTasks();
   }, [loadTasks]);
 
+  // 🚀 修复分页越界 Bug：当任何过滤条件（状态、类型、搜索词）发生变化时，强制重置回第一页
+  useEffect(() => {
+    setPage(1);
+  }, [statusFilter, typeFilter, debouncedKeyword]);
+
   // 分页变更时自动回到顶部，避免页面停留在底部影响浏览体验
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -98,10 +103,7 @@ export default function MediaWall() {
     let list = [...tasks];
     if (statusFilter !== 'all') {
       if (statusFilter === 'failed') {
-        list = list.filter((x) => {
-          const s = (x.status || '').toLowerCase();
-          return s === 'failed' || s === 'match failed';
-        });
+        list = list.filter((x) => (x.status || '').toLowerCase() === 'failed');
       } else {
         list = list.filter((x) => (x.status || '').toLowerCase() === statusFilter.toLowerCase());
       }
@@ -111,13 +113,31 @@ export default function MediaWall() {
     return list;
   }, [tasks, statusFilter, typeFilter]);
 
-  const totalFiltered = filteredTasks.length;
-  const paginatedTasks = useMemo(
-    () => filteredTasks.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
-    [filteredTasks, page]
-  );
+  // 将任务按「作品（电影/剧集根）」进行前置聚合，解决剧集被分页截断的问题
+  const groupedWorks = useMemo(() => {
+    const map = new Map<string, Task[]>();
+    for (const task of filteredTasks) {
+      const mtype = task.media_type || 'movie';
+      const key = `${mtype}::${(task.title || task.clean_name || task.file_name || String(task.id)).trim()}`;
+      if (!map.has(key)) {
+        map.set(key, []);
+      }
+      map.get(key)!.push(task);
+    }
+    // map 会自然保持首次插入的顺序（即组内最新 created_at 的任务顺序）
+    return Array.from(map.values());
+  }, [filteredTasks]);
 
-  const handleRetry = async (taskId: number) => {
+  const totalWorks = groupedWorks.length;
+
+  const paginatedTasks = useMemo(() => {
+    // 对「作品实体」进行分页，每页严格显示 PAGE_SIZE 个电影或剧集
+    const pageGroups = groupedWorks.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+    // 展平为 Task[] 传给底层的 MediaTable，确保单个剧集的所有分集被完整传入
+    return pageGroups.flat();
+  }, [groupedWorks, page]);
+
+  const handleRetry = useCallback(async (taskId: number) => {
     try {
       await api.retryTask(taskId);
       showToast('任务已解锁，将在下次扫描时重新处理');
@@ -126,9 +146,9 @@ export default function MediaWall() {
       console.error('Failed to unlock task:', error);
       showToast('解锁失败，请重试');
     }
-  };
+  }, [loadTasks, showToast]);
 
-  const handleDelete = async (taskId: number) => {
+  const handleDelete = useCallback(async (taskId: number) => {
     if (!confirm(t('confirm_delete_task'))) return;
     try {
       await api.deleteTask(taskId);
@@ -143,41 +163,54 @@ export default function MediaWall() {
       console.error('Failed to delete task:', error);
       showToast(t('task_delete') + t('op_failed'));
     }
-  };
+  }, [loadTasks, showToast, t]);
 
-  const toggleSelect = (id: number) => {
+  const handleDeleteBatch = useCallback(async (ids: number[]) => {
+    if (ids.length === 0) return;
+    if (!confirm(`确认删除这 ${ids.length} 项记录（含下属所有集）？`)) return;
+    try {
+      await api.deleteBatchTasks(ids);
+      await loadTasks();
+      showToast(`成功删除 ${ids.length} 条记录`);
+    } catch (error) {
+      console.error('Batch delete failed:', error);
+      showToast('批量删除失败');
+    }
+  }, [loadTasks, showToast]);
+
+  const toggleSelect = useCallback((id: number) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
-  };
+  }, []);
 
-  const selectAllCurrentPage = () => {
+  const selectAllCurrentPage = useCallback(() => {
     const ids = new Set(paginatedTasks.map((x) => x.id));
     setSelectedIds((prev) => {
       const next = new Set(prev);
       ids.forEach((id) => next.add(id));
       return next;
     });
-  };
+  }, [paginatedTasks]);
 
-  const invertSelectionCurrentPage = () => {
+  const invertSelectionCurrentPage = useCallback(() => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      paginatedTasks.forEach((t) => {
-        if (next.has(t.id)) next.delete(t.id);
-        else next.add(t.id);
+      paginatedTasks.forEach((task) => {
+        if (next.has(task.id)) next.delete(task.id);
+        else next.add(task.id);
       });
       return next;
     });
-  };
+  }, [paginatedTasks]);
 
   const isAllCurrentPageSelected = paginatedTasks.length > 0 && paginatedTasks.every((t) => selectedIds.has(t.id));
   const isSomeCurrentPageSelected = paginatedTasks.some((t) => selectedIds.has(t.id));
 
-  const handleBatchDelete = async () => {
+  const handleBatchDelete = useCallback(async () => {
     const ids = Array.from(selectedIds);
     if (ids.length === 0) return;
     setBatchDeleting(true);
@@ -193,7 +226,7 @@ export default function MediaWall() {
     } finally {
       setBatchDeleting(false);
     }
-  };
+  }, [selectedIds, loadTasks, showToast, t]);
 
   const openBatchDeleteConfirm = () => {
     if (selectedIds.size === 0) return;
@@ -257,7 +290,7 @@ export default function MediaWall() {
     }
   };
 
-  const handleRebuild = async (params: {
+  const handleRebuild = useCallback(async (params: {
     task_id: number;
     is_archive: boolean;
     media_type: string;
@@ -270,12 +303,54 @@ export default function MediaWall() {
   }) => {
     try {
       const res = await api.rebuildTask(params);
-      showToast(res.message || '补录完成');
+      // 解析后端返回的复合 message，转为本地化 Toast
+      const raw = res.message || '';
+      let toastMsg: string;
+      if (raw.startsWith('rebuild_complete:')) {
+        const payload = raw.slice('rebuild_complete:'.length);
+        const labels: string[] = [];
+        for (const part of payload.split(';')) {
+          if (part.startsWith('nfo:')) {
+            const st = part.slice(4);
+            labels.push(t('msg_nfo_rebuild').replace('{status}', st === 'ok' ? '✅' : '❌'));
+          } else if (part.startsWith('poster:')) {
+            const st = part.slice(7);
+            labels.push(t('msg_poster_rebuild').replace('{status}', st === 'ok' ? '✅' : '❌'));
+          } else if (part.startsWith('subtitle:')) {
+            const st = part.slice(9);
+            labels.push(st === 'triggered' ? t('msg_subtitle_triggered') : t('msg_nfo_rebuild').replace('{status}', st));
+          }
+        }
+        toastMsg = labels.length
+          ? t('msg_rebuild_complete') + labels.join(' | ')
+          : t('msg_rebuild_complete');
+      } else {
+        toastMsg = raw || t('msg_rebuild_complete');
+      }
+      showToast(toastMsg);
+      // 立即刷新一次，同步后端同步写入的字段（nfo/poster）
       await loadTasks();
+      // 字幕任务走后台异步链路（OpenSubtitles API 约 4-6 秒），指数退避轮询
+      // 轮询计划：3s → 再等 3s → 再等 4s，最多 3 次，检测到终态即停止
+      if (params.refix_subtitle) {
+        const terminalStates = new Set(['scraped', 'success', 'failed', 'missing']);
+        const intervals = [3000, 3000, 4000]; // 累计 3s / 6s / 10s
+        const taskId = Number(params.task_id); // 强制 number，防止 string/number 严格相等失效
+        for (const ms of intervals) {
+          await new Promise<void>(resolve => setTimeout(resolve, ms));
+          await loadTasks();
+          try {
+            // _t 参数强制击穿浏览器 GET 缓存，确保每次拿到最新快照
+            const snapshot = await api.getTasks({ page: 1, page_size: 99999 });
+            const target = snapshot.tasks.find((tk: import('@/types').Task) => Number(tk.id) === taskId);
+            if (target && terminalStates.has((target.sub_status || '').toLowerCase())) break;
+          } catch { /* 轮询检测失败静默，不影响主流程 */ }
+        }
+      }
     } catch (error) {
-      showToast(`补录失败: ${(error as Error)?.message ?? '未知错误'}`);
+      showToast(`${t('msg_rebuild_complete').replace('：', '')}${t('op_failed')}: ${(error as Error)?.message ?? t('error_unknown')}`);
     }
-  };
+  }, [loadTasks, showToast, t]);
 
   return (
     <div className="w-full h-full flex flex-col">
@@ -314,6 +389,7 @@ export default function MediaWall() {
             isSomeSelected={isSomeCurrentPageSelected}
             onRetry={handleRetry}
             onDelete={handleDelete}
+            onDeleteBatch={handleDeleteBatch}
             onRebuild={handleRebuild}
           />
 
@@ -387,11 +463,11 @@ export default function MediaWall() {
             </div>
           )}
 
-          {/* 分页：按过滤后总数分页 */}
+          {/* 分页：按作品实体（Works）分页，每页严格显示 PAGE_SIZE 个电影或剧集 */}
           <MediaPagination
             currentPage={page}
-            totalPages={Math.ceil(totalFiltered / PAGE_SIZE)}
-            totalItems={totalFiltered}
+            totalPages={Math.ceil(totalWorks / PAGE_SIZE)}
+            totalItems={totalWorks}
             onPageChange={setPage}
           />
         </div>

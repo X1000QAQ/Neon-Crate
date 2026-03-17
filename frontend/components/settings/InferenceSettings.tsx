@@ -24,6 +24,9 @@ export default function InferenceSettings({ t }: Props) {
   const [localCloudModel, setLocalCloudModel] = useState('');
   const [localLocalUrl, setLocalLocalUrl] = useState('');
   const [localLocalModel, setLocalLocalModel] = useState('');
+  // API 密钥本地缓冲（同上，防止 paste 事件中 e.target 被 React 回收导致 null.value 崩溃）
+  const [localCloudKey, setLocalCloudKey] = useState('');
+  const [localLocalKey, setLocalLocalKey] = useState('');
 
   // 用 ref 追踪上一次 config 来源，防止 config 外部变化时覆盖用户正在输入的内容
   const syncedRef = useRef(false);
@@ -36,6 +39,8 @@ export default function InferenceSettings({ t }: Props) {
       setLocalCloudModel((config.settings.llm_cloud_model as string) ?? '');
       setLocalLocalUrl((config.settings.llm_local_url as string) ?? '');
       setLocalLocalModel((config.settings.llm_local_model as string) ?? '');
+      setLocalCloudKey((config.settings.llm_cloud_key as string) ?? '');
+      setLocalLocalKey((config.settings.llm_local_key as string) ?? '');
       syncedRef.current = true;
     }
   }, [config]);
@@ -46,8 +51,19 @@ export default function InferenceSettings({ t }: Props) {
   const cloudEnabled = config.settings.llm_cloud_enabled ?? true;
   const localEnabled = config.settings.llm_local_enabled ?? false;
 
+  // localKeyState / setter 按 key 路由，防止 paste 时 e.target 被 React 合成事件回收
+  const getLocalKeyValue = (key: string): string => {
+    if (key === 'llm_cloud_key') return localCloudKey;
+    if (key === 'llm_local_key') return localLocalKey;
+    return (config.settings[key as keyof typeof config.settings] as string) ?? '';
+  };
+  const setLocalKeyValue = (key: string, val: string) => {
+    if (key === 'llm_cloud_key') setLocalCloudKey(val);
+    else if (key === 'llm_local_key') setLocalLocalKey(val);
+  };
+
   const renderKeyInput = (key: string, label: string, placeholder?: string) => {
-    const value = (config.settings[key as keyof typeof config.settings] as string) ?? '';
+    const value = getLocalKeyValue(key);
     const isVisible = focusedKey === key;
     return (
       <div>
@@ -60,9 +76,17 @@ export default function InferenceSettings({ t }: Props) {
         <input
           type={isVisible ? 'text' : 'password'}
           value={value}
-          onChange={(e) => updateSetting(key, e.target.value)}
+          onChange={(e) => {
+            // 立即提取 value，防止合成事件在异步 setState 前被回收（paste 崩溃根因）
+            const val = e.currentTarget.value;
+            setLocalKeyValue(key, val);
+          }}
           onFocus={() => setFocusedKey(key)}
-          onBlur={() => setFocusedKey(null)}
+          onBlur={(e) => {
+            setFocusedKey(null);
+            // onBlur 才 flush 到全局 Context（与其他字段保持一致）
+            updateSetting(key, e.currentTarget.value);
+          }}
           placeholder={placeholder ?? label}
           className="w-full px-4 py-3 bg-black/40 border-0 border-l-2 border-cyber-cyan/40 text-cyber-cyan placeholder-cyber-cyan/40 focus:outline-none focus:bg-black/60 text-base font-hacked transition-all"
           style={{
@@ -93,9 +117,9 @@ export default function InferenceSettings({ t }: Props) {
             style={{ background: CYAN, boxShadow: `0 0 6px ${CYAN}`, verticalAlign: 'middle' }}
           />
           <span className="font-bold uppercase tracking-wider" style={{ color: CYAN }}>
-            双擎并联已激活
+            {t('inference_dual_engine_active').split(' — ')[0]}
           </span>
-          {' — 云端负责智能交互，本地承接繁重刮削，实现完美协同。'}
+          {' — ' + t('inference_dual_engine_active').split(' — ').slice(1).join(' — ')}
         </>
       );
     }
@@ -106,8 +130,8 @@ export default function InferenceSettings({ t }: Props) {
             className="inline-block w-2 h-2 rounded-full mr-2"
             style={{ background: 'rgba(0,230,246,0.35)', verticalAlign: 'middle' }}
           />
-          <span className="font-bold uppercase tracking-wider">单擎模式 (纯云端)</span>
-          {' — 所有交互与文件分析均由云端 API 处理。'}
+          <span className="font-bold uppercase tracking-wider">{t('inference_single_cloud')}</span>
+          {' — ' + t('inference_single_cloud_desc')}
         </>
       );
     }
@@ -118,8 +142,8 @@ export default function InferenceSettings({ t }: Props) {
             className="inline-block w-2 h-2 rounded-full mr-2"
             style={{ background: 'rgba(0,230,246,0.35)', verticalAlign: 'middle' }}
           />
-          <span className="font-bold uppercase tracking-wider">单擎模式 (纯本地)</span>
-          {' — 系统已断开云端，进入深海潜航离线模式。'}
+          <span className="font-bold uppercase tracking-wider">{t('inference_single_local')}</span>
+          {' — ' + t('inference_single_local_desc')}
         </>
       );
     }
@@ -130,9 +154,9 @@ export default function InferenceSettings({ t }: Props) {
           style={{ background: '#ef4444', verticalAlign: 'middle' }}
         />
         <span className="font-bold uppercase tracking-wider" style={{ color: '#f87171' }}>
-          系统宕机
+          {t('inference_all_offline')}
         </span>
-        {' — 所有逻辑引擎已强制下线，AI 助理停止工作。'}
+        {' — ' + t('inference_all_offline_desc')}
       </>
     );
   };
@@ -178,13 +202,13 @@ export default function InferenceSettings({ t }: Props) {
               className="text-xs mb-2"
               style={{ color: 'rgba(255,255,255,0.4)', fontFamily: FONT_A }}
             >
-              高智商对话与推理（推荐主引擎）
+              {t('inference_cloud_desc')}
             </div>
             <div
               className="text-[10px] tracking-widest uppercase font-bold"
               style={{ color: cloudEnabled ? CYAN : '#6b7280', fontFamily: FONT_A }}
             >
-              {cloudEnabled ? '[◉ ONLINE]' : '[○ OFFLINE]'}
+              {cloudEnabled ? t('inference_status_online') : t('inference_status_offline')}
             </div>
           </button>
 
@@ -222,13 +246,13 @@ export default function InferenceSettings({ t }: Props) {
               className="text-xs mb-2"
               style={{ color: 'rgba(255,255,255,0.4)', fontFamily: FONT_A }}
             >
-              边缘计算节点（免Token文件洗刮）
+              {t('inference_local_desc')}
             </div>
             <div
               className="text-[10px] tracking-widest uppercase font-bold"
               style={{ color: localEnabled ? CYAN : '#6b7280', fontFamily: FONT_A }}
             >
-              {localEnabled ? '[◉ ONLINE]' : '[○ OFFLINE]'}
+              {localEnabled ? t('inference_status_online') : t('inference_status_offline')}
             </div>
           </button>
         </div>

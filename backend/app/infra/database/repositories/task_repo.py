@@ -429,6 +429,13 @@ class TaskRepo(BaseRepository):
             conn.execute("UPDATE tasks SET sub_status = ? WHERE id = ?", (sub_status, task_id))
             conn.commit()
 
+    def update_task_is_active(self, task_id: int, is_active: int):
+        """快速更新任务激活标志（热表 tasks 专用）"""
+        with self.db_lock:
+            conn = self._get_conn()
+            conn.execute("UPDATE tasks SET is_active = ? WHERE id = ?", (int(is_active), task_id))
+            conn.commit()
+
     def update_any_task_metadata(
         self,
         task_id: int,

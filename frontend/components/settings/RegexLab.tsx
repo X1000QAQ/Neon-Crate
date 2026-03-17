@@ -126,7 +126,7 @@ export default function RegexLab({ t }: Props) {
 
       <div className="flex gap-4">
         <button onClick={() => setResetModal(true)} disabled={resetting} className="px-6 py-3 bg-transparent border-2 border-cyber-red text-cyber-red font-bold uppercase tracking-widest hover:bg-cyber-red hover:text-black transition-all disabled:opacity-50 disabled:cursor-not-allowed" style={{ boxShadow: '0 0 20px rgba(255, 1, 60, 0.35), inset 0 0 20px rgba(255, 1, 60, 0.08)' }}>
-          {resetting ? '重置中...' : t('btn_reset_defaults')}
+          {resetting ? t('btn_resetting') : t('btn_reset_defaults')}
         </button>
       </div>
 

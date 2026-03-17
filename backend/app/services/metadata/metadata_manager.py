@@ -41,6 +41,13 @@ def _validate_path(target_path: str, allowed_base: str) -> Path:
     """
     路径防穿越校验（Docker 软链兼容版）
 
+    🚨 架构师警告 (DO NOT MODIFY): 核安全边界，改动极易引发死锁或路径穿越。
+    - 这是元数据写盘链路的“路径核安全边界”，被 `generate_nfo/download_poster/download_fanart` 直接调用。
+    - 该逻辑需要同时覆盖：
+      1) 严格模式：`Path.resolve()` 解析多层软链（含 Unraid `/mnt/user/...` 等场景）
+      2) 降级模式：在 Docker/挂载软链无法严格相对化时，使用“带路径边界”的前缀校验兜底
+    - 修改不当会导致两类灾难：误杀合法挂载路径（功能瘫痪）或放行路径穿越（安全事故）。
+
     策略：
     1. 优先使用 Path.resolve() 严格校验（解析软链）
     2. 如果失败，降级为绝对路径字符串前缀校验（兼容 Docker 挂载）
@@ -66,7 +73,10 @@ def _validate_path(target_path: str, allowed_base: str) -> Path:
         abs_target_norm = abs_target.replace("\\", "/")
         abs_base_norm = abs_base.replace("\\", "/")
         
-        if abs_target_norm.startswith(abs_base_norm):
+        # 注意：必须做“路径边界”校验，避免 /base 与 /base2 的前缀碰撞误放行
+        base = abs_base_norm.rstrip("/")
+        target = abs_target_norm
+        if target == base or target.startswith(base + "/"):
             logger.warning(
                 f"[SECURITY] 路径校验通过（降级模式，Docker 软链场景）: "
                 f"target={abs_target}, base={abs_base}"
@@ -143,6 +153,11 @@ class MetadataManager:
             bool: 是否成功
         """
         try:
+            # ── 优先复用：NFO 文件已存在则跳过重新生成 ────────────────
+            if os.path.exists(output_path):
+                logger.info(f"[META] NFO 已存在，直接复用: {output_path}")
+                return True
+
             # 从 TMDB 获取详细信息
             if media_type == "movie":
                 details = self._fetch_movie_details(tmdb_id)
@@ -268,6 +283,14 @@ class MetadataManager:
             Optional[str]: Fanart 本地路径，失败返回 None
         """
         try:
+            # ── 优先复用：检查目标目录是否已有 Fanart ──────────────────
+            output_dir_abs = str(Path(output_dir).resolve())
+            for existing_name in ["fanart.jpg", "fanart.png"]:
+                existing_path = os.path.join(output_dir_abs, existing_name)
+                if os.path.exists(existing_path):
+                    logger.info(f"[META] Fanart 已存在，直接复用: {existing_path}")
+                    return existing_path
+
             if media_type == "movie":
                 details = self._fetch_movie_details(tmdb_id)
             else:

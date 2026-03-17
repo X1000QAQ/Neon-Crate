@@ -8,11 +8,11 @@ export interface Task {
   file_name?: string;
   clean_name?: string;
   media_type: 'movie' | 'tv';
-  status: 'pending' | 'archived' | 'failed' | 'ignored' | 'match failed' | 'scraped';
+  status: 'pending' | 'archived' | 'failed' | 'ignored' | 'scraped';
   tmdb_id?: number;
   imdb_id?: string;
   title?: string;
-  year?: number;
+  year?: number | string;  // DB 存储为 TEXT，后端未做类型转换，前端兼容两种类型
   poster_path?: string;
   local_poster_path?: string;
   target_path?: string;
@@ -74,13 +74,13 @@ export interface ChatResponse {
   action?: string;
   pending_action?: PendingActionPayload;
   candidates?: CandidateItem[];
-  engine_tag?: string;  // V2.0 血缘溯源："cloud" | "local" | "local->cloud"
+  engine_tag?: string;  // v1.0.0 血缘溯源："cloud" | "local" | "local->cloud"
 }
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
-  engine_tag?: string;  // V2.0 气泡标识用
+  engine_tag?: string;  // v1.0.0 气泡标识用
   candidates?: import('./index').CandidateItem[];
 }
 

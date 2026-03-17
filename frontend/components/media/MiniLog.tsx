@@ -7,14 +7,22 @@
  * - 白名单过滤：只显示带业务标签的日志（[SCAN]/[TMDB]/[SUBTITLE] 等）
  * - 日志不足 8 条时用占位文本填充，保证视觉高度
  * - 有新日志时自动平滑滚动到底部
+ *
+ * v1.0.0 美学口径：
+ * - 视觉域为 **Holographic Void**（霓虹青为主），此组件仅承载“数据流”语义，不引入废土装甲/黄色主视觉。
+ *
+ * 性能红线：
+ * - 过滤/补全逻辑必须保持纯函数 + `useMemo`，禁止在 render 期执行高昂计算。
+ * - 行渲染使用 `React.memo`，避免父组件刷新导致日志全量重绘。
  */
 'use client';
 
-import { useEffect, useRef, memo } from 'react';
+import { useEffect, useRef, memo, useMemo } from 'react';
 import { Terminal } from 'lucide-react';
 import type { LogEntry } from '@/types';
 import { useLanguage } from '@/hooks/useLanguage';
 import { useLogs } from '@/hooks/useLogs';
+import { useNeuralLinkStatus } from '@/hooks/useNeuralLinkStatus';
 
 // ── 纯函数提升到组件外：避免每次渲染重新创建，确保 React.memo 有效 ──
 function levelColor(level: string): string {
@@ -61,34 +69,66 @@ const MIN_DISPLAY_LINES = 8;
 export default function MiniLog() {
   const { t } = useLanguage();
   const { logs, error } = useLogs();
+  const neural = useNeuralLinkStatus({ intervalMs: 2500 });
+  const tr = (key: string, fallback: string) => {
+    const out = (t as unknown as (k: string) => string)(key);
+    return out === key ? fallback : out;
+  };
+  const neuralStatusText =
+    `${tr('ui_quantum_state', '量子态')}: ` +
+    `${tr(`status_${neural.quantum_state}`, neural.quantum_state === 'stable' ? '稳定' : neural.quantum_state === 'syncing' ? '同步中' : neural.quantum_state === 'processing' ? '演算中' : '降级')}` +
+    ` | ` +
+    `${tr('ui_neural_link', '神经链路')}: ` +
+    `${tr(`status_${neural.neural_link}`, neural.neural_link === 'active' ? '在线' : neural.neural_link === 'offline' ? '离线' : '探活中')}`;
   const containerRef = useRef<HTMLDivElement>(null);
 
   // 防御性数据处理：确保 logs 始终是数组
   const safeLogs = Array.isArray(logs) ? logs : [];
 
-  const filteredLogs = safeLogs
-    .filter((log) => {
-      const msg = (log.message || '').toString();
+  // [Action 3 修复] filteredLogs 和 displayLogs 包裹进 useMemo，
+  // 避免每次父组件渲染都重新执行高昂的 filter + slice + 补全逻辑。
+  const { filteredLogs, displayLogs } = useMemo(() => {
+    const placeholderMessages = [
+      'Holographic matrix stabilized',
+      'Scanning deep space coordinates',
+      'Signal detected at quantum layer',
+      'Decrypting transmission stream',
+      'Data stream integrity verified',
+      'Void navigation systems online',
+      'All holographic nodes synchronized',
+      'System monitoring active',
+    ];
 
-      // 噪音日志定义：前端每 3 秒轮询一次后端，会产生大量心跳日志
-      // 这些日志对用户无意义，过滤后才能清晰看到业务流转
-      const isNoise =
-        msg.includes('成功获取系统配置') ||
-        msg.includes('GET /api/v1/tasks') ||
-        msg.includes('GET /api/v1/system/stats') ||
-        msg.includes('搜索关键词') ||
-        (msg.includes('[API]') && msg.includes('返回任务数'));
-      if (isNoise) return false;
+    const filtered = safeLogs
+      .filter((log) => {
+        const msg = (log.message || '').toString();
+        const isNoise =
+          msg.includes('成功获取系统配置') ||
+          msg.includes('GET /api/v1/tasks') ||
+          msg.includes('GET /api/v1/system/stats') ||
+          msg.includes('搜索关键词') ||
+          (msg.includes('[API]') && msg.includes('返回任务数'));
+        if (isNoise) return false;
+        const whitelistKeywords = [
+          '[SCAN]', '[TMDB]', '[SUBTITLE]', '[ORG]', '[ORGANIZER]',
+          '[CLEAN]', '[LLM]', '[AI]', '[AI-EXEC]', '[META]',
+          '[DB]', '[SECURITY]', '[API]', '[ERROR]', '[DEBUG]',
+        ];
+        return whitelistKeywords.some((tag) => msg.includes(tag));
+      })
+      .slice(-MINI_LOG_LINES);
 
-      // 仅保留带关键业务标签的日志（与后端 VALID_TAGS 对齐）
-      const whitelistKeywords = [
-        '[SCAN]', '[TMDB]', '[SUBTITLE]', '[ORG]', '[ORGANIZER]',
-        '[CLEAN]', '[LLM]', '[AI]', '[AI-EXEC]', '[META]',
-        '[DB]', '[SECURITY]', '[API]', '[ERROR]', '[DEBUG]',
-      ];
-      return whitelistKeywords.some((tag) => msg.includes(tag));
-    })
-    .slice(-MINI_LOG_LINES);
+    const display: LogEntry[] = [...filtered];
+    while (display.length < MIN_DISPLAY_LINES) {
+      display.push({
+        level: 'INFO',
+        message: placeholderMessages[display.length % placeholderMessages.length],
+        timestamp: new Date().toISOString(),
+      } as LogEntry);
+    }
+
+    return { filteredLogs: filtered, displayLogs: display };
+  }, [safeLogs]);
 
   // 自动滚动优化：安全检查 Ref 是否已绑定
   useEffect(() => {
@@ -96,26 +136,6 @@ export default function MiniLog() {
       containerRef.current.scrollTop = containerRef.current.scrollHeight;
     }
   }, [filteredLogs.length]);
-
-  // 如果过滤后日志不足，补充占位日志以保证视觉高度
-  const displayLogs: LogEntry[] = [...filteredLogs];
-  const placeholderMessages = [
-    'Holographic matrix stabilized',
-    'Scanning deep space coordinates',
-    'Signal detected at quantum layer',
-    'Decrypting transmission stream',
-    'Data stream integrity verified',
-    'Void navigation systems online',
-    'All holographic nodes synchronized',
-    'System monitoring active',
-  ];
-  while (displayLogs.length < MIN_DISPLAY_LINES) {
-    displayLogs.push({
-      level: 'INFO',
-      message: placeholderMessages[displayLogs.length % placeholderMessages.length],
-      timestamp: new Date().toISOString(),
-    } as LogEntry);
-  }
 
   return (
     <div
@@ -131,11 +151,16 @@ export default function MiniLog() {
         }}
       />
       
-      <div className="mb-4 flex items-center gap-3 relative z-10">
+      <div className="mb-4 flex items-start justify-between gap-4 relative z-10">
+        <div className="flex items-center gap-3">
         <Terminal className="w-6 h-6 text-cyber-cyan" />
         <h3 className="text-xl font-bold text-cyber-cyan uppercase tracking-widest">
           {t('ui_holographic_stream')}
         </h3>
+        </div>
+        <div className="text-[11px] font-mono tracking-wider text-cyber-cyan/50 whitespace-nowrap pt-1">
+          {neuralStatusText}
+        </div>
       </div>
       <div ref={containerRef} className="space-y-2 font-mono text-sm h-[300px] overflow-y-auto relative z-10" style={{ contain: 'content' }}>
         {error && (

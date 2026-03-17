@@ -1,6 +1,22 @@
 'use client';
 import { useEffect, useRef } from 'react';
 
+/**
+ * CyberParticles — Holographic Void 背景粒子层（v1.0.0）
+ *
+ * 业务定位：
+ * - 作为全局“虚空”背景纹理，提供轻量动态噪声，不参与任何业务状态树。
+ *
+ * 设计约束：
+ * - **逻辑零触摸 UI**：仅操作 `<canvas>`，不读写应用数据。
+ * - **性能优先**：`requestAnimationFrame` 单循环；卸载时必须 `cancelAnimationFrame`。
+ * - **美学对齐**：主色为霓虹青（`--cyber-cyan`），允许少量“信号噪声”点缀（非主色）。
+ *
+ * 🚨 架构师警告（DO NOT MODIFY）：
+ * - 禁止引入 React state 驱动动画（会触发高频重渲染）。
+ * - 禁止在此组件内访问网络/日志/配置等 I/O（必须保持纯前端绘制）。
+ */
+
 export default function CyberParticles() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -10,7 +26,7 @@ export default function CyberParticles() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // 从 CSS 变量中读取 2077 主题色，保证与全局视觉域统一
+    // 从 CSS 变量中读取主题色，保证与全局视觉域统一（v1.0.0：Holographic Void）
     const styles = getComputedStyle(document.documentElement);
     const yellowOpacity =
       (styles.getPropertyValue('--yellow-color-opacity') || '#f9f00242').trim();
@@ -22,7 +38,7 @@ export default function CyberParticles() {
     resize();
     window.addEventListener('resize', resize);
 
-    // ASCII 字符集 - 美式黑客风格
+    // ASCII 字符集 - 神经终端风格（轻量噪声，不喧宾夺主）
     const chars = '0123456789ABCDEF';
 
     // 更高密度的字符雨：缩小字号并放大列数

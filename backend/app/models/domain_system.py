@@ -259,4 +259,4 @@ class ChatResponse(BaseModel):
     action: Optional[str] = None
     pending_action: Optional[PendingActionPayload] = None
     candidates: List[CandidateItem] = []
-    engine_tag: Optional[str] = None  # V2.0 血缘溯源："cloud" | "local" | "local->cloud"
+    engine_tag: Optional[str] = None  # v1.0.0 血缘溯源："cloud" | "local" | "local->cloud"

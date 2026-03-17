@@ -67,7 +67,7 @@ export default function StatsOverview() {
   // 1. 注册追踪：scanBoostTimerRef 追踪高频轮询，toastTimerRef 追踪 Toast 消除
   // -> 2. 静默清理：useEffect cleanup 取消所有未完成的 clearInterval + clearTimeout
   // -> 3. 预防报错：防止组件卸载后异步回调尝试 setStats/setToast 更新已卸载的 state
-  const scanBoostTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const scanBoostTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 🚀 Toast 计时器防抖：多次触发时先取消旧计时器再重新计时，确保提示不会过早消失
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -93,7 +93,7 @@ export default function StatsOverview() {
   useEffect(() => {
     void loadStats();
     return () => {
-      if (scanBoostTimerRef.current) clearInterval(scanBoostTimerRef.current);
+      if (scanBoostTimerRef.current) clearTimeout(scanBoostTimerRef.current);
       if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     };
   }, [loadStats]);
@@ -103,52 +103,23 @@ export default function StatsOverview() {
     try {
       await api.triggerScan();
       await loadStats();
-      if (scanBoostTimerRef.current) {
-        clearInterval(scanBoostTimerRef.current);
-      }
-      
-      // 🚀 指数退避策略：高频轮询优化
-      // 0-10s: 每1.5s刷新（极速响应用户点击）
-      // 10-30s: 每5s刷新（进入平稳监控）
-      // 30s后: 停止轮询（进入休眠保护）
-      const startedAt = Date.now();
-      let phase = 0; // 0: 极速, 1: 平稳, 2: 休眠
-      
-      scanBoostTimerRef.current = setInterval(() => {
+        if (scanBoostTimerRef.current) clearTimeout(scanBoostTimerRef.current);
+
+      // 🚀 递归 setTimeout 指数退避策略（替代 setInterval 嵌套清除的丧尸炸弹）
+      // 0-10s: 每 1.5s 刷新（极速响应）
+      // 10-30s: 每 5s 刷新（平稳监控）
+      // 30s 后: 不再调度，自然退出（休眠保护）
+      const pollStats = async (startedAt: number) => {
         const elapsed = Date.now() - startedAt;
-        
-        // 阶段判断
-        if (elapsed < 10000) {
-          // 极速阶段：每1.5s刷新
-          if (phase !== 0) {
-            phase = 0;
-            if (scanBoostTimerRef.current) {
-              clearInterval(scanBoostTimerRef.current);
-            }
-            scanBoostTimerRef.current = setInterval(() => {
-              void loadStats();
-            }, 1500);
-          }
-          void loadStats();
-        } else if (elapsed < 30000) {
-          // 平稳阶段：每5s刷新
-          if (phase !== 1) {
-            phase = 1;
-            if (scanBoostTimerRef.current) {
-              clearInterval(scanBoostTimerRef.current);
-            }
-            scanBoostTimerRef.current = setInterval(() => {
-              void loadStats();
-            }, 5000);
-          }
-        } else {
-          // 休眠阶段：停止轮询
-          if (scanBoostTimerRef.current) {
-            clearInterval(scanBoostTimerRef.current);
-            scanBoostTimerRef.current = null;
-          }
-        }
-      }, 1500); // 初始极速阶段间隔
+        if (elapsed > 30000) return; // 超过 30s 停止轮询
+
+        await loadStats(); // 等待请求完成后再计算下次延迟
+
+        const nextDelay = elapsed < 10000 ? 1500 : 5000;
+        scanBoostTimerRef.current = setTimeout(() => pollStats(startedAt), nextDelay);
+      };
+
+      void pollStats(Date.now());
     } catch (error) {
       showToast('扫描触发失败，请重试');
     } finally {

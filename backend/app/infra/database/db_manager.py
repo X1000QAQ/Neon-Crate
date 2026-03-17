@@ -6,7 +6,7 @@
 2. 原子写入：配置文件采用 .tmp 替换机制
 3. 线程级连接池：使用 threading.local() 实现连接复用，彻底消除高频 connect/close 开销
 4. 敏感密钥加密：自动拦截并加密 6 个敏感键
-5. 自动明文密钥迁移：首次启动时检测并迁移明文密钥
+5. 首次启动自动将 config.json 中的明文密钥迁移至 secure_keys.json 加密存储
 """
 import os
 import json
@@ -107,51 +107,14 @@ class DatabaseManager:
     @classmethod
     def _register_migrations(cls):
         """
-        注册所有版本迁移任务（按版本号升序排列）
-
-        [2026-03-15 基准线升级]
-        历史迁移逻辑已全部合并进 _init_database 的初始 CREATE TABLE 语句，
-        不再需要这些补丁迁移。
-        新安装从 Baseline 1.0.0 直接启动，schema_version 初始值为 '1.0.0'，
-        _migrate_database 扫描时发现无 > 1.0.0 的任务，静默跳过，日志不再出现迁移字样。
-
-        Legacy 迁移保留注释仅供历史追溯，实际不注册到 MIGRATIONS。
-        如需为已有线上数据库新增字段，在此处追加新版本（>1.0.0）迁移即可。
+        注册所有版本迁移任务（按版本号升序排列）。
+        当前基准线为 v1.0.0，无待注册迁移。
+        如需新增字段，在此处追加新版本（>1.0.0）迁移条目即可。
         """
-
-        # ── Legacy (已合并入基准线，不再注册) ────────────────────────────
-        # def _legacy_migrate_v1_1(conn): ...  # 补齐 clean_name/season/episode/poster_path/local_poster_path
-        # def _legacy_migrate_v1_2(conn): ...  # 新增 is_active
-        # def _legacy_migrate_v1_3(conn): ...  # 新增 media_archive 归档表
-        # ─────────────────────────────────────────────────────────────────
-
-        # 当前无待注册迁移（基准线已是 1.0.0）
-        # 下一个版本迁移在此追加，例如：
-        # cls.MIGRATIONS = [
-        #     ("1.0.1", "描述", migrate_v1_0_1),
-        # ]
-
-        # ── v1.0.1: 归一化 match failed → failed ─────────────────────────
-        def _migrate_v1_0_1(conn):
-            """将历史遗留的 'match failed' 状态归一化为 'failed'"""
-            conn.execute("UPDATE tasks SET status = 'failed' WHERE status = 'match failed'")
-            conn.execute("UPDATE media_archive SET status = 'failed' WHERE status = 'match failed'")
-        # ─────────────────────────────────────────────────────────────────
-
-        cls.MIGRATIONS = [
-            ("1.0.1", "归一化 match failed → failed", _migrate_v1_0_1),
-        ]
+        cls.MIGRATIONS = []
 
     def _init_database(self):
-        """
-        初始化数据库基础表结构（Baseline Version 1.0.0）
-
-        [2026-03-15 基准线升级]
-        所有历史迁移字段（clean_name/season/episode/poster_path/local_poster_path/is_active）
-        已直接合并到 tasks 的 CREATE TABLE 语句。
-        media_archive 归档表也直接在此创建。
-        schema_version 初始值设为 '1.0.0'，新安装不再触发任何迁移补丁。
-        """
+        """初始化数据库基础表结构（Baseline Version 1.0.0）"""
         with self.db_lock:
             conn = self._get_conn()
             cursor = conn.cursor()
@@ -413,6 +376,9 @@ class DatabaseManager:
         )
 
     def update_task_sub_status(self, task_id: int, sub_status: str):          return self._task_repo.update_task_sub_status(task_id, sub_status)
+
+    def update_task_is_active(self, task_id: int, is_active: int):
+        return self._task_repo.update_task_is_active(task_id, is_active)
 
     def update_any_task_metadata(self, task_id: int, is_archive: bool, imdb_id=None, tmdb_id=None, sub_status=None, title=None, year=None, local_poster_path=None, target_path=None, clean_name=None, season=None, episode=None):
         return self._task_repo.update_any_task_metadata(task_id, is_archive, imdb_id=imdb_id, tmdb_id=tmdb_id, sub_status=sub_status, title=title, year=year, local_poster_path=local_poster_path, target_path=target_path, clean_name=clean_name, season=season, episode=episode)

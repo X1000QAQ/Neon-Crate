@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { Settings, Save, FolderOpen, Key, Code, Brain, FlaskConical } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useSettings } from '@/hooks/useSettings';
@@ -17,13 +17,21 @@ export default function SettingsHub() {
   const { isLoading, isSaving, saveSettings } = useSettings();
   const [activeTab, setActiveTab] = useState<'basic' | 'paths' | 'api' | 'regex' | 'inference' | 'persona'>('basic');
 
+  // [C-04 修复] 用局部 Toast 替代 alert() + window.location.reload()，回归 SPA 体验
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showToast = useCallback((msg: string) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToast(msg);
+    toastTimerRef.current = setTimeout(() => setToast(null), 3000);
+  }, []);
+
   const handleSave = async () => {
     const success = await saveSettings(setLang);
     if (success) {
-      alert(t('alert_save_ok'));
-      setTimeout(() => window.location.reload(), 100);
+      showToast(t('alert_save_ok'));
     } else {
-      alert(t('alert_save_fail'));
+      showToast(t('alert_save_fail'));
     }
   };
 
@@ -121,6 +129,13 @@ export default function SettingsHub() {
           </div>
         </div>
       </div>
+
+      {/* [C-04] 局部 Toast 通知：替代 alert() + reload() */}
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg bg-cyber-cyan text-black font-medium shadow-lg animate-slide-up">
+          {toast}
+        </div>
+      )}
     </div>
   );
 }

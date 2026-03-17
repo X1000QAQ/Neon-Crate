@@ -42,6 +42,14 @@ def perform_scan_task_sync():
     使用普通同步函数而非 async def，FastAPI 的 BackgroundTasks 会自动将其
     投入外部线程池执行，避免大量同步磁盘 I/O 阻塞主事件循环。
     """
+    # ── 并发锁释放核安全（DO NOT MODIFY）──────────────────────────────
+    # 🚨 架构师警告 (DO NOT MODIFY): 核安全边界，改动极易引发死锁或路径穿越。
+    # - 本任务在同步线程池中运行；必须使用 `threading.Lock` 做物理并发短路。
+    # - 任何异常（含磁盘写满/网络异常/未捕获错误）都必须走到 finally，确保：
+    #   1) `scan_status["is_running"] = False`
+    #   2) `_scan_entry_lock.release()`
+    # - 否则前端扫描按钮将永久“转圈僵死”，直到进程重启。
+    #
     # 🚀 物理级并发防重逻辑：
     # 1. 尝试非阻塞获取锁（blocking=False），若锁已被占用则立即返回，不排队、不等待，直接丢弃冗余请求。
     # 2. 检查内存状态标记位 is_running，确保逻辑与物理锁状态同步（双重防护）。
@@ -436,13 +444,20 @@ def perform_scan_task_sync():
 @router.post("/scan", response_model=ScanResponse)
 async def trigger_scan(background_tasks: BackgroundTasks):
     """
-    POST /scan - 触发物理扫描任务（后台线程执行）
+    触发物理扫描任务（后台线程执行，快速返回）。
 
-    功能说明：
-    - 扫描所有配置的下载目录
-    - 发现新的媒体文件并入库
-    - 应用文件大小过滤和格式白名单
-    - 执行文件名清洗和预处理
+    业务链路：
+    触发扫描任务 → 后台线程执行磁盘遍历与物理过滤 → 新媒体任务入库（tasks 表）→ 更新仪表盘缓存计数。
+
+    Args:
+        background_tasks: FastAPI 后台任务容器，用于投递 `perform_scan_task_sync`（避免阻塞请求线程）。
+
+    Returns:
+        ScanResponse: 立即返回“已启动/运行中”的确认消息；真实进度通过 `GET /scan/status` 轮询。
+
+    Raises:
+        HTTPException:
+            - 500: 后台任务投递失败（线程池/运行时异常）。
     """
     global scan_status
 
@@ -461,7 +476,19 @@ async def trigger_scan(background_tasks: BackgroundTasks):
 
 @router.get("/scan/status")
 async def get_scan_status() -> Dict[str, Any]:
-    """GET /scan/status - 获取扫描任务状态"""
+    """
+    获取扫描任务状态（用于前端轮询渲染运行态）。
+
+    业务链路：
+    只读返回内存态 `scan_status`（不触发磁盘 I/O、不触发数据库扫描），用于 UI 展示与按钮态控制。
+
+    Returns:
+        Dict[str, Any]:
+            - is_running: 是否正在运行
+            - last_scan_time: 上次运行时间（Unix 时间戳）
+            - last_scan_count: 上次新增任务数量
+            - error: 错误信息（若有）
+    """
     return {
         "is_running": scan_status["is_running"],
         "last_scan_time": scan_status["last_scan_time"],

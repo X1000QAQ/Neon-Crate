@@ -28,7 +28,7 @@ interface RebuildDialogProps {
     nuclear_reset: boolean;
     season?: number;
     episode?: number;
-  }) => void;
+  }) => Promise<void> | void;
   onClose: () => void;
 }
 
@@ -52,6 +52,13 @@ export default function RebuildDialog({ open, task, mode, onConfirm, onClose }: 
   const [season, setSeason]   = useState<number | ''>(task.season ?? 1);
   const [episode, setEpisode] = useState<number | ''>(task.episode ?? '');
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // [P-04 修复] 组件卸载时清理防抖定时器，防止在已卸载组件上调用 setState
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
 
   // ── 开门重置器：当弹窗打开且任务变化时，重置所有本地状态 ──
   // 业务链路：1. 监听 open 状态与 task.id 变化 -> 2. 触发弹窗展示 -> 
@@ -116,20 +123,24 @@ export default function RebuildDialog({ open, task, mode, onConfirm, onClose }: 
   };
 
   // ── 核级重构执行器 ──
-  // 业务链路：1. 防止重复点击（检查 executing 状态）-> 2. 设置执行中标志 -> 
-  // 3. 构建请求参数（tmdb_id、media_type、nuclear_reset=true、季集号）-> 4. 调用父组件回调 -> 5. 关闭弹窗
-  // 注意：NFO 模式下强制 nuclear_reset=true，确保核级清理必被执行
-  const handleNuclearExecute = () => {
+  // [C-01 修复] 改为 async + try/finally，确保 executing 在任何情况下（含 onConfirm 抛出）都被重置，
+  // 消除「按钮永久灰死」死锁。onClose() 移入 try 块，仅在成功时关闭。
+  const handleNuclearExecute = async () => {
     if (executing) return;
-    setExecuting(true);
-    onConfirm({
-      tmdb_id: selected?.tmdb_id,
-      media_type: mediaType,
-      nuclear_reset: true,
-      season: mediaType === 'tv' && season !== '' ? Number(season) : undefined,
-      episode: mediaType === 'tv' && episode !== '' ? Number(episode) : undefined,
-    });
-    onClose();
+    try {
+      setExecuting(true);
+      await onConfirm({
+        tmdb_id: selected?.tmdb_id,
+        media_type: mediaType,
+        nuclear_reset: true,
+        season: mediaType === 'tv' && season !== '' ? Number(season) : undefined,
+        episode: mediaType === 'tv' && episode !== '' ? Number(episode) : undefined,
+      });
+      onClose();
+    } finally {
+      // 无论成功、失败、还是异常，executing 状态必被重置
+      setExecuting(false);
+    }
   };
 
   if (!open) return null;
@@ -373,7 +384,7 @@ export default function RebuildDialog({ open, task, mode, onConfirm, onClose }: 
                 {t('btn_cancel')}
               </button>
               <button
-                onClick={() => { onConfirm({ media_type: mediaType, nuclear_reset: false }); onClose(); }}
+                onClick={async () => { await onConfirm({ media_type: mediaType, nuclear_reset: false }); onClose(); }}
                 className="flex-1 py-2 font-bold text-sm uppercase tracking-wider
                            bg-cyber-cyan text-black hover:bg-cyber-cyan/80 border border-cyber-cyan transition-all"
                 style={{ boxShadow: '0 0 20px rgba(0,230,246,0.35)' }}

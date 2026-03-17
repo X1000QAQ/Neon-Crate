@@ -48,6 +48,13 @@ async function secureFetch(url: string, options?: RequestInit, timeoutMs: number
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
+  // [P-05 修复] 手动监听外部 signal，将其中止事件桥接到内部 controller，
+  // 解决 { ...options, signal: controller.signal } 覆盖外部 signal 导致信号联动失效的问题。
+  // 不使用 AbortSignal.any() 以保持兼容性。
+  if (options?.signal) {
+    options.signal.addEventListener('abort', () => controller.abort());
+  }
+
   let res: Response;
   try {
     res = await fetch(url, { ...options, signal: controller.signal });

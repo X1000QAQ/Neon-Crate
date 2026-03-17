@@ -1,129 +1,16 @@
 'use client';
 
-import { Send, Download, X } from 'lucide-react';
+import { Send } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 import { usePathname } from 'next/navigation';
 import { api } from '@/lib/api';
 import type { ChatMessage, PendingActionPayload, CandidateItem } from '@/types';
 import { useLanguage } from '@/hooks/useLanguage';
+import { useNeuralLinkStatus } from '@/hooks/useNeuralLinkStatus';
+import DownloadConfirmOverlay from './DownloadConfirmOverlay';
+import NeuralWaveform from './NeuralWaveform';
 
 // AiSidebar — Quantum Neural-Core
-
-// ── 授权决策层：下载全屏确认模态框 ──────────────────────────────────────
-function DownloadConfirmOverlay({
-  pending,
-  onConfirm,
-  onDeny,
-  confirmLoading,
-}: {
-  pending: PendingActionPayload;
-  onConfirm: () => void;
-  onDeny: () => void;
-  confirmLoading: boolean;
-}) {
-  const CYAN = 'var(--cyber-cyan)';
-  const FONT_A = '"Advent Pro", sans-serif';
-  const FONT_H = 'Hacked, "Advent Pro", monospace';
-  return (
-    <div className="fixed inset-0 z-[200] flex items-center justify-center"
-      style={{ background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)', animation: 'overlayIn 0.2s ease' }}
-    >
-      <style dangerouslySetInnerHTML={{ __html: `
-        @keyframes overlayIn { from { opacity:0 } to { opacity:1 } }
-        @keyframes cardUp { from { opacity:0; transform:translateY(20px) } to { opacity:1; transform:translateY(0) } }
-        @keyframes scanline { 0%{top:0%} 100%{top:100%} }
-      ` }} />
-      <div className="relative mx-4 w-full max-w-2xl"
-        style={{ border: '1px solid rgba(0,230,246,0.35)', boxShadow: '0 0 60px rgba(0,230,246,0.15), inset 0 0 40px rgba(0,230,246,0.02)', background: 'rgba(2,8,16,0.97)', animation: 'cardUp 0.25s ease' }}
-      >
-        {/* 扫描线 */}
-        <div className="absolute inset-0 pointer-events-none overflow-hidden" style={{ opacity: 0.04 }}>
-          <div style={{ position:'absolute', left:0, right:0, height:'2px', background:`linear-gradient(to right,transparent,${CYAN},transparent)`, animation:'scanline 4s linear infinite' }} />
-        </div>
-        {/* 顶栏 */}
-        <div className="flex items-center justify-between px-6 py-3" style={{ borderBottom: '1px solid rgba(0,230,246,0.12)' }}>
-          <div className="flex items-center gap-2">
-            <div className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: CYAN, boxShadow:`0 0 8px ${CYAN}` }} />
-            <span className="text-xs tracking-[0.25em] uppercase" style={{ color: CYAN, fontFamily: FONT_A }}>下载授权请求</span>
-          </div>
-          <button onClick={onDeny} className="opacity-40 hover:opacity-100 transition-opacity" style={{ color: CYAN }}><X size={16}/></button>
-        </div>
-        {/* 内容 */}
-        <div className="flex" style={{ minHeight: '320px' }}>
-          {/* 海报 */}
-          <div className="flex-shrink-0 relative overflow-hidden" style={{ width:'200px', borderRight:'1px solid rgba(0,230,246,0.10)' }}>
-            {pending.poster_url ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={pending.poster_url} alt={pending.title||'海报'} className="w-full h-full object-cover" style={{ minHeight:'300px', filter:'brightness(0.9) contrast(1.05)' }} />
-            ) : (
-              <div className="w-full h-full flex items-center justify-center" style={{ minHeight:'300px', background:'rgba(0,230,246,0.03)', color:'rgba(0,230,246,0.18)', fontFamily:FONT_H, fontSize:'11px', letterSpacing:'0.1em' }}>NO POSTER</div>
-            )}
-            <div className="absolute inset-0 pointer-events-none" style={{ background:'linear-gradient(to right,transparent 70%,rgba(2,8,16,0.85) 100%)' }} />
-          </div>
-          {/* 右侧信息 */}
-          <div className="flex-1 flex flex-col justify-between p-6">
-            <div>
-              {/* 查重预警横幅：资源已在库中时显示 */}
-              {pending.is_duplicate && (
-                <div className="flex items-center gap-2 px-3 py-2 mb-4 text-xs font-bold"
-                  style={{ background:'rgba(255,160,0,0.10)', border:'1px solid rgba(255,160,0,0.45)', color:'rgba(255,185,0,0.9)', fontFamily:FONT_A, letterSpacing:'0.06em' }}>
-                  <span style={{ fontSize:'14px' }}>⚠️</span>
-                  <span>该资源已存在于您的媒体库中{pending.existing_status ? `（${pending.existing_status}）` : ''}</span>
-                </div>
-              )}
-              {/* 类型标签 */}
-              <div className="mb-3">
-                <span className="text-[10px] tracking-[0.2em] uppercase px-2 py-0.5"
-                  style={{ border:'1px solid rgba(0,230,246,0.25)', color:'rgba(0,230,246,0.5)', fontFamily:FONT_A }}>
-                  {pending.media_type === 'tv' ? 'TV SERIES' : 'MOVIE'}
-                </span>
-              </div>
-              <h2 className="text-2xl font-bold leading-tight mb-1"
-                style={{ color:CYAN, fontFamily:FONT_H, textShadow:'0 0 20px rgba(0,230,246,0.5)', letterSpacing:'0.03em' }}>
-                {pending.title || pending.clean_name || '未知片名'}
-              </h2>
-              {pending.year && <div className="text-sm mb-4" style={{ color:'rgba(0,230,246,0.4)', fontFamily:FONT_A }}>{pending.year}</div>}
-              <div style={{ height:'1px', background:'rgba(0,230,246,0.07)', marginBottom:'14px' }} />
-              {pending.overview
-                ? <p className="text-xs leading-relaxed line-clamp-6" style={{ color:'rgba(0,230,246,0.48)', fontFamily:FONT_A, lineHeight:'1.75' }}>{pending.overview}</p>
-                : <p className="text-xs" style={{ color:'rgba(0,230,246,0.18)', fontFamily:FONT_A }}>暂无简介</p>
-              }
-            </div>
-            {/* 按钮组 */}
-            <div className="flex gap-3 mt-6">
-              <button onClick={onConfirm} disabled={confirmLoading}
-                className="flex-1 flex items-center justify-center gap-2 py-3 text-sm font-bold tracking-wider transition-all duration-200 disabled:opacity-50"
-                style={{
-                  border: pending.is_duplicate ? '1px solid rgba(255,160,0,0.6)' : `1px solid ${CYAN}`,
-                  background: pending.is_duplicate ? 'rgba(255,160,0,0.08)' : 'rgba(0,230,246,0.07)',
-                  color: pending.is_duplicate ? 'rgba(255,185,0,0.9)' : CYAN,
-                  fontFamily:FONT_A, letterSpacing:'0.12em',
-                  boxShadow: pending.is_duplicate ? '0 0 20px rgba(255,160,0,0.10)' : '0 0 20px rgba(0,230,246,0.08)'
-                }}
-                onMouseEnter={e => { if(!confirmLoading){ const el=e.currentTarget as HTMLElement; el.style.background=pending.is_duplicate?'rgba(255,160,0,0.18)':'rgba(0,230,246,0.16)'; el.style.boxShadow=pending.is_duplicate?'0 0 30px rgba(255,160,0,0.35)':'0 0 30px rgba(0,230,246,0.3)'; }}}
-                onMouseLeave={e => { const el=e.currentTarget as HTMLElement; el.style.background=pending.is_duplicate?'rgba(255,160,0,0.08)':'rgba(0,230,246,0.07)'; el.style.boxShadow=pending.is_duplicate?'0 0 20px rgba(255,160,0,0.10)':'0 0 20px rgba(0,230,246,0.08)'; }}
-              >
-                <Download size={14}/>
-                {confirmLoading ? '执行中...' : (pending.is_duplicate ? '强制重新下载' : '授权下载')}
-              </button>
-              <button onClick={onDeny} disabled={confirmLoading}
-                className="px-5 py-3 text-sm transition-all duration-200 disabled:opacity-50"
-                style={{ border:'1px solid rgba(255,80,80,0.22)', background:'rgba(255,80,80,0.04)', color:'rgba(255,100,100,0.55)', fontFamily:FONT_A, letterSpacing:'0.08em' }}
-                onMouseEnter={e => { if(!confirmLoading){ const el=e.currentTarget as HTMLElement; el.style.background='rgba(255,80,80,0.12)'; el.style.borderColor='rgba(255,80,80,0.5)'; el.style.color='rgba(255,120,120,0.9)'; }}}
-                onMouseLeave={e => { const el=e.currentTarget as HTMLElement; el.style.background='rgba(255,80,80,0.04)'; el.style.borderColor='rgba(255,80,80,0.22)'; el.style.color='rgba(255,100,100,0.55)'; }}
-              >取消</button>
-            </div>
-          </div>
-        </div>
-        {/* 底栏技术信息 */}
-        <div className="px-6 py-2 flex gap-4" style={{ borderTop:'1px solid rgba(0,230,246,0.07)' }}>
-          {pending.tmdb_id && <span className="text-[10px]" style={{ color:'rgba(0,230,246,0.18)', fontFamily:FONT_A }}>TMDB #{pending.tmdb_id}</span>}
-          <span className="text-[10px]" style={{ color:'rgba(0,230,246,0.18)', fontFamily:FONT_A }}>via Radarr / Sonarr</span>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 export default function AiSidebar() {
   const pathname = usePathname();
@@ -152,6 +39,24 @@ export default function AiSidebar() {
     return () => { abortControllerRef.current?.abort(); };
   }, []);
 
+  const neural = useNeuralLinkStatus({
+    enabled: isOpen,
+    busy: loading || confirmLoading,
+    intervalMs: 2500,
+  });
+
+  const tr = (key: string, fallback: string) => {
+    const out = (t as unknown as (k: string) => string)(key);
+    return out === key ? fallback : out;
+  };
+
+  const neuralStatusText =
+    `${tr('ui_quantum_state', '量子态')}: ` +
+    `${tr(`status_${neural.quantum_state}`, neural.quantum_state === 'stable' ? '稳定' : neural.quantum_state === 'syncing' ? '同步中' : neural.quantum_state === 'processing' ? '演算中' : '降级')}` +
+    ` | ` +
+    `${tr('ui_neural_link', '神经链路')}: ` +
+    `${tr(`status_${neural.neural_link}`, neural.neural_link === 'active' ? '在线' : neural.neural_link === 'offline' ? '离线' : '探活中')}`;
+
   const quickCommands = [
     { label: '/scan',    hint: t('ai_quick_scan') },
     { label: '/analyze', hint: t('ai_quick_scrape') },
@@ -165,25 +70,24 @@ export default function AiSidebar() {
   }, [messages, loading]);
 
   // Matrix-drop stagger
+  // [P-03 修复] 依赖 messages.length 而非 messages 对象，避免内容更新重触发动画。
+  // 用 useRef 追踪定时器，在 cleanup 中正确清理，消除已卸载组件上的 setState。
+  const staggerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     const idx = messages.length - 1;
-    if (idx >= 0 && !visibleIdx.has(idx)) {
-      const timer = setTimeout(() => setVisibleIdx(p => new Set([...p, idx])), 60);
-      return () => clearTimeout(timer);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages]);
-
-  // 神经波形动画引擎
-  useEffect(() => {
-    let animationFrameId: number;
-    const animate = () => {
-      setWaveAmplitude((prev) => (prev + 0.1) % 100);
-      animationFrameId = requestAnimationFrame(animate);
+    if (idx < 0) return;
+    if (staggerTimerRef.current) clearTimeout(staggerTimerRef.current);
+    staggerTimerRef.current = setTimeout(() => {
+      setVisibleIdx(p => p.has(idx) ? p : new Set([...p, idx]));
+    }, 60);
+    return () => {
+      if (staggerTimerRef.current) clearTimeout(staggerTimerRef.current);
     };
-    animate();
-    return () => cancelAnimationFrame(animationFrameId);
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages.length]);
+
+  // [C-02 已修复] waveAmplitude 状态已迁移至 NeuralWaveform.tsx，
+  // 通过 useRef 直接操作 SVG DOM，完全绕过 React 渲染管线，消除每秒 60 次全组件重渲染。
 
   if (pathname === '/auth/login') return null;
 
@@ -217,7 +121,7 @@ export default function AiSidebar() {
         role: 'assistant', 
         content: res.response,
         candidates: res.candidates && res.candidates.length > 0 ? res.candidates : undefined,
-        engine_tag: res.engine_tag,  // V2.0 血缘溯源标签
+        engine_tag: res.engine_tag,  // v1.0.0 血缘溯源标签
       }]);
       // 授权决策层：DOWNLOAD 意图携带 pending_action 时弹出全屏确认界面
       if (res.action === 'DOWNLOAD' && res.pending_action) {
@@ -395,49 +299,8 @@ export default function AiSidebar() {
             borderLeft: `1px solid ${CYAN_DIM}`,
           }}
         >
-          {/* Neural Waveform Background */}
-          <div className="absolute inset-0 pointer-events-none" style={{ opacity: 0.18 }}>
-            <svg width="100%" height="100%" xmlns="http://www.w3.org/2000/svg">
-              {/* 恢复 SVG 的动态路径 */}
-              {(() => {
-                const w = waveAmplitude;
-                const wp1 = `M 0 ${200 + Math.sin(w * 0.1) * 30} Q 96 ${
-                  180 + Math.sin(w * 0.15) * 40
-                }, 192 ${200 + Math.sin(w * 0.2) * 30} T 384 ${
-                  200 + Math.sin(w * 0.25) * 30
-                }`;
-                const wp2 = `M 0 ${420 + Math.sin(w * 0.12) * 25} Q 96 ${
-                  440 + Math.sin(w * 0.18) * 35
-                }, 192 ${420 + Math.sin(w * 0.22) * 25} T 384 ${
-                  420 + Math.sin(w * 0.28) * 25
-                }`;
-                const wp3 = `M 0 ${640 + Math.sin(w * 0.09) * 20} Q 96 ${
-                  620 + Math.sin(w * 0.14) * 28
-                }, 192 ${640 + Math.sin(w * 0.19) * 20} T 384 ${
-                  640 + Math.sin(w * 0.24) * 20
-                }`;
-                return (
-                  <>
-                    <path d={wp1} stroke={CYAN} strokeWidth="1" fill="none" />
-                    <path
-                      d={wp2}
-                      stroke={CYAN}
-                      strokeWidth="1"
-                      fill="none"
-                      opacity="0.6"
-                    />
-                    <path
-                      d={wp3}
-                      stroke={CYAN}
-                      strokeWidth="1"
-                      fill="none"
-                      opacity="0.3"
-                    />
-                  </>
-                );
-              })()}
-            </svg>
-          </div>
+          {/* Neural Waveform Background — [C-02 已修复] 迁移至 NeuralWaveform.tsx，零 setState 开销 */}
+          <NeuralWaveform />
           {/* Depth glow */}
           <div className="absolute inset-0 pointer-events-none"
             style={{ background: 'radial-gradient(ellipse at 50% 35%, rgba(0,230,246,0.05) 0%, transparent 70%)' }} />
@@ -457,7 +320,7 @@ export default function AiSidebar() {
               </div>
             </div>
             <div className="text-xs tracking-wider" style={{ color: CYAN_MID, fontFamily: FONT_A }}>
-              quantum_state: stable | neural_link: active
+              {neuralStatusText}
             </div>
           </div>
 
@@ -500,7 +363,7 @@ export default function AiSidebar() {
                           style={{ color: CYAN, fontFamily: FONT_H, textShadow: '0 0 15px rgba(0,230,246,0.6)' }}>
                           {msg.content}
                         </div>
-                        {/* V2.0 血缘溯源：引擎标识角标 */}
+                        {/* v1.0.0 血缘溯源：引擎标识角标 */}
                         {msg.engine_tag && (
                           <div
                             className="mt-1 flex items-center gap-1 opacity-30 hover:opacity-100 transition-opacity duration-300 cursor-default select-none"

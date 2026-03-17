@@ -22,6 +22,11 @@ from pydantic import BaseModel
 from app.infra.database import get_db_manager
 from app.models.domain_media import ScanResponse
 from app.services.organizer.hardlinker import SmartLink
+from app.services.metadata.metadata_manager import MetadataManager
+from app.api.v1.endpoints.tasks._shared import (
+    scrape_all_status,
+    _update_library_counts,
+)
 
 
 def _check_local_subtitles(video_path: str, sub_exts: frozenset = None) -> bool:
@@ -54,12 +59,6 @@ def _check_local_subtitles(video_path: str, sub_exts: frozenset = None) -> bool:
     except Exception as e:
         logger.debug(f"[SUBTITLE] 模糊匹配检测出现异常 (可忽略): {e}")
     return False
-from app.services.metadata.metadata_manager import MetadataManager
-from app.api.v1.endpoints.tasks._shared import (
-    scrape_all_status,
-    _update_library_counts,
-)
-
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -92,13 +91,15 @@ def perform_scrape_all_task_sync():
         logger.warning("[SCRAPE] ⚠️ 拦截并发请求：已有刮削任务正在运行中，本次触发已丢弃。")
         return
 
-    global scrape_all_status
+    # ── Action 3: 修复双重检查锁定陷阱 ──
+    # 在物理锁保护下再次检查 is_running，防止极端竞态窗口
+    # （两个线程同时通过 acquire 前的状态检查，但只有一个能拿到锁）
+    if scrape_all_status["is_running"]:
+        _scrape_entry_lock.release()
+        logger.warning("[SCRAPE] ⚠️ 锁内二次检查拦截：状态仍为 running，释放锁并退出。")
+        return
 
     try:
-        # ── Step 1: 检查内存状态标记位（双重防护）──
-        if scrape_all_status["is_running"]:
-            return
-
         scrape_all_status["is_running"] = True
         scrape_all_status["error"] = None
 
@@ -131,6 +132,8 @@ def perform_scrape_all_task_sync():
 
         if count == 0:
             logger.info("[TMDB] 没有待处理的刮削任务")
+            import time
+            scrape_all_status["is_running"] = False
             scrape_all_status["processed_count"] = 0
             scrape_all_status["last_run_time"] = time.time()
             return
@@ -151,722 +154,29 @@ def perform_scrape_all_task_sync():
         failed_count = 0
 
         for task in tasks_to_scrape:
-            try:
-                clean_name = task.get("clean_name", "")
-                file_name = task.get("file_name", "")
-                file_path = task.get("path", "")
-                task_id = task.get("id")
-                media_type = task.get("type", "movie")
-
-                logger.info(f"[TMDB] 正在处理: {clean_name or file_name} (ID: {task_id})")
-
-                # ==========================================
-                # 🚀 NFO 短路拦截（双轨隔离 — 自动刮削轨）
-                # ==========================================
-                # 业务链路：1. 查找本地 NFO 文件 -> 2. 解析 NFO 获取 TMDB ID / IMDb ID -> 
-                # 3. 若成功则跳过 AI 提炼和 TMDB 搜索 -> 4. 直接更新 DB 并归档 -> 
-                # 5. 若失败则降级走正常刮削流程
-                # 由 nfo_parser.py 提供全兼容解析（Neon + TMM 3.1.x）
-                # 绝对禁止调用 AI Agent 和 TMDB 搜索
-                # ==========================================
-                if file_path:
-                    from app.services.metadata.nfo_parser import find_nfo, parse_nfo as _parse_nfo
-                    _nfo_path = find_nfo(file_path)
-                    if _nfo_path:
-                        try:
-                            _nfo = _parse_nfo(_nfo_path)
-                            _nfo_tmdb_id = _nfo.get("tmdb_id")
-                            _nfo_imdb_id = _nfo.get("imdb_id") or ""
-                            _nfo_title   = _nfo.get("title") or ""
-                            _nfo_year    = _nfo.get("year") or ""
-                            if _nfo_tmdb_id:
-                                logger.info(
-                                    f"[NFO] 短路拦截成功: task={task_id}, "
-                                    f"title='{_nfo_title}', tmdb={_nfo_tmdb_id}, imdb={_nfo_imdb_id}"
-                                )
-                                # 检查同目录海报
-                                _nfo_dir = str(Path(_nfo_path).parent)
-                                _nfo_poster = None
-                                for _pn in ["poster.jpg", "poster.png"]:
-                                    _pc = os.path.join(_nfo_dir, _pn)
-                                    if os.path.exists(_pc):
-                                        _nfo_poster = _pc
-                                        break
-
-                                _has_sub = _check_local_subtitles(file_path, sub_exts=_parse_sub_exts(db.get_config("supported_subtitle_exts", "")))
-                                _sub_status = "success" if _has_sub else "pending"
-                                _is_arc = task.get("is_archive", False)
-                                db.update_any_task_metadata(
-                                    task_id,
-                                    _is_arc,
-                                    imdb_id=_nfo_imdb_id,
-                                    tmdb_id=_nfo_tmdb_id,
-                                    title=_nfo_title or clean_name,
-                                    year=_nfo_year or None,
-                                    sub_status=_sub_status
-                                )
-
-                                # 热表任务需调用 update_task_status 触发归档
-                                if not _is_arc:
-                                    db.update_task_title_year(
-                                        task_id=task_id,
-                                        title=_nfo_title or clean_name,
-                                        year=_nfo_year or None,
-                                        season=task.get("season") if task.get("type") == "tv" else None
-                                    )
-                                    db.update_task_status(
-                                        task_id=task_id,
-                                        status="archived",
-                                        tmdb_id=int(_nfo_tmdb_id),
-                                        imdb_id=_nfo_imdb_id,
-                                        target_path=file_path,
-                                        sub_status=_sub_status,
-                                        local_poster_path=_nfo_poster,
-                                        task_type=task.get("type", "movie")
-                                    )
-
-                                success_count += 1
-                                processed += 1
-                                continue
-                        except Exception as _nfo_err:
-                            logger.warning(f"[NFO] 解析失败，降级走正常刮削流程: {_nfo_err}")
-
-                # ── 极致省流：存量库为补 ID 进来的任务，先看有没有字幕 ──
-                # 业务链路：1. 检查任务是否已归档且缺 imdb_id -> 2. 检查本地是否有字幕 -> 
-                # 3. 若有字幕则跳过 IMDb ID 补充刮削（节省 Token）
-                if task.get("status") == "archived" and not task.get("imdb_id"):
-                    _sub_path = task.get("target_path") or file_path
-                    if _sub_path and _check_local_subtitles(_sub_path, sub_exts=_parse_sub_exts(db.get_config("supported_subtitle_exts", ""))):
-                        logger.info(f"[SCRAPE] 🎯 存量库本地已有字幕，跳过 IMDb ID 补充刮削，节省 Token -> {_sub_path}")
-                        _is_arc = task.get("is_archive", False)
-                        db.update_any_task_metadata(task_id, _is_arc, sub_status="success")
-                        success_count += 1
-                        processed += 1
-                        continue
-
-                raw_filename = file_name or file_path.split('\\')[-1].split('/')[-1]
-                from app.services.scraper.cleaner import MediaCleaner as _MC
-                cleaned_filename = _MC(db_manager=db).clean_name(raw_filename)
-                if not cleaned_filename:
-                    cleaned_filename = raw_filename
-                logger.info(f"[RegexLab] 物理正则去噪完成: '{raw_filename}' -> '{cleaned_filename}'")
-
-                # ── AI 提炼逻辑 ──
-                # 业务链路：1. 调用 AI Agent 分析文件名 -> 2. 提取查询词、年份、类型 -> 
-                # 3. 若 AI 失败则降级使用正则清洗名 -> 4. 路径权威优先（不被 AI 覆盖）-> 
-                # 5. 年份物理验证（防止 AI 推断错误年份）
-                logger.info(f"[AI] 调用 AI Agent 分析文件名: {cleaned_filename}")
-                try:
-                    # 1. 异步调用 AI Agent 进行媒体识别
-                    ai_result = asyncio.run(ai_agent.ai_identify_media(
-                        cleaned_name=cleaned_filename,
-                        full_path=file_path,
-                        type_hint=media_type
-                    ))
-                except Exception as ai_err:
-                    logger.error(f"[AI] 识别异常: {ai_err}")
-                    ai_result = None
-
-                # 2. AI 失败降级处理
-                if not ai_result or not isinstance(ai_result, dict):
-                    _fallback_query = (cleaned_filename or clean_name or file_name or "").strip()
-                    logger.warning(
-                        f"[AI][FALLBACK] AI 分析返回 None 或非字典，任务 {task_id} 降级使用 "
-                        f"正则清洗名='{_fallback_query}' + db_type='{media_type}'"
-                    )
-                    ai_result = {
-                        "query": _fallback_query,
-                        "year": task.get("year", ""),
-                        "type": media_type,
-                    }
-
-                # ── 路径权威优先：路径已定类型不被 AI 覆盖 ──
-                # 业务链路：1. 读取 AI 建议的类型 -> 2. 若路径已定类型则强制使用路径类型 -> 
-                # 3. 若路径类型为空则使用 AI 建议 -> 4. 若 AI 建议非法则降级为 movie
-                ai_suggested_type = (ai_result.get("type") or "").strip().lower()
-                if media_type in ("movie", "tv"):
-                    refined_type = media_type
-                    if ai_suggested_type and ai_suggested_type != media_type:
-                        logger.info(
-                            f"[AI][PATH_AUTHORITY] 任务 {task_id}: AI 建议 type='{ai_suggested_type}' "
-                            f"被路径权威覆盖，强制使用 db_type='{media_type}'"
-                        )
-                else:
-                    if ai_suggested_type in ("movie", "tv"):
-                        refined_type = ai_suggested_type
-                    else:
-                        refined_type = "movie"
-                        logger.warning(
-                            f"[AI][FALLBACK] 任务 {task_id}: AI 返回非法 type='{ai_suggested_type}'，"
-                            f"db_type 为空，最终降级为 'movie'"
-                        )
-
-                # ── 搜索词校验 ──
-                # 业务链路：1. 读取 AI 返回的查询词 -> 2. 若为空则降级使用 clean_name -> 
-                # 3. 记录最终使用的查询词
-                refined_query = (ai_result.get("query") or "").strip()
-                if not refined_query:
-                    refined_query = (clean_name or file_name or "").strip()
-                    logger.warning(
-                        f"[AI][FALLBACK] 任务 {task_id}: AI 返回空 query，"
-                        f"降级使用 clean_name='{refined_query}'"
-                    )
-
-                refined_year = (ai_result.get("year") or task.get("year") or "").strip()
-
-                # ── 年份物理验证：只有文件名中实际存在的年份才能用于 TMDB 过滤 ──
-                # 业务链路：1. 从文件名中提取年份 -> 2. 若 AI 返回年份但文件名无年份则清空 -> 
-                # 3. 防止 AI 用自身知识推断年份导致 TMDB 误过滤
-                from app.services.scraper.cleaner import MediaCleaner as _MCYear
-                _year_from_filename = _MCYear().extract_year(raw_filename)
-                if refined_year and not _year_from_filename:
-                    logger.warning(
-                        f"[AI][YEAR_GUARD] 任务 {task_id}: AI 返回 year='{refined_year}' "
-                        f"但文件名 '{raw_filename}' 中无年份信息，已清空防止 TMDB 误过滤"
-                    )
-                    refined_year = ""
-
-                logger.info(
-                    f"[AI] 识别完成: query='{refined_query}' | year='{refined_year}' | "
-                    f"type='{refined_type}' (db_type='{media_type}')"
-                )
-
-                # ── TMDB 搜索与防重拦截 ──
-                # 业务链路：1. 根据类型调用 TMDB 搜索 -> 2. 若剧集搜索失败则二次搜索（去集号）-> 
-                # 3. 精确匹配或宽松匹配候选结果 -> 4. 提取 TMDB ID、标题、年份
-                if refined_type == "movie":
-                    results = scraper.search_movie(query=refined_query, year=refined_year)
-                else:
-                    results = scraper.search_tv(query=refined_query, year=refined_year)
-
-                # 1. 剧集匹配失败时的二次搜索逻辑（去集号重试）
-                if (not results or len(results) == 0) and refined_type == "tv":
-                    if " " in refined_query:
-                        fallback_query = refined_query.split(" ")[0]
-                        logger.info(f"[TMDB] 剧集匹配失败，尝试二次搜索: '{fallback_query}'")
-                        results = scraper.search_tv(query=fallback_query, year=refined_year)
-
-                # 2. 搜索结果处理与精确匹配
-                if results and len(results) > 0:
-                    best_match = results[0]
-                    query_lower = refined_query.lower().strip()
-                    query_base = re.sub(r'[\s\-]+\d+$', '', query_lower).strip()
-                    # 3. 遍历候选结果，寻找精确匹配或宽松匹配
-                    for candidate in results:
-                        orig = (candidate.get("original_title") or candidate.get("original_name") or "").lower().strip()
-                        name = (candidate.get("title") or candidate.get("name") or "").lower().strip()
-                        if orig == query_lower or name == query_lower:
-                            best_match = candidate
-                            logger.info(f"[TMDB] 精确匹配: '{candidate.get('title') or candidate.get('name')}'")
-                            break
-                        if query_base and (orig == query_base or name == query_base):
-                            best_match = candidate
-                            logger.info(f"[TMDB] 宽松匹配(去集号): '{candidate.get('title') or candidate.get('name')}'")
-                            break
-
-                    # 4. 提取 TMDB ID 和标题
-                    tmdb_id = best_match.get("id")
-                    # 根据 rename_lang 决定使用本地化标题还是原始英文标题
-                    if rename_lang == "en":
-                        title = (
-                            best_match.get("original_title")
-                            or best_match.get("original_name")
-                            or best_match.get("title")
-                            or best_match.get("name")
-                        )
-                        logger.info(f"[CONFIG] rename_lang=en，使用英文标题: {title}")
-                    else:
-                        title = best_match.get("title") or best_match.get("name")
-                        logger.info(f"[CONFIG] rename_lang=zh，使用中文标题: {title}")
-                    release_date = best_match.get("release_date") or best_match.get("first_air_date", "")
-                    year = release_date.split("-")[0] if release_date else None
-
-                    logger.info(f"[TMDB] 命中: '{title}' | TMDB_ID={tmdb_id} | 年份={year or 'N/A'} | 类型={refined_type}")
-
-                    # 获取 IMDB ID
-                    imdb_id = ""
-                    try:
-                        ext_ids = scraper.get_external_ids(str(tmdb_id), refined_type)
-                        imdb_id = ext_ids.get("imdb_id", "") or ""
-                        if imdb_id:
-                            logger.info(f"[TMDB] IMDb ID 获取成功: {imdb_id}")
-                        else:
-                            logger.warning(f"[TMDB] IMDb ID 为空: tmdb_id={tmdb_id}")
-                    except Exception as e:
-                        logger.warning(f"[TMDB] 获取 IMDb ID 失败: {e}")
-                        imdb_id = ""
-
-                    logger.info(f"[TMDB] 匹配完成: '{title}' | TMDB={tmdb_id} | IMDB={imdb_id or 'N/A'}")
-
-                    # ==========================================
-                    # 🛡️ IMDb ID 金标准去噪熔断机制（支持剧集分集防重）
-                    # ==========================================
-                    # ── 业务链路 ──
-                    # 1. 检查 IMDb ID 是否已在库中 -> 2. 若存在则标记为 ignored -> 
-                    # 3. 继承同源海报路径 -> 4. 跳过物理归档
-                    # 
-                    # 设计目标：防止同一媒体被重复入库
-                    # 
-                    # 问题场景：
-                    # - 用户下载了同一部电影的多个版本（蓝光版、导演剪辑版）
-                    # - 文件名不同，但 IMDb ID 相同
-                    # - 若不拦截，会导致媒体库中出现重复条目
-                    # 
-                    # 剧集分集防重：
-                    # - 同一剧集的不同集数共享 IMDb ID
-                    # - 必须精确到 season + episode 才能判断是否重复
-                    # - 例如：Breaking Bad S01E01 和 S01E02 有相同的 IMDb ID
-                    # 
-                    # 拦截策略：
-                    # - 检测到重复时，标记为 ignored 状态
-                    # - 更新标题和年份（防止前端显示乱码）
-                    # - 不执行物理归档，不下载海报
-                    # ==========================================
-                    season_num = task.get("season")
-                    episode_num = task.get("episode")
-                    if imdb_id and db.check_media_exists(imdb_id, refined_type, season_num, episode_num):
-                        logger.info(
-                            f"[SKIP] 检测到重复媒体 (IMDb: {imdb_id}, "
-                            f"S{season_num}E{episode_num}) 已在库中，跳过重复归档。"
-                        )
-                        # 兜底：更新干净标题，防止前端显示丑陋的原始乱码
-                        db.update_task_title_year(task_id, title, year)
-
-                        # 🚨🚨🚨 架构师警告：神圣不可侵犯的代码块 (DO NOT REMOVE OR INLINE) 🚨🚨🚨
-                        # 当文件被判定为物理重复时，绝对不允许直接 return 或仅仅调用 update_task_status！
-                        # 必须调用 mark_task_as_ignored_and_inherit，该方法原子完成两件事：
-                        #   1. 跨表查找同源已归档任务的 local_poster_path
-                        #   2. 将 ignored 状态 + local_poster_path 一次写入数据库
-                        # 若拆分此调用，前端将出现严重破图（VHS 特效丢失 + 白板空图）！
-                        db.mark_task_as_ignored_and_inherit(
-                            task_id=task_id,
-                            imdb_id=imdb_id,
-                            media_type=refined_type,
-                            season=season_num,
-                            episode=episode_num,
-                            tmdb_id=int(tmdb_id) if tmdb_id else None,
-                        )
-                        # 🚨🚨🚨 架构师警告结束 🚨🚨🚨
-
-                        failed_count += 1
-                        continue
-                    target_path = None
-                    local_poster_path = None
-
-                    # ==========================================
-                    # 🏥 就地补录检测（In-Place Metadata Injection）
-                    # ==========================================
-                    # ── 业务链路 ──
-                    # 1. 检查文件是否来自 library 路径或已归档 -> 2. 若是则进入就地补录模式 -> 
-                    # 3. 计算元数据目录（剧集需上升一级）-> 4. 写入 NFO 和海报 -> 
-                    # 5. 更新 DB 元数据（不移动文件）
-                    # 
-                    # 设计目标：为已存在于媒体库的文件补充元数据，不移动文件
-                    # 
-                    # 触发条件：
-                    # 1. 文件状态为 archived（已归档）
-                    # 2. 文件路径位于 library 目录中
-                    # 
-                    # 应用场景：
-                    # - 失忆救援：数据库被清空，但媒体库文件完好
-                    # - 元数据补全：用户手动添加文件到媒体库，需要补充 NFO 和海报
-                    # - 存量库升级：从其他媒体管理系统迁移过来
-                    # 
-                    # 就地补录 vs 归档全链路：
-                    # - 就地补录：文件已在媒体库，仅写入 NFO 和海报，不移动文件
-                    # - 归档全链路：文件在下载目录，需要移动到媒体库并写入元数据
-                    # 
-                    # 元数据写入位置：
-                    # - 电影：/media/movies/The Matrix (1999)/movie.nfo + poster.jpg
-                    # - 剧集：/media/tv/Breaking Bad (2008)/tvshow.nfo + poster.jpg（剧集根目录）
-                    # ==========================================
-                    task_status = task.get("status", "")
-                    task_file_path = task.get("path", "")
-                    _is_library_file = False
-
-                    # ── Step 1: 检查文件是否来自 library 路径 ──
-                    # 业务链路：1. 读取所有配置的 library 路径 -> 2. 规范化路径格式 -> 
-                    # 3. 检查文件是否在 library 路径下
-                    all_cfg = db.get_all_config()
-                    _lib_paths = [
-                        os.path.normpath(p.get("path", "")).lower()
-                        for p in all_cfg.get("paths", [])
-                        if p.get("type") == "library" and p.get("enabled", False) and p.get("path")
-                    ]
-                    _file_norm = os.path.normpath(task_file_path).lower()
-                    if task_status == "archived" or any(_file_norm.startswith(lp) for lp in _lib_paths):
-                        _is_library_file = True
-
-                    # ── Step 2: 就地补录模式处理 ──
-                    # 业务链路：1. 若文件来自 library 则进入就地补录模式 -> 2. 计算元数据目录 -> 
-                    # 3. 若为剧集则上升一级到剧集根目录 -> 4. 设置 target_path 为当前路径
-                    if _is_library_file:
-                        # 就地补录模式：文件已在媒体库，不需要移动
-                        logger.info(f"[ORG] 就地补录模式：文件来自 library 路径或已归档，仅更新元数据")
-                        metadata_dir = os.path.dirname(task_file_path)
-                        
-                        # 🚀 剧集目录层级修正：必须将 NFO 和海报写在剧集根目录，而不是 Season 文件夹里
-                        import re as _re_meta
-                        if _re_meta.match(r'^(Season|S)\s*\d+$|^Specials$', os.path.basename(metadata_dir), _re_meta.IGNORECASE):
-                            metadata_dir = os.path.dirname(metadata_dir)
-                            
-                        # 就地补录时，目标路径就是它现在的路径
-                        target_path = task_file_path
-                    else:
-                        # ── 归档全链路（Archive Full Pipeline）──
-                        # 业务链路：1. 获取媒体库根路径 -> 2. 构建目标目录结构 -> 
-                        # 3. 生成目标文件名 -> 4. 计算元数据目录 -> 5. 移动文件到媒体库
-                        # 
-                        # 电影目录结构：
-                        # /media/movies/The Matrix (1999)/The Matrix (1999).mkv
-                        # 
-                        # 剧集目录结构：
-                        # /media/tv/Breaking Bad (2008)/Season 1/Breaking Bad (2008) - S01E01.mkv
-                        # 
-                        # 元数据位置：
-                        # - 电影：/media/movies/The Matrix (1999)/movie.nfo + poster.jpg
-                        # - 剧集：/media/tv/Breaking Bad (2008)/tvshow.nfo + poster.jpg
-                        
-                        library_root = db.get_active_library_path(refined_type)
-                        logger.info(f"[ORG] 媒体库根路径: {library_root}")
-
-                        file_ext = os.path.splitext(file_path)[1]
-                        from app.services.scraper.cleaner import MediaCleaner as _MCOrg
-                        safe_title = _MCOrg.sanitize_filename(title)
-                        logger.info(f"[ORG] 标题净化: '{title}' -> '{safe_title}'")
-                        season_num = task.get("season") or 1
-
-                        # ── Step 1: 电影归档 ──
-                        # 业务链路：1. 构建文件夹名（标题 + 年份）-> 2. 生成目标文件名 -> 
-                        # 3. 计算元数据目录（与文件夹相同）
-                        if refined_type == "movie":
-                            folder_name = f"{safe_title} ({year})" if year else safe_title
-                            target_dir = os.path.join(library_root, folder_name)
-                            target_filename = f"{folder_name}{file_ext}"
-                            target_path = os.path.join(target_dir, target_filename)
-                            metadata_dir = target_dir
-                        else:
-                            # ── Step 2: 剧集归档 ──
-                            # 业务链路：1. 构建剧集根目录（标题 + 年份）-> 2. 从路径补充季号 -> 
-                            # 3. 构建 Season 子目录 -> 4. 生成目标文件名（S##E##格式）-> 
-                            # 5. 计算元数据目录（剧集根目录）
-                            folder_name = f"{safe_title} ({year})" if year else safe_title
-                            season_num = task.get("season") or 1
-                            episode_num = task.get("episode") or 1
-                            if season_num == 1 and file_path:
-                                for _part in Path(file_path).parts:
-                                    _m = re.search(r'(?:Season|S)\s*(\d{1,2})\b', _part, re.IGNORECASE)
-                                    if _m:
-                                        _path_season = int(_m.group(1))
-                                        if _path_season != 1:
-                                            season_num = _path_season
-                                            logger.info(f"[ORG] 从路径补充季号: {file_path} -> season={season_num}")
-                                        break
-                            season_folder = f"Season {int(season_num)}"
-                            show_root_dir = os.path.join(library_root, folder_name)
-                            target_dir = os.path.join(show_root_dir, season_folder)
-                            metadata_dir = show_root_dir
-                            target_filename = f"{folder_name} - S{season_num:02d}E{episode_num:02d}{file_ext}"
-                            target_path = os.path.join(target_dir, target_filename)
-
-                        # 物理路径安全检查（路径防穿越校验）
-                        try:
-                            _resolved_target = Path(target_path).resolve()
-                            _resolved_lib = Path(library_root).resolve()
-                            _resolved_target.relative_to(_resolved_lib)
-                        except ValueError as path_err:
-                            logger.error(f"[SECURITY] 路径穿越拦截: {target_path}")
-                            db.update_task_status(task_id=task_id, status="failed")
-                            failed_count += 1
-                            continue
-
-                    logger.info(f"[ORG] 目标路径: {target_path}")
-
-                    # 2. 统一执行防重拦截并提取海报
-                    if db.check_task_exists_by_path(target_path):
-                        logger.info(f"[SKIP] 目标路径已被存量库占用，拦截重复翻译入库 -> {target_path}")
-                        
-                        # 🚀 提取已存在文件的海报路径
-                        local_poster_path = None
-                        for poster_name in ["poster.jpg", "poster.png"]:
-                            candidate = os.path.join(metadata_dir, poster_name)
-                            if os.path.exists(candidate):
-                                local_poster_path = candidate
-                                logger.info(f"[SKIP] 复用存量库海报: {local_poster_path}")
-                                break
-                        
-                        db.update_task_title_year(task_id, title, year)
-                        _is_arc = task.get("is_archive", False)
-                        
-                        # 使用双表更新方法
-                        if _is_arc:
-                            db.update_any_task_metadata(
-                                task_id=task_id, 
-                                is_archive=True,
-                                imdb_id=imdb_id,
-                                tmdb_id=str(tmdb_id) if tmdb_id else None,
-                                title=title,
-                                year=year
-                            )
-                        
-                        # 更新状态为 ignored
-                        db.update_task_status(
-                            task_id=task_id, 
-                            status="ignored", 
-                            tmdb_id=int(tmdb_id) if tmdb_id else None,
-                            imdb_id=imdb_id,
-                            target_path=target_path,
-                            local_poster_path=local_poster_path
-                        )
-                        failed_count += 1
-                        processed += 1
-                        continue
-
-                    # 3. 如果没被拦截，执行物理操作和元数据写入
-                    if _is_library_file:
-                        # 就地补录：不移动文件，仅写入元数据
-                        season_num = task.get("season") or 1
-                        try:
-                            meta_manager = MetadataManager(tmdb_api_key, language="zh-CN" if poster_lang == "zh" else "en-US")
-                            nfo_filename = "movie.nfo" if refined_type == "movie" else "tvshow.nfo"
-                            nfo_path = os.path.join(metadata_dir, nfo_filename)
-                            try:
-                                nfo_ok = meta_manager.generate_nfo(
-                                    tmdb_id=str(tmdb_id),
-                                    media_type=refined_type,
-                                    output_path=nfo_path,
-                                    title=title,
-                                    year=year
-                                )
-                                if nfo_ok:
-                                    logger.info(f"[STORAGE] 就地补录 NFO 写入成功: {nfo_path}")
-                            except Exception as nfo_err:
-                                logger.warning(f"[STORAGE] 就地补录 NFO 生成异常，已跳过: {nfo_err}")
-
-                            try:
-                                local_poster_path = meta_manager.download_poster(
-                                    tmdb_id=str(tmdb_id),
-                                    media_type=refined_type,
-                                    output_dir=metadata_dir,
-                                    title=title
-                                )
-                                if local_poster_path:
-                                    logger.info(f"[STORAGE] 就地补录海报写入成功: {local_poster_path}")
-                            except Exception as poster_err:
-                                logger.warning(f"[STORAGE] 就地补录海报下载异常，已跳过: {poster_err}")
-
-                            try:
-                                meta_manager.download_fanart(
-                                    tmdb_id=str(tmdb_id),
-                                    media_type=refined_type,
-                                    output_dir=metadata_dir,
-                                    title=title
-                                )
-                            except Exception as fanart_err:
-                                logger.warning(f"[STORAGE] 就地补录 Fanart 下载异常，已跳过: {fanart_err}")
-
-                        except Exception as inplace_err:
-                            logger.error(f"[ORG] 就地补录流程异常: {inplace_err}", exc_info=True)
-
-                        # 🚀 存量文件轻量级更新：如果是 archived 任务补充 imdb_id，不执行物理搬运
-                        if task.get("status") == "archived":
-                            logger.info(f"[ORG] 存量库文件已补齐 IMDb ID: {imdb_id}，更新元数据即可")
-                            _is_arc = task.get("is_archive", False)
-                            db.update_any_task_metadata(
-                                task_id, _is_arc,
-                                imdb_id=imdb_id if imdb_id else None,
-                                tmdb_id=str(tmdb_id) if tmdb_id else None,
-                                sub_status="pending",
-                                title=title,
-                                year=year
-                            )
-                            success_count += 1
-                            processed += 1
-                            continue
-
-                    else:
-                        # ==========================================
-                        # 🚀 归档全链路（Full Archive Pipeline）
-                        # ==========================================
-                        # 设计目标：将下载目录中的文件归档到媒体库，并补充元数据
-                        # 
-                        # 完整流程：
-                        # 1. 计算目标路径（根据 TMDB 标题和年份）
-                        # 2. 创建目标目录
-                        # 3. 智能链接（SmartLink）：硬链接 > 软链接 > 复制
-                        # 4. 生成 NFO 文件
-                        # 5. 下载海报（poster.jpg）
-                        # 6. 下载 Fanart（fanart.jpg）
-                        # 7. 更新数据库状态
-                        # 
-                        # 智能链接策略（SmartLink）：
-                        # - 优先硬链接：保持做种，节省空间
-                        # - 降级软链接：跨文件系统时使用
-                        # - 兜底复制：软链接不支持时使用
-                        # 
-                        # 目标路径规范：
-                        # - 电影：/media/movies/The Matrix (1999)/The Matrix (1999).mkv
-                        # - 剧集：/media/tv/Breaking Bad (2008)/Season 1/Breaking Bad (2008) - S01E01.mkv
-                        # ==========================================
-                        try:
-                            logger.info(f"[ORG] 源文件路径: {file_path}")
-
-                            os.makedirs(target_dir, exist_ok=True)
-
-                            success, link_type = SmartLink.create_link(file_path, target_path)
-                            if success:
-                                logger.info(f"[ORG] 归档成功 ({link_type}): {target_path}")
-
-                                if link_type == "already_exists":
-                                    logger.info(f"[ORG] 文件已存在，跳过元数据重复下载，直接复用: {target_path}")
-                                    local_poster_path = None
-                                    for poster_name in ["poster.jpg", "poster.png"]:
-                                        candidate = os.path.join(metadata_dir, poster_name)
-                                        if os.path.exists(candidate):
-                                            local_poster_path = candidate
-                                            break
-                                else:
-                                    meta_manager = MetadataManager(tmdb_api_key, language="zh-CN" if poster_lang == "zh" else "en-US")
-
-                                    nfo_filename = "movie.nfo" if refined_type == "movie" else "tvshow.nfo"
-                                    nfo_path = os.path.join(metadata_dir, nfo_filename)
-                                    try:
-                                        nfo_ok = meta_manager.generate_nfo(
-                                            tmdb_id=str(tmdb_id),
-                                            media_type=refined_type,
-                                            output_path=nfo_path,
-                                            title=title,
-                                            year=year
-                                        )
-                                        if nfo_ok:
-                                            logger.info(f"[STORAGE] NFO 写入成功: {nfo_path}")
-                                        else:
-                                            logger.warning(f"[STORAGE] NFO 写入失败，已跳过: {nfo_path}")
-                                    except Exception as nfo_err:
-                                        logger.warning(f"[STORAGE] NFO 生成异常，已跳过: {nfo_err}")
-
-                                    local_poster_path = None
-                                    try:
-                                        local_poster_path = meta_manager.download_poster(
-                                            tmdb_id=str(tmdb_id),
-                                            media_type=refined_type,
-                                            output_dir=metadata_dir,
-                                            title=title
-                                        )
-                                        if local_poster_path:
-                                            logger.info(f"[STORAGE] 海报写入成功: {local_poster_path}")
-                                        else:
-                                            logger.warning(f"[STORAGE] 海报下载失败，DB 写入不受影响")
-                                    except Exception as poster_err:
-                                        logger.warning(f"[STORAGE] 海报下载异常，已跳过: {poster_err}")
-
-                                    try:
-                                        fanart_path = meta_manager.download_fanart(
-                                            tmdb_id=str(tmdb_id),
-                                            media_type=refined_type,
-                                            output_dir=metadata_dir,
-                                            title=title
-                                        )
-                                        if fanart_path:
-                                            logger.info(f"[STORAGE] Fanart 写入成功: {fanart_path}")
-                                    except Exception as fanart_err:
-                                        logger.warning(f"[STORAGE] Fanart 下载异常，已跳过: {fanart_err}")
-
-                            else:
-                                logger.error(f"[ORG] 归档失败: {link_type}")
-                                target_path = None
-                                local_poster_path = None
-
-                        except Exception as org_error:
-                            logger.error(f"[ORG] [FAIL] 归档流程异常: {org_error}", exc_info=True)
-                            target_path = None
-                            local_poster_path = None
-                    # ── 就地补录/归档全链路 结束 ──
-
-                    db.update_task_title_year(
-                        task_id=task_id,
-                        title=title,
-                        year=year,
-                        season=season_num if refined_type == "tv" else None
-                    )
-                    db.update_task_status(
-                        task_id=task_id,
-                        status="archived",
-                        tmdb_id=int(tmdb_id),
-                        imdb_id=imdb_id if imdb_id else "",
-                        target_path=target_path,
-                        local_poster_path=local_poster_path,
-                        task_type=refined_type
-                    )
-
-                    logger.info(f"[TMDB] 已校准任务 {task_id} 的媒体类型为: {refined_type}")
-
-                    # ==========================================
-                    # 🎁 字幕白嫖（Local Subtitle Detection）
-                    # ==========================================
-                    # ── 业务链路 ──
-                    # 1. 获取字幕检测路径（优先使用 target_path）-> 2. 调用本地字幕检测函数 -> 
-                    # 3. 若发现本地字幕则标记为 success -> 4. 否则标记为 pending（等待搜索）
-                    # 
-                    # 设计目标：归档后立即检测本地字幕，避免重复搜索
-                    # 
-                    # 检测策略：
-                    # 1. 严格匹配：视频文件名 + 字幕扩展名（.srt/.ass/.vtt）
-                    # 2. 通配匹配：视频文件名.*.srt（支持多语言字幕）
-                    # 3. 模糊匹配：同目录下任何字幕文件（电影）或季集号匹配（剧集）
-                    # 
-                    # 支持的字幕格式：
-                    # - .srt（SubRip）
-                    # - .ass（Advanced SubStation Alpha）
-                    # - .vtt（WebVTT）
-                    # - .sub/.idx（VobSub）
-                    # 
-                    # 优势：
-                    # - 零 API 消耗：无需调用 OpenSubtitles API
-                    # - 即时反馈：归档后立即显示字幕状态
-                    # - 支持手动字幕：用户自行添加的字幕也能识别
-                    # ==========================================
-                    # ── Step 1: 获取字幕检测路径 ──
-                    # 业务链路：1. 优先使用 target_path（已归档路径）-> 2. 降级到 task_file_path（原始路径）
-                    _sub_check_path = target_path or task_file_path
-                    
-                    # ── Step 2: 检测本地字幕 ──
-                    # 业务链路：1. 调用本地字幕检测函数 -> 2. 传入支持的字幕扩展名列表 -> 
-                    # 3. 返回是否发现字幕的布尔值
-                    if _sub_check_path and _check_local_subtitles(_sub_check_path, sub_exts=_parse_sub_exts(db.get_config("supported_subtitle_exts", ""))):
-                        # ── Step 3: 发现本地字幕 ──
-                        # 业务链路：1. 记录日志 -> 2. 更新 sub_status 为 success -> 3. 跳过后续字幕搜索
-                        logger.info(f"[SUBTITLE] [白嫖] 发现本地字幕，直接标记 success -> {_sub_check_path}")
-                        db.update_task_sub_status(task_id, "success")
-                    else:
-                        # ── Step 4: 未发现本地字幕 ──
-                        # 业务链路：1. 更新 sub_status 为 pending -> 2. 等待后续字幕搜索任务处理
-                        db.update_task_sub_status(task_id, "pending")
-
-                    success_count += 1
-                else:
-                    db.update_task_status(task_id=task_id, status="failed")
-                    failed_count += 1
-                    logger.warning(f"[TMDB] 匹配失败: 未找到匹配结果 - {refined_query}")
-
-                processed += 1
-                time.sleep(0.3)
-
-            except Exception as e:
+            is_success, is_failed = _process_single_task(
+                db=db,
+                scraper=scraper,
+                ai_agent=ai_agent,
+                rename_lang=rename_lang,
+                poster_lang=poster_lang,
+                tmdb_api_key=tmdb_api_key,
+                task=task,
+            )
+            if is_success:
+                success_count += 1
+            if is_failed:
                 failed_count += 1
-                logger.error(f"[TMDB] 匹配失败: {str(e)}")
-                try:
-                    db.update_task_status(task_id=task.get("id"), status="failed")
-                except Exception:
-                    pass
-                continue
+            processed += 1
 
         _update_library_counts()
 
+        import time
+        scrape_all_status["is_running"] = False
         scrape_all_status["processed_count"] = processed
         scrape_all_status["last_run_time"] = time.time()
 
-        logger.info(f"[TMDB] 全量刮削完成，已处理 {processed}/{count} 个任务（成功: {success_count}, 失败: {failed_count}）")
+        logger.info(f"[TMDB] 全量刮削完成，已处理 {processed}/{count} 个任务（成功: {success_count}, 失败: {failed_count})")
 
     except Exception as e:
         scrape_all_status["error"] = str(e)
@@ -891,6 +201,772 @@ def perform_scrape_all_task_sync():
         _scrape_entry_lock.release()
 
 
+def _step_nfo_shortcut(db, task: dict, file_path: str, task_id, clean_name: str) -> bool:
+    """
+    原子步骤 1: NFO 短路拦截（双轨隔离 — 自动刮削轨）
+
+    业务链路：1. 查找本地 NFO 文件 -> 2. 解析 NFO 获取 TMDB ID / IMDb ID ->
+    3. 若成功则跳过 AI 提炼和 TMDB 搜索 -> 4. 直接更新 DB 并归档 ->
+    5. 若失败则降级走正常刮削流程
+    由 nfo_parser.py 提供全兼容解析（Neon + TMM 3.1.x）
+    绝对禁止调用 AI Agent 和 TMDB 搜索
+
+    Returns:
+        True  — 拦截成功，主流程应直接 return True, False
+        False — 拦截未命中，降级走正常刮削流程
+    """
+    if not file_path:
+        return False
+    from app.services.metadata.nfo_parser import find_nfo, parse_nfo as _parse_nfo
+    _nfo_path = find_nfo(file_path)
+    if not _nfo_path:
+        return False
+    try:
+        _nfo = _parse_nfo(_nfo_path)
+        _nfo_tmdb_id = _nfo.get("tmdb_id")
+        _nfo_imdb_id = _nfo.get("imdb_id") or ""
+        _nfo_title   = _nfo.get("title") or ""
+        _nfo_year    = _nfo.get("year") or ""
+        if not _nfo_tmdb_id:
+            return False
+        logger.info(
+            f"[NFO] 短路拦截成功: task={task_id}, "
+            f"title='{_nfo_title}', tmdb={_nfo_tmdb_id}, imdb={_nfo_imdb_id}"
+        )
+        # 检查同目录海报
+        _nfo_dir = str(Path(_nfo_path).parent)
+        _nfo_poster = None
+        for _pn in ["poster.jpg", "poster.png"]:
+            _pc = os.path.join(_nfo_dir, _pn)
+            if os.path.exists(_pc):
+                _nfo_poster = _pc
+                break
+        _has_sub = _check_local_subtitles(
+            file_path,
+            sub_exts=_parse_sub_exts(db.get_config("supported_subtitle_exts", ""))
+        )
+        # 短路分支属于“终态闭环”路径：避免 pending 泄漏导致无限跳过循环
+        _sub_status = "success"
+        _is_arc = task.get("is_archive", False)
+        db.update_any_task_metadata(
+            task_id, _is_arc,
+            imdb_id=_nfo_imdb_id,
+            tmdb_id=_nfo_tmdb_id,
+            title=_nfo_title or clean_name,
+            year=_nfo_year or None,
+            sub_status=_sub_status
+        )
+        # 热表任务需调用 update_task_status 触发归档
+        if not _is_arc:
+            # is_active 默认 1，但此处强制回写确保状态机闭环（防止历史数据被手动停用后永远 pending）
+            try:
+                db.update_task_is_active(task_id, 1)
+            except Exception:
+                pass
+            db.update_task_title_year(
+                task_id=task_id,
+                title=_nfo_title or clean_name,
+                year=_nfo_year or None,
+                season=task.get("season") if task.get("type") == "tv" else None
+            )
+            db.update_task_status(
+                task_id=task_id,
+                status="archived",
+                tmdb_id=int(_nfo_tmdb_id),
+                imdb_id=_nfo_imdb_id,
+                target_path=file_path,
+                sub_status=_sub_status,
+                local_poster_path=_nfo_poster,
+                task_type=task.get("type", "movie")
+            )
+        return True
+    except Exception as _nfo_err:
+        logger.warning(f"[NFO] 解析失败，降级走正常刮削流程: {_nfo_err}")
+        return False
+
+
+def _step_ai_extraction(
+    db,
+    ai_agent,
+    task: dict,
+    task_id,
+    file_name: str,
+    file_path: str,
+    clean_name: str,
+    media_type: str,
+) -> tuple:
+    """
+    原子步骤 2: AI 提炼（文件名清理 + AI 识别 + 路径权威判断）
+
+    业务链路：1. 调用 AI Agent 分析文件名 -> 2. 提取查询词、年份、类型 ->
+    3. 若 AI 失败则降级使用正则清洗名 -> 4. 路径权威优先（不被 AI 覆盖）->
+    5. 年份物理验证（防止 AI 推断错误年份）
+
+    Returns:
+        (refined_query, refined_year, refined_type)
+    """
+    raw_filename = file_name or file_path.split('\\')[-1].split('/')[-1]
+    from app.services.scraper.cleaner import MediaCleaner as _MC
+    cleaned_filename = _MC(db_manager=db).clean_name(raw_filename)
+    if not cleaned_filename:
+        cleaned_filename = raw_filename
+    logger.info(f"[RegexLab] 物理正则去噪完成: '{raw_filename}' -> '{cleaned_filename}'")
+
+    # 业务链路：1. 调用 AI Agent 分析文件名 -> 2. 提取查询词、年份、类型
+    logger.info(f"[AI] 调用 AI Agent 分析文件名: {cleaned_filename}")
+    try:
+        # 1. 异步调用 AI Agent 进行媒体识别
+        ai_result = asyncio.run(ai_agent.ai_identify_media(
+            cleaned_name=cleaned_filename,
+            full_path=file_path,
+            type_hint=media_type
+        ))
+    except Exception as ai_err:
+        logger.error(f"[AI] 识别异常: {ai_err}")
+        ai_result = None
+
+    # 2. AI 失败降级处理
+    if not ai_result or not isinstance(ai_result, dict):
+        _fallback_query = (cleaned_filename or clean_name or file_name or "").strip()
+        logger.warning(
+            f"[AI][FALLBACK] AI 分析返回 None 或非字典，任务 {task_id} 降级使用 "
+            f"正则清洗名='{_fallback_query}' + db_type='{media_type}'"
+        )
+        ai_result = {"query": _fallback_query, "type": media_type, "filename_year": "", "knowledge_year": ""}
+
+    # ── 路径权威优先：路径已定类型不被 AI 覆盖 ──
+    # 业务链路：1. 读取 AI 建议的类型 -> 2. 若路径已定类型则强制使用路径类型 ->
+    # 3. 若路径类型为空则使用 AI 建议 -> 4. 若 AI 建议非法则降级为 movie
+    ai_suggested_type = (ai_result.get("type") or "").strip().lower()
+    if media_type in ("movie", "tv"):
+        refined_type = media_type
+        if ai_suggested_type and ai_suggested_type != media_type:
+            logger.info(
+                f"[AI][PATH_AUTHORITY] 任务 {task_id}: AI 建议 type='{ai_suggested_type}' "
+                f"被路径权威覆盖，强制使用 db_type='{media_type}'"
+            )
+    else:
+        if ai_suggested_type in ("movie", "tv"):
+            refined_type = ai_suggested_type
+        else:
+            refined_type = "movie"
+            logger.warning(
+                f"[AI][FALLBACK] 任务 {task_id}: AI 返回非法 type='{ai_suggested_type}'，"
+                f"db_type 为空，最终降级为 'movie'"
+            )
+
+    # ── 搜索词校验 ──
+    # 业务链路：1. 读取 AI 返回的查询词 -> 2. 若为空则降级使用 clean_name ->
+    # 3. 记录最终使用的查询词
+    refined_query = (ai_result.get("query") or "").strip()
+    if not refined_query:
+        refined_query = (clean_name or file_name or "").strip()
+        logger.warning(
+            f"[AI][FALLBACK] 任务 {task_id}: AI 返回空 query，"
+            f"降级使用 clean_name='{refined_query}'"
+        )
+
+    # ── YEAR_MIRROR：6字段证据模型镜像校验 ────────────────────────────
+    # 从 AI 返回的两个证据字段中提取年份（旧模型不返回时默认空字符串，静默兼容）
+    filename_year  = (ai_result.get("filename_year")  or "").strip()
+    knowledge_year = (ai_result.get("knowledge_year") or "").strip()
+
+    if refined_type == "movie":
+        if filename_year and knowledge_year and filename_year == knowledge_year:
+            # 两份证据一致 → 精确过滤
+            final_year = filename_year
+            logger.info(
+                f"[YEAR_MIRROR] 任务 {task_id}: 年份校验通过 "
+                f"(文件:{filename_year} == 知识库:{knowledge_year})，使用年份过滤。"
+            )
+        elif filename_year and knowledge_year and filename_year != knowledge_year:
+            # 两份证据冲突 → 置空，执行模糊搜索
+            final_year = ""
+            logger.warning(
+                f"[YEAR_MIRROR] 冲突拦截：文件({filename_year}) vs 知识库({knowledge_year})，"
+                f"已执行置空模糊搜索。task_id={task_id}, file='{raw_filename}'"
+            )
+        elif not filename_year and knowledge_year:
+            # 单证据：仅知识库有值 → 直接使用知识库年份
+            final_year = knowledge_year
+            logger.info(
+                f"[YEAR_MIRROR] 任务 {task_id}: 文件名无年份，"
+                f"单证据使用知识库年份={knowledge_year}。"
+            )
+        else:
+            # 两份证据均为空（或仅文件名有值而知识库为空）→ 模糊搜索
+            final_year = filename_year if filename_year else ""
+            logger.debug(
+                f"[YEAR_MIRROR] 任务 {task_id}: 证据不足，"
+                f"final_year='{final_year}'，执行模糊搜索。"
+            )
+    else:
+        # TV：强制使用 knowledge_year（第一季首播年），忽略文件名年份
+        final_year = knowledge_year
+        if filename_year and knowledge_year and filename_year != knowledge_year:
+            logger.info(
+                f"[YEAR_MIRROR] 任务 {task_id}: TV 首播年对齐 "
+                f"(文件:{filename_year} → 知识库首播年:{knowledge_year})。"
+            )
+    # ── YEAR_MIRROR 结束 ──────────────────────────────────────────────
+
+    refined_year = final_year
+
+    logger.info(
+        f"[AI] 识别完成: query='{refined_query}' | final_year='{refined_year}' | "
+        f"type='{refined_type}' | filename_year='{filename_year}' | "
+        f"knowledge_year='{knowledge_year}' (db_type='{media_type}')"
+    )
+    return refined_query, refined_year, refined_type
+
+
+def _step_tmdb_search_and_dup_check(
+    db,
+    scraper,
+    task: dict,
+    task_id,
+    refined_query: str,
+    refined_year: str,
+    refined_type: str,
+    rename_lang: str,
+) -> dict | None:
+    """
+    原子步骤 3: TMDB 搜索与防重拦截
+
+    业务链路：1. 根据类型调用 TMDB 搜索 -> 2. 若剧集搜索失败则二次搜索（去集号）->
+    3. 精确匹配或宽松匹配候选结果 -> 4. 提取 TMDB ID、标题、年份
+
+    Returns:
+        dict — 包含 tmdb_id/title/year/imdb_id/season_num/episode_num 的结果字典
+        None — 未找到结果或被判定为重复/ignored（已写库），主流程应 return False, True
+    """
+    # ── TMDB 搜索与防重拦截 ──
+    # 业务链路：1. 根据类型调用 TMDB 搜索 -> 2. 若剧集搜索失败则二次搜索（去集号）->
+    # 3. 精确匹配或宽松匹配候选结果 -> 4. 提取 TMDB ID、标题、年份
+    if refined_type == "movie":
+        results = scraper.search_movie(query=refined_query, year=refined_year)
+    else:
+        results = scraper.search_tv(query=refined_query, year=refined_year)
+
+    # ── 三梯队搜索降级策略 ──────────────────────────────────────────
+    # 第一梯队（精确）：Title + Year（已在上方执行）
+    # 第二梯队（容错）：Title 完整片名，移除 Year（AI 幻觉年份时拯救正确片名）
+    # 第三梯队（模糊）：截断片名第一段，无 Year（最后手段）
+    if (not results or len(results) == 0) and refined_type == "tv" and refined_year:
+        # 第二梯队：保留完整片名，移除年份限定
+        logger.info(f"[TMDB] 剧集匹配失败（第一梯队），第二梯队：完整片名无年份搜索: '{refined_query}'")
+        results = scraper.search_tv(query=refined_query, year=None)
+
+    if (not results or len(results) == 0) and refined_type == "tv":
+        # 第三梯队：截断片名 + 无年份（原二次搜索逻辑，年份已在第二梯队移除）
+        if " " in refined_query:
+            fallback_query = refined_query.split(" ")[0]
+            logger.info(f"[TMDB] 剧集匹配失败（第二梯队），第三梯队：截断片名搜索: '{fallback_query}'")
+            results = scraper.search_tv(query=fallback_query, year=None)
+
+    if not results or len(results) == 0:
+        logger.warning(f"[TMDB] 匹配失败: 未找到匹配结果 - {refined_query}")
+        db.update_task_status(task_id=task_id, status="failed")
+        return None
+
+    # 2. 搜索结果处理与精确匹配
+    best_match = results[0]
+    query_lower = refined_query.lower().strip()
+    query_base = re.sub(r'[\s\-]+\d+$', '', query_lower).strip()
+    # 3. 遍历候选结果，寻找精确匹配或宽松匹配
+    for candidate in results:
+        orig = (candidate.get("original_title") or candidate.get("original_name") or "").lower().strip()
+        name = (candidate.get("title") or candidate.get("name") or "").lower().strip()
+        if orig == query_lower or name == query_lower:
+            best_match = candidate
+            logger.info(f"[TMDB] 精确匹配: '{candidate.get('title') or candidate.get('name')}'")
+            break
+        if query_base and (orig == query_base or name == query_base):
+            best_match = candidate
+            logger.info(f"[TMDB] 宽松匹配(去集号): '{candidate.get('title') or candidate.get('name')}'")
+            break
+
+    # 4. 提取 TMDB ID 和标题
+    tmdb_id = best_match.get("id")
+    # 根据 rename_lang 决定使用本地化标题还是原始英文标题
+    if rename_lang == "en":
+        title = (
+            best_match.get("original_title")
+            or best_match.get("original_name")
+            or best_match.get("title")
+            or best_match.get("name")
+        )
+        logger.info(f"[CONFIG] rename_lang=en，使用英文标题: {title}")
+    else:
+        title = best_match.get("title") or best_match.get("name")
+        logger.info(f"[CONFIG] rename_lang=zh，使用中文标题: {title}")
+    release_date = best_match.get("release_date") or best_match.get("first_air_date", "")
+    year = release_date.split("-")[0] if release_date else None
+    logger.info(f"[TMDB] 命中: '{title}' | TMDB_ID={tmdb_id} | 年份={year or 'N/A'} | 类型={refined_type}")
+
+    # 获取 IMDB ID
+    imdb_id = ""
+    try:
+        ext_ids = scraper.get_external_ids(str(tmdb_id), refined_type)
+        imdb_id = ext_ids.get("imdb_id", "") or ""
+        if imdb_id:
+            logger.info(f"[TMDB] IMDb ID 获取成功: {imdb_id}")
+        else:
+            logger.warning(f"[TMDB] IMDb ID 为空: tmdb_id={tmdb_id}")
+    except Exception as e:
+        logger.warning(f"[TMDB] 获取 IMDb ID 失败: {e}")
+        imdb_id = ""
+    logger.info(f"[TMDB] 匹配完成: '{title}' | TMDB={tmdb_id} | IMDB={imdb_id or 'N/A'}")
+
+    # ==========================================
+    # 🛡️ IMDb ID 金标准去噪熔断机制（支持剧集分集防重）
+    # ==========================================
+    # ── 业务链路 ──
+    # 1. 检查 IMDb ID 是否已在库中 -> 2. 若存在则标记为 ignored ->
+    # 3. 继承同源海报路径 -> 4. 跳过物理归档
+    #
+    # 设计目标：防止同一媒体被重复入库
+    #
+    # 拦截策略：
+    # - 检测到重复时，标记为 ignored 状态
+    # - 更新标题和年份（防止前端显示乱码）
+    # - 不执行物理归档，不下载海报
+    # ==========================================
+    season_num = task.get("season")
+    episode_num = task.get("episode")
+    if imdb_id and db.check_media_exists(imdb_id, refined_type, season_num, episode_num):
+        logger.info(
+            f"[SKIP] 检测到重复媒体 (IMDb: {imdb_id}, "
+            f"S{season_num}E{episode_num}) 已在库中，跳过重复归档。"
+        )
+        # 兜底：更新干净标题，防止前端显示丑陋的原始乱码
+        db.update_task_title_year(task_id, title, year)
+        # 🚨 架构师警告 (DO NOT MODIFY): 核安全边界，改动极易引发死锁或路径穿越。
+        # 当文件被判定为“物理重复”时，绝对不允许直接 return 或仅调用 `update_task_status`。
+        # 必须调用 `mark_task_as_ignored_and_inherit`，该调用具有“原子语义”：
+        #   1) 跨表查找同源已归档任务的 `local_poster_path`
+        #   2) 将 `ignored` 状态 + `local_poster_path` 一次性写回 DB
+        # 若拆分/内联/省略此调用，前端将出现破图（ignored 的 VHS 故障层失去本地海报锚点 → 白板空图）。
+        db.mark_task_as_ignored_and_inherit(
+            task_id=task_id,
+            imdb_id=imdb_id,
+            media_type=refined_type,
+            season=season_num,
+            episode=episode_num,
+            tmdb_id=int(tmdb_id) if tmdb_id else None,
+        )
+        # 🚨 架构师警告结束（保持原子调用，不要拆分） 
+        return None
+
+    return {
+        "tmdb_id": tmdb_id,
+        "title": title,
+        "year": year,
+        "imdb_id": imdb_id,
+        "season_num": season_num,
+        "episode_num": episode_num,
+    }
+
+
+def _step_archive_and_metadata(
+    db,
+    task: dict,
+    task_id,
+    file_path: str,
+    tmdb_api_key: str,
+    poster_lang: str,
+    refined_type: str,
+    tmdb_data: dict,
+) -> str | None:
+    """
+    原子步骤 4: 就地补录 / 归档全链路 + NFO/海报写入
+
+    业务链路：1. 检查文件是否来自 library 路径或已归档 -> 2. 若是则进入就地补录模式 ->
+    3. 计算元数据目录（剧集需上升一级）-> 4. 写入 NFO 和海报 ->
+    5. 更新 DB 元数据（不移动文件）
+
+    Returns:
+        target_path — 最终归档路径
+        None        — 归档失败或路径已被占用（ignored），主流程应 return False, True
+    """
+    tmdb_id     = tmdb_data["tmdb_id"]
+    title       = tmdb_data["title"]
+    year        = tmdb_data["year"]
+    imdb_id     = tmdb_data["imdb_id"]
+    season_num  = tmdb_data["season_num"]
+    episode_num = tmdb_data["episode_num"]
+
+    task_status      = task.get("status", "")
+    task_file_path   = task.get("path", "")
+    _is_library_file = False
+
+    # ==========================================
+    # 🏥 就地补录检测（In-Place Metadata Injection）
+    # ==========================================
+    # ── 业务链路 ──
+    # 1. 检查文件是否来自 library 路径或已归档 -> 2. 若是则进入就地补录模式 ->
+    # 3. 计算元数据目录（剧集需上升一级）-> 4. 写入 NFO 和海报 ->
+    # 5. 更新 DB 元数据（不移动文件）
+    #
+    # 就地补录 vs 归档全链路：
+    # - 就地补录：文件已在媒体库，仅写入 NFO 和海报，不移动文件
+    # - 归档全链路：文件在下载目录，需要移动到媒体库并写入元数据
+    # ==========================================
+
+    # ── Step 1: 检查文件是否来自 library 路径 ──
+    # 业务链路：1. 读取所有配置的 library 路径 -> 2. 规范化路径格式 ->
+    # 3. 检查文件是否在 library 路径下
+    all_cfg = db.get_all_config()
+    _lib_paths = [
+        os.path.normpath(p.get("path", "")).lower()
+        for p in all_cfg.get("paths", [])
+        if p.get("type") == "library" and p.get("enabled", False) and p.get("path")
+    ]
+    _file_norm = os.path.normpath(task_file_path).lower()
+    if task_status == "archived" or any(_file_norm.startswith(lp) for lp in _lib_paths):
+        _is_library_file = True
+
+    target_path       = None
+    local_poster_path = None
+    metadata_dir      = None
+    target_dir        = None
+
+    # ── Step 2: 就地补录模式处理 ──
+    # 业务链路：1. 若文件来自 library 则进入就地补录模式 -> 2. 计算元数据目录 ->
+    # 3. 若为剧集则上升一级到剧集根目录 -> 4. 设置 target_path 为当前路径
+    if _is_library_file:
+        logger.info(f"[ORG] 就地补录模式：文件来自 library 路径或已归档，仅更新元数据")
+        metadata_dir = os.path.dirname(task_file_path)
+        # 🚀 剧集目录层级修正：必须将 NFO 和海报写在剧集根目录，而不是 Season 文件夹里
+        import re as _re_meta
+        if _re_meta.match(r'^(Season|S)\s*\d+$|^Specials$', os.path.basename(metadata_dir), _re_meta.IGNORECASE):
+            metadata_dir = os.path.dirname(metadata_dir)
+        target_path = task_file_path
+    else:
+        # ── 归档全链路（Archive Full Pipeline）──
+        # 业务链路：1. 获取媒体库根路径 -> 2. 构建目标目录结构 ->
+        # 3. 生成目标文件名 -> 4. 计算元数据目录 -> 5. 移动文件到媒体库
+        #
+        # 电影目录结构：/media/movies/The Matrix (1999)/The Matrix (1999).mkv
+        # 剧集目录结构：/media/tv/Breaking Bad (2008)/Season 1/Breaking Bad (2008) - S01E01.mkv
+        # 元数据位置：电影 movie.nfo + poster.jpg；剧集 tvshow.nfo + poster.jpg
+        library_root = db.get_active_library_path(refined_type)
+        logger.info(f"[ORG] 媒体库根路径: {library_root}")
+        file_ext = os.path.splitext(file_path)[1]
+        from app.services.scraper.cleaner import MediaCleaner as _MCOrg
+        safe_title = _MCOrg.sanitize_filename(title)
+        logger.info(f"[ORG] 标题净化: '{title}' -> '{safe_title}'")
+        season_num = season_num or 1
+
+        # ── Step 1: 电影归档 ──
+        # 业务链路：1. 构建文件夹名（标题 + 年份）-> 2. 生成目标文件名 ->
+        # 3. 计算元数据目录（与文件夹相同）
+        if refined_type == "movie":
+            folder_name     = f"{safe_title} ({year})" if year else safe_title
+            target_dir      = os.path.join(library_root, folder_name)
+            target_filename = f"{folder_name}{file_ext}"
+            target_path     = os.path.join(target_dir, target_filename)
+            metadata_dir    = target_dir
+        else:
+            # ── Step 2: 剧集归档 ──
+            # 业务链路：1. 构建剧集根目录（标题 + 年份）-> 2. 从路径补充季号 ->
+            # 3. 构建 Season 子目录 -> 4. 生成目标文件名（S##E##格式）->
+            # 5. 计算元数据目录（剧集根目录）
+            folder_name = f"{safe_title} ({year})" if year else safe_title
+            episode_num = episode_num or 1
+            if season_num == 1 and file_path:
+                for _part in Path(file_path).parts:
+                    _m = re.search(r'(?:Season|S)\s*(\d{1,2})\b', _part, re.IGNORECASE)
+                    if _m:
+                        _path_season = int(_m.group(1))
+                        if _path_season != 1:
+                            season_num = _path_season
+                            logger.info(f"[ORG] 从路径补充季号: {file_path} -> season={season_num}")
+                        break
+            season_folder   = f"Season {int(season_num)}"
+            show_root_dir   = os.path.join(library_root, folder_name)
+            target_dir      = os.path.join(show_root_dir, season_folder)
+            metadata_dir    = show_root_dir
+            target_filename = f"{folder_name} - S{season_num:02d}E{episode_num:02d}{file_ext}"
+            target_path     = os.path.join(target_dir, target_filename)
+
+        # 物理路径安全检查（路径防穿越校验）
+        try:
+            _resolved_target = Path(target_path).resolve()
+            _resolved_lib    = Path(library_root).resolve()
+            _resolved_target.relative_to(_resolved_lib)
+        except ValueError:
+            logger.error(f"[SECURITY] 路径穿越拦截: {target_path}")
+            db.update_task_status(task_id=task_id, status="failed")
+            return None
+
+    logger.info(f"[ORG] 目标路径: {target_path}")
+
+    # 2. 统一执行防重拦截并提取海报
+    if db.check_task_exists_by_path(target_path):
+        logger.info(f"[SKIP] 目标路径已被存量库占用，拦截重复翻译入库 -> {target_path}")
+        local_poster_path = None
+        for poster_name in ["poster.jpg", "poster.png"]:
+            candidate = os.path.join(metadata_dir, poster_name)
+            if os.path.exists(candidate):
+                local_poster_path = candidate
+                logger.info(f"[SKIP] 复用存量库海报: {local_poster_path}")
+                break
+        db.update_task_title_year(task_id, title, year)
+        _is_arc = task.get("is_archive", False)
+        if _is_arc:
+            db.update_any_task_metadata(
+                task_id=task_id, is_archive=True,
+                imdb_id=imdb_id,
+                tmdb_id=str(tmdb_id) if tmdb_id else None,
+                title=title, year=year,
+                target_path=target_path,
+                local_poster_path=local_poster_path,
+                sub_status="success",
+            )
+        else:
+            # 热表任务：确保 continue/return 前持久化终态，避免 pending 泄漏
+            try:
+                db.update_task_is_active(task_id, 1)
+            except Exception:
+                pass
+        db.update_task_status(
+            task_id=task_id, status="ignored",
+            tmdb_id=int(tmdb_id) if tmdb_id else None,
+            imdb_id=imdb_id, target_path=target_path,
+            local_poster_path=local_poster_path,
+            sub_status="success",
+        )
+        return None
+
+    # 3. 如果没被拦截，执行物理操作和元数据写入
+    if _is_library_file:
+        # 就地补录：不移动文件，仅写入元数据
+        try:
+            meta_manager = MetadataManager(tmdb_api_key, language="zh-CN" if poster_lang == "zh" else "en-US")
+            nfo_filename = "movie.nfo" if refined_type == "movie" else "tvshow.nfo"
+            nfo_path = os.path.join(metadata_dir, nfo_filename)
+            try:
+                nfo_ok = meta_manager.generate_nfo(
+                    tmdb_id=str(tmdb_id), media_type=refined_type,
+                    output_path=nfo_path, title=title, year=year
+                )
+                if nfo_ok:
+                    logger.info(f"[STORAGE] 就地补录 NFO 写入成功: {nfo_path}")
+            except Exception as nfo_err:
+                logger.warning(f"[STORAGE] 就地补录 NFO 生成异常，已跳过: {nfo_err}")
+            try:
+                local_poster_path = meta_manager.download_poster(
+                    tmdb_id=str(tmdb_id), media_type=refined_type,
+                    output_dir=metadata_dir, title=title
+                )
+                if local_poster_path:
+                    logger.info(f"[STORAGE] 就地补录海报写入成功: {local_poster_path}")
+            except Exception as poster_err:
+                logger.warning(f"[STORAGE] 就地补录海报下载异常，已跳过: {poster_err}")
+            try:
+                meta_manager.download_fanart(
+                    tmdb_id=str(tmdb_id), media_type=refined_type,
+                    output_dir=metadata_dir, title=title
+                )
+            except Exception as fanart_err:
+                logger.warning(f"[STORAGE] 就地补录 Fanart 下载异常，已跳过: {fanart_err}")
+        except Exception as inplace_err:
+            logger.error(f"[ORG] 就地补录流程异常: {inplace_err}", exc_info=True)
+
+        # 🚀 存量文件轻量级更新：如果是 archived 任务补充 imdb_id，不执行物理搬运
+        if task.get("status") == "archived":
+            logger.info(f"[ORG] 存量库文件已补齐 IMDb ID: {imdb_id}，更新元数据即可")
+            _is_arc = task.get("is_archive", False)
+            db.update_any_task_metadata(
+                task_id, _is_arc,
+                imdb_id=imdb_id if imdb_id else None,
+                tmdb_id=str(tmdb_id) if tmdb_id else None,
+                sub_status="pending", title=title, year=year
+            )
+            return target_path
+    else:
+        # ==========================================
+        # 🚀 归档全链路（Full Archive Pipeline）
+        # ==========================================
+        # 设计目标：将下载目录中的文件归档到媒体库，并补充元数据
+        #
+        # 完整流程：1. 创建目标目录 -> 2. SmartLink（硬链接>软链接>复制）->
+        # 3. 生成 NFO -> 4. 下载海报 -> 5. 下载 Fanart -> 6. 更新数据库
+        # ==========================================
+        try:
+            logger.info(f"[ORG] 源文件路径: {file_path}")
+            os.makedirs(target_dir, exist_ok=True)
+            success, link_type = SmartLink.create_link(file_path, target_path)
+            if success:
+                logger.info(f"[ORG] 归档成功 ({link_type}): {target_path}")
+                if link_type == "already_exists":
+                    logger.info(f"[ORG] 文件已存在，跳过元数据重复下载，直接复用: {target_path}")
+                    for poster_name in ["poster.jpg", "poster.png"]:
+                        candidate = os.path.join(metadata_dir, poster_name)
+                        if os.path.exists(candidate):
+                            local_poster_path = candidate
+                            break
+                else:
+                    meta_manager = MetadataManager(tmdb_api_key, language="zh-CN" if poster_lang == "zh" else "en-US")
+                    nfo_filename = "movie.nfo" if refined_type == "movie" else "tvshow.nfo"
+                    nfo_path = os.path.join(metadata_dir, nfo_filename)
+                    try:
+                        nfo_ok = meta_manager.generate_nfo(
+                            tmdb_id=str(tmdb_id), media_type=refined_type,
+                            output_path=nfo_path, title=title, year=year
+                        )
+                        if nfo_ok:
+                            logger.info(f"[STORAGE] NFO 写入成功: {nfo_path}")
+                        else:
+                            logger.warning(f"[STORAGE] NFO 写入失败，已跳过: {nfo_path}")
+                    except Exception as nfo_err:
+                        logger.warning(f"[STORAGE] NFO 生成异常，已跳过: {nfo_err}")
+                    try:
+                        local_poster_path = meta_manager.download_poster(
+                            tmdb_id=str(tmdb_id), media_type=refined_type,
+                            output_dir=metadata_dir, title=title
+                        )
+                        if local_poster_path:
+                            logger.info(f"[STORAGE] 海报写入成功: {local_poster_path}")
+                        else:
+                            logger.warning(f"[STORAGE] 海报下载失败，DB 写入不受影响")
+                    except Exception as poster_err:
+                        logger.warning(f"[STORAGE] 海报下载异常，已跳过: {poster_err}")
+                    try:
+                        fanart_path = meta_manager.download_fanart(
+                            tmdb_id=str(tmdb_id), media_type=refined_type,
+                            output_dir=metadata_dir, title=title
+                        )
+                        if fanart_path:
+                            logger.info(f"[STORAGE] Fanart 写入成功: {fanart_path}")
+                    except Exception as fanart_err:
+                        logger.warning(f"[STORAGE] Fanart 下载异常，已跳过: {fanart_err}")
+            else:
+                logger.error(f"[ORG] 归档失败: {link_type}")
+                target_path = None
+                local_poster_path = None
+        except Exception as org_error:
+            logger.error(f"[ORG] [FAIL] 归档流程异常: {org_error}", exc_info=True)
+            target_path = None
+            local_poster_path = None
+    # ── 就地补录/归档全链路 结束 ──
+
+    db.update_task_title_year(
+        task_id=task_id, title=title, year=year,
+        season=season_num if refined_type == "tv" else None
+    )
+    db.update_task_status(
+        task_id=task_id, status="archived",
+        tmdb_id=int(tmdb_id), 
+
+        imdb_id=imdb_id if imdb_id else "",
+        target_path=target_path,
+        local_poster_path=local_poster_path,
+        task_type=refined_type
+    )
+    logger.info(f"[TMDB] 已校准任务 {task_id} 的媒体类型为: {refined_type}")
+    return target_path
+
+
+def _process_single_task(
+    db,
+    scraper,
+    ai_agent,
+    rename_lang: str,
+    poster_lang: str,
+    tmdb_api_key: str,
+    task: dict,
+) -> tuple:
+    """
+    流水线编排器 (Orchestrator)
+
+    ── 业务链路总览 ──
+    NFO 短路拦截 -> 存量字幕省流 -> AI 提炼 -> TMDB 搜索 ->
+    IMDb 防重熔断 -> 就地补录 / 归档全链路 -> 字幕白嫖
+
+    Returns:
+        (is_success, is_failed): 布尔值元组，供主循环累加统计
+    """
+    try:
+        clean_name = task.get("clean_name", "")
+        file_name  = task.get("file_name", "")
+        file_path  = task.get("path", "")
+        task_id    = task.get("id")
+        media_type = task.get("type", "movie")
+        logger.info(f"[TMDB] 正在处理: {clean_name or file_name} (ID: {task_id})")
+
+        # 1. NFO 短路拦截
+        if _step_nfo_shortcut(db, task, file_path, task_id, clean_name):
+            return True, False
+
+        # 2. 极致省流：存量库为补 ID 进来的任务，先看有没有字幕
+        # 业务链路：1. 检查任务是否已归档且缺 imdb_id -> 2. 检查本地是否有字幕 ->
+        # 3. 若有字幕则跳过 IMDb ID 补充刮削（节省 Token）
+        if task.get("status") == "archived" and not task.get("imdb_id"):
+            _sub_path = task.get("target_path") or file_path
+            if _sub_path and _check_local_subtitles(_sub_path, sub_exts=_parse_sub_exts(db.get_config("supported_subtitle_exts", ""))):
+                logger.info(f"[SCRAPE] 存量库本地已有字幕，跳过 IMDb ID 补充刮削，节省 Token -> {_sub_path}")
+                db.update_any_task_metadata(task_id, task.get("is_archive", False), sub_status="success")
+                return True, False
+
+        # 3. AI 提炼
+        refined_query, refined_year, refined_type = _step_ai_extraction(
+            db, ai_agent, task, task_id, file_name, file_path, clean_name, media_type
+        )
+
+        # 4. TMDB 搜索与防重拦截
+        tmdb_data = _step_tmdb_search_and_dup_check(
+            db, scraper, task, task_id,
+            refined_query, refined_year, refined_type, rename_lang
+        )
+        if not tmdb_data:
+            return False, True
+
+        # 5. 物理归档 + 元数据写入
+        target_path = _step_archive_and_metadata(
+            db, task, task_id, file_path,
+            tmdb_api_key, poster_lang, refined_type, tmdb_data
+        )
+        # 就地补录的存量 archived 任务 target_path 有值但已轻量更新，直接成功
+        # 归档失败（路径穿越或 SmartLink 失败）target_path=None 且 DB 已写 failed
+        if target_path is None and not task.get("status") == "archived":
+            return False, True
+
+        # 6. 字幕白嫖（Local Subtitle Detection）
+        # ── 业务链路 ──
+        # 1. 获取字幕检测路径（优先使用 target_path）-> 2. 调用本地字幕检测函数 ->
+        # 3. 若发现本地字幕则标记为 success -> 4. 否则标记为 pending（等待搜索）
+        #
+        # 优势：零 API 消耗，归档后立即显示字幕状态，支持手动字幕
+        _sub_check_path = target_path or file_path
+        if _sub_check_path and _check_local_subtitles(
+            _sub_check_path,
+            sub_exts=_parse_sub_exts(db.get_config("supported_subtitle_exts", ""))
+        ):
+            # ── Step 1: 发现本地字幕 ──
+            # 业务链路：1. 记录日志 -> 2. 更新 sub_status 为 success -> 3. 跳过后续字幕搜索
+            logger.info(f"[SUBTITLE] [白嫖] 发现本地字幕，直接标记 success -> {_sub_check_path}")
+            db.update_task_sub_status(task_id, "success")
+        else:
+            # ── Step 2: 未发现本地字幕 ──
+            # 业务链路：1. 更新 sub_status 为 pending -> 2. 等待后续字幕搜索任务处理
+            db.update_task_sub_status(task_id, "pending")
+
+        return True, False
+
+    except Exception as e:
+        logger.error(f"[TMDB] 匹配失败: {str(e)}")
+        try:
+            db.update_task_status(task_id=task.get("id"), status="failed")
+        except Exception:
+            pass
+        return False, True
+
+    time.sleep(0.3)
+    return False, False  # 保底返回
+
+
 # ==========================================
 # 路由端点
 # ==========================================
@@ -898,8 +974,20 @@ def perform_scrape_all_task_sync():
 @router.post("/scrape_all", response_model=ScanResponse)
 async def trigger_scrape_all(background_tasks: BackgroundTasks):
     """
-    POST /scrape_all - 手动全量刮削
-    从数据库中查询所有待刮削任务，逐一调用 TMDB 刮削
+    触发全量刮削任务（后台线程执行，快速返回）。
+
+    业务链路：
+    触发刮削 → 后台线程遍历待刮削任务 → TMDB 三梯队降级搜索 + IMDb 金标准防重 → 生成 NFO/海报/字幕状态 → 更新仪表盘计数缓存。
+
+    Args:
+        background_tasks: FastAPI 后台任务容器，用于投递 `perform_scrape_all_task_sync`（避免阻塞请求线程）。
+
+    Returns:
+        ScanResponse: 立即返回“已启动/运行中”的确认消息；真实进度通过 `GET /scrape_all/status` 轮询。
+
+    Raises:
+        HTTPException:
+            - 500: 后台任务投递失败或运行时异常。
     """
     global scrape_all_status
 
@@ -928,13 +1016,17 @@ async def trigger_scrape_all(background_tasks: BackgroundTasks):
 @router.get("/scrape_all/status")
 async def get_scrape_all_status() -> Dict[str, Any]:
     """
-    GET /scrape_all/status - 获取全量刮削任务状态
+    获取全量刮削任务状态（用于前端轮询渲染运行态）。
 
-    返回字段：
-    - is_running: 是否正在运行
-    - last_run_time: 上次运行时间（Unix 时间戳）
-    - processed_count: 已处理的任务数量
-    - error: 错误信息（如果有）
+    业务链路：
+    只读返回内存态 `scrape_all_status`，用于 UI 展示与按钮态控制；不触发 TMDB/磁盘 I/O。
+
+    Returns:
+        Dict[str, Any]:
+            - is_running: 是否正在运行
+            - last_run_time: 上次运行时间（Unix 时间戳）
+            - processed_count: 已处理的任务数量
+            - error: 错误信息（若有）
     """
     return {
         "is_running": scrape_all_status["is_running"],
@@ -1115,8 +1207,23 @@ async def search_tmdb(
     media_type: str = "movie",
 ) -> list:
     """
-    GET /search_tmdb?keyword=xxx&media_type=xxx
-    调用 TMDBAdapter.search_media，返回前 10 条结果。
+    TMDB 关键词搜索（用于手动补录的候选选择，返回 Top N）。
+
+    业务链路：
+    校验 TMDB API Key → 调用 `TMDBAdapter.search_media` → 对前 10 条做轻量映射 →
+    仅为前 5 条补充 IMDb ID（批量节流，避免 N 次外部请求拖慢响应）→ 返回候选列表。
+
+    Args:
+        keyword: 搜索关键词（Query 参数）。
+        media_type: 媒体类型（Query 参数，movie/tv）。
+
+    Returns:
+        list[dict]: 候选列表（最多 10 条），字段包含 tmdb_id/title/year/overview/poster_path/imdb_id。
+
+    Raises:
+        HTTPException:
+            - 500: 未配置 TMDB API Key。
+            - 502: TMDB 请求失败（上游不可用/响应异常）。
     """
     from app.infra.database import get_db_manager as _get_db
     db = _get_db()
@@ -1157,13 +1264,32 @@ async def manual_rebuild(
     background_tasks: BackgroundTasks,
 ) -> Dict[str, Any]:
     """
-    POST /manual_rebuild - 精准补录接口（原子操作）
-    支持 refix_nfo / refix_poster / refix_subtitle 三路独立操作。
-    
-    ── 业务链路总览 ──
-    1. 读取任务记录（热表或冷表）-> 2. 校验 target_path 有效性 -> 3. 金标准 IMDb 防重预检 -> 
-    4. 核级清理（可选）-> 5. 视频重命名 -> 6. 文件夹土木工程 -> 7. DB 同步 -> 
-    8. NFO/海报/字幕补录 -> 9. 返回重建结果
+    精准补录（manual_rebuild）：按需重建 NFO/海报/字幕，并可选核级清理。
+
+    业务链路：
+    读取任务记录（热表/冷表）→ 校验 target_path 与 library_root 安全边界 → **IMDb 金标准物理防爆护盾**预检 →
+    （可选）核级清理/视频重命名/目录土木工程 → DB 同步（含 TV 季/集号作用域护盾）→ 按开关补录 NFO/海报/字幕 →
+    返回补录结果与提示信息。
+
+    Body:
+        body: ManualRebuildRequest，关键字段：
+            - task_id: 目标任务 ID
+            - is_archive: 是否来自归档表（冷表）
+            - media_type: movie/tv
+            - refix_nfo/refix_poster/refix_subtitle: 三路补录开关
+            - tmdb_id/keyword_hint: 元数据定位（优先 tmdb_id）
+            - nuclear_reset: 是否执行核级清理
+            - season/episode: TV 季/集号（用户强制指定优先，DB 值兜底）
+        background_tasks: FastAPI 后台任务容器（用于线程化执行重操作，避免阻塞）。
+
+    Returns:
+        Dict[str, Any]: 补录结果摘要（nfo/poster/subtitle/nuclear 等状态字段）与可读 message。
+
+    Raises:
+        HTTPException:
+            - 400: 请求体缺少必要字段或任务缺少 target_path 等前置条件。
+            - 404: task_id 对应任务不存在（热表/冷表均未命中）。
+            - 500: 未配置 TMDB API Key 或内部运行时异常。
     """
     from app.infra.database import get_db_manager as _get_db
     db = _get_db()
@@ -1226,6 +1352,10 @@ async def manual_rebuild(
     new_title: str = task_record.get("title") or ""
     new_year: str = str(task_record.get("year") or "")
     new_imdb_id: str = task_record.get("imdb_id") or ""
+    # TV 任务季/集号：必须在整个 manual_rebuild 生命周期内可用（非核级模式同样需要写回 DB）
+    # 请求值优先（用户强制指定），DB 值兜底
+    task_season  = body.season  if body.season  is not None else task_record.get("season")
+    task_episode = body.episode if body.episode is not None else task_record.get("episode")
 
     # ── Step 6: 获取 TMDB 详情或搜索 ──
     # 1. 若有 tmdb_id，直接获取详情 -> 2. 若无 ID 但有关键词，执行搜索 -> 3. 提取标题、年份、IMDb ID
@@ -1270,7 +1400,14 @@ async def manual_rebuild(
             check_dir = os.path.dirname(check_dir)
         nfo_filename = "tvshow.nfo" if body.media_type == "tv" else "movie.nfo"
         nfo_path_check = Path(check_dir) / nfo_filename
-        if nfo_path_check.exists():
+        has_nfo = nfo_path_check.exists()
+        # 物理存在性二次校验：poster.* 任意存在即可视为“补录已完成”
+        has_poster = any(
+            (Path(check_dir) / name).exists()
+            for name in ("poster.jpg", "poster.png", "poster.webp")
+        )
+
+        if has_nfo:
             try:
                 import xml.etree.ElementTree as ET
                 with open(nfo_path_check, 'r', encoding='utf-8') as f:
@@ -1283,10 +1420,22 @@ async def manual_rebuild(
                                 _existing_imdb = (_uid.text or "").strip()
                                 break
                     if _existing_imdb and _existing_imdb == new_imdb_id.strip():
-                        skip_metadata = True
-                        logger.info(f"[REBUILD] 金标准校验通过: 本地已存在 IMDb ({new_imdb_id})，开启防爆护盾")
+                        # “金标准护盾”需要同时满足：ID 匹配 + 物理文件存在（缺啥补啥）
+                        shield_ok = True
+                        if body.refix_poster and not has_poster:
+                            shield_ok = False
+                            logger.info(
+                                f"[REBUILD] 金标准校验通过但物理海报缺失，解除护盾以触发补录: {check_dir}"
+                            )
+                        skip_metadata = shield_ok
+                        if skip_metadata:
+                            logger.info(f"[REBUILD] 金标准校验通过且物理完整，开启防爆护盾: imdb={new_imdb_id}")
             except Exception as _e:
                 logger.warning(f"[REBUILD] NFO 解析失败，防爆护盾离线: {_e}")
+        else:
+            # NFO 物理缺失时：绝不允许用“金标准护盾”短路 refix_nfo
+            if body.refix_nfo:
+                logger.info(f"[REBUILD] NFO 物理缺失，禁止护盾短路: {nfo_path_check}")
 
     # ── 3.5 核级重置协议（nuclear_reset=True 且有新 TMDB ID 时执行）────────
     # 业务链路：1. 物理层拦截并发 -> 2. 校验 TMDB ID 金标准 -> 3. 执行 _nuclear_clean_directory 清理非视频文件 -> 
@@ -1322,9 +1471,6 @@ async def manual_rebuild(
             rebuilt["nuclear"] = True
 
             # Step 2: 视频文件重命名
-            # 请求值优先（用户强制指定），DB 值兜底
-            task_season  = body.season  if body.season  is not None else task_record.get("season")
-            task_episode = body.episode if body.episode is not None else task_record.get("episode")
             new_video_path = _rename_video_file(
                 old_video_path, new_title, new_year,
                 body.media_type, task_season, task_episode
@@ -1515,7 +1661,7 @@ async def manual_rebuild(
                 
                 # 🛡️ 网络防火墙：为后台字幕任务添加 60 秒超时保护
                 try:
-                    await asyncio.wait_for(
+                    result = await asyncio.wait_for(
                         engine.download_subtitle_for_task(
                             db_manager=_db2,
                             file_path=_task_snap.get("path") or _tp_snap,
@@ -1527,7 +1673,28 @@ async def manual_rebuild(
                         ),
                         timeout=60.0
                     )
-                    logger.info(f"[REBUILD] 字幕搜索完成: task_id={_tid}")
+                    logger.info(f"[REBUILD] 字幕搜索完成: task_id={_tid}, result={result}")
+                    # 🔧 全表强制终态写入：
+                    # - 热表（tasks）：引擎 archive_id=None 不写库，必须手动补写
+                    # - 冷表（media_archive）：引擎只在「成功下载」时写 scraped，
+                    #   「跳过：本地已有」等分支漏写，此处统一强制覆盖
+                    ok = isinstance(result, str) and (
+                        result.startswith("成功") or "跳过" in result or "已有" in result
+                    )
+                    new_sub_status = "scraped" if ok else "missing"
+                    try:
+                        if not _is_arc and _tid:
+                            _db2.update_task_sub_status(_tid, new_sub_status)
+                            logger.info(f"[REBUILD] 热表字幕状态已强制更新: task_id={_tid}, sub_status={new_sub_status}")
+                        elif _is_arc and _tid:
+                            _db2.update_archive_sub_status(
+                                _tid,
+                                sub_status=new_sub_status,
+                                last_check=time.strftime("%Y-%m-%d %H:%M:%S")
+                            )
+                            logger.info(f"[REBUILD] 冷表字幕状态已强制更新: task_id={_tid}, sub_status={new_sub_status}")
+                    except Exception as e:
+                        logger.error(f"[REBUILD] 字幕状态写库失败: {e}")
                 except asyncio.TimeoutError:
                     logger.warning(f"[REBUILD] 字幕搜索超时（60s）: task_id={_tid}")
                     if _tid and _is_arc:
@@ -1539,6 +1706,11 @@ async def manual_rebuild(
                             )
                         except Exception as e:
                             logger.error(f"[REBUILD] 更新字幕状态失败: {e}")
+                    elif not _is_arc and _tid:
+                        try:
+                            _db2.update_task_sub_status(_tid, "failed")
+                        except Exception as e:
+                            logger.error(f"[REBUILD] 热表超时状态更新失败: {e}")
             except Exception as sub_err:
                 logger.error(f"[REBUILD] 字幕搜索失败: {sub_err}")
 

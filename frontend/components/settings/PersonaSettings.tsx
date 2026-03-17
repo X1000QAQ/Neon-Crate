@@ -24,13 +24,15 @@ export default function PersonaSettings({ t }: Props) {
     try {
       const result = await api.resetSettings('ai');
       if (result.success) {
-        alert(t('persona_reset_success'));
+        // [C-04 修复] 删除 alert()，改为安全的 console 日志，成功反馈由父层 Toast 承接
+        console.info('[PersonaSettings] reset success:', t('persona_reset_success'));
         await refreshSettings();
       } else {
-        alert(`${t('alert_save_fail')}: ${result.message || '未知错误'}`);
+        // [S-05 修复] '未知错误' → t('error_unknown')
+        console.error('[PersonaSettings] reset failed:', result.message || t('error_unknown'));
       }
     } catch (error) {
-      alert(`${t('alert_save_fail')}: ${error instanceof Error ? error.message : '未知错误'}`);
+      console.error('[PersonaSettings] reset error:', error instanceof Error ? error.message : t('error_unknown'));
     } finally {
       setResetting(false);
     }

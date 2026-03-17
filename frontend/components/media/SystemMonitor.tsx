@@ -1,11 +1,24 @@
 'use client';
 
+/**
+ * SystemMonitor — 全息虚空系统监控台（v1.0.0）
+ *
+ * 业务定位：
+ * - 只做“展示与筛选”：从 `useLogs()` 获取全量日志，前端按 tag 过滤与渲染。
+ * - 不做轮询、不做请求编排，避免监控面板反向制造系统压力。
+ *
+ * 性能约束：
+ * - 大量日志渲染使用 `useMemo` 进行派生与哈希地址（`__addr`）生成，降低重渲染抖动。
+ * - 自动滚动只在 `autoScroll=true` 时启用，避免用户回看时被强制拉回底部。
+ */
+
 import { useEffect, useRef, useMemo, useState } from 'react';
 import { Terminal, Activity } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { LogEntry } from '@/types';
 import { useLanguage } from '@/hooks/useLanguage';
 import { useLogs } from '@/hooks/useLogs';
+import { useNeuralLinkStatus } from '@/hooks/useNeuralLinkStatus';
 
 const LOG_TAGS = [
   { key: 'SCAN', labelKey: 'monitor_tag_scan' },
@@ -64,6 +77,17 @@ export default function SystemMonitor() {
   const { t } = useLanguage();
   // ✅ 从 LogContext 获取全量日志，不再自行轮询
   const { logs: allLogs } = useLogs();
+  const neural = useNeuralLinkStatus({ intervalMs: 2500 });
+  const tr = (key: string, fallback: string) => {
+    const out = (t as unknown as (k: string) => string)(key);
+    return out === key ? fallback : out;
+  };
+  const neuralStatusText =
+    `${tr('ui_quantum_state', '量子态')}: ` +
+    `${tr(`status_${neural.quantum_state}`, neural.quantum_state === 'stable' ? '稳定' : neural.quantum_state === 'syncing' ? '同步中' : neural.quantum_state === 'processing' ? '演算中' : '降级')}` +
+    ` | ` +
+    `${tr('ui_neural_link', '神经链路')}: ` +
+    `${tr(`status_${neural.neural_link}`, neural.neural_link === 'active' ? '在线' : neural.neural_link === 'offline' ? '离线' : '探活中')}`;
 
   const [tagFilters, setTagFilters] = useState<Record<string, boolean>>({
     SCAN: true, TMDB: true, SUBTITLE: true, ORG: true, CLEAN: true,
@@ -150,6 +174,9 @@ export default function SystemMonitor() {
               </div>
               <div className="text-cyber-cyan/40 text-xs font-mono mt-1 tracking-wider">
                 {t('monitor_memory_readout')}
+              </div>
+              <div className="text-cyber-cyan/50 text-[11px] font-mono mt-1 tracking-wider">
+                {neuralStatusText}
               </div>
             </div>
 

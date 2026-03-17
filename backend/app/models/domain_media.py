@@ -11,7 +11,7 @@
 - ScanResponse：扫描/任务触发的通用响应
 - Task：媒体任务完整模型（统一使用 media_type，而非数据库的 type 字段）
 """
-from typing import Optional
+from typing import Optional, Union
 from pydantic import BaseModel, Field, ConfigDict
 
 
@@ -62,12 +62,14 @@ class Task(BaseModel):
     id: int
     file_path: str
     file_name: Optional[str] = None
+    clean_name: Optional[str] = None
     media_type: str = Field(..., description="媒体类型: movie | tv")
     status: str = Field(default="pending", description="任务状态: pending | archived | failed | ignored | scraped")
     tmdb_id: Optional[int] = None
     imdb_id: Optional[str] = None
     title: Optional[str] = None
-    year: Optional[int] = None
+    # DB 层 year 可能以 TEXT 形式返回；为保持前后端契约一致，这里允许 int/str 双形态
+    year: Optional[Union[int, str]] = None
     poster_path: Optional[str] = None
     local_poster_path: Optional[str] = None
     target_path: Optional[str] = None

@@ -9,24 +9,48 @@ interface Props {
   t: (key: I18nKey) => string;
 }
 
+// [P-08 修复] Local State 缓冲层：键盘输入仅更新本地 state，
+// onBlur 失焦时才 flush 到全局 Context，彻底终结击键触发的全组件重绘。
+const API_KEYS = ['tmdb_api_key', 'os_api_key', 'radarr_api_key', 'sonarr_api_key'] as const;
+const URL_KEYS = ['radarr_url', 'sonarr_url'] as const;
+type ApiKey = typeof API_KEYS[number];
+type UrlKey = typeof URL_KEYS[number];
+type LocalKey = ApiKey | UrlKey;
+
 export default function APISettings({ t }: Props) {
   const { config, updateSetting } = useSettings();
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
 
+  // 本地缓冲 state：key → 当前输入框内容
+  const [localValues, setLocalValues] = useState<Partial<Record<LocalKey, string>>>({});
+
   if (!config) return null;
 
-  const renderKeyInput = (key: string, label: string) => {
-    const value = (config.settings[key as keyof typeof config.settings] as string) || '';
+  // 读取优先级：localValues（用户正在输入）> config.settings（全局）
+  const getVal = (key: LocalKey): string => {
+    if (key in localValues) return localValues[key] ?? '';
+    return (config.settings[key as keyof typeof config.settings] as string) || '';
+  };
+
+  const renderKeyInput = (key: ApiKey, label: string) => {
     const isVisible = focusedKey === key;
     return (
       <div className="relative">
         <label className="text-sm font-medium text-cyber-cyan block mb-2">{label}</label>
         <input
           type={isVisible ? 'text' : 'password'}
-          value={value}
-          onChange={(e) => updateSetting(key, e.currentTarget.value)}
+          value={getVal(key)}
+          onChange={(e) => {
+            // 立即提取 value，防止合成事件在异步 setState 回调执行前被 React 回收（paste 崩溃根因）
+            const val = e.currentTarget.value;
+            setLocalValues(prev => ({ ...prev, [key]: val }));
+          }}
           onFocus={() => setFocusedKey(key)}
-          onBlur={() => setFocusedKey(null)}
+          onBlur={(e) => {
+            setFocusedKey(null);
+            // onBlur 才 flush 到全局 Context
+            updateSetting(key, e.currentTarget.value);
+          }}
           placeholder={`输入 ${label}...`}
           className="w-full px-4 py-2 bg-black/30 border border-cyber-cyan/30 rounded text-cyber-cyan placeholder-gray-500 focus:outline-none focus:border-cyber-cyan/60 text-base overflow-x-auto"
           style={{ fontFamily: isVisible ? 'monospace' : 'inherit' }}
@@ -34,6 +58,24 @@ export default function APISettings({ t }: Props) {
       </div>
     );
   };
+
+  const renderUrlInput = (key: UrlKey, label: string, placeholder: string) => (
+    <div className="relative">
+      <label className="text-sm font-medium text-cyber-cyan block mb-2">{label}</label>
+      <input
+        type="text"
+        value={getVal(key)}
+        onChange={(e) => {
+            // 立即提取 value，防止合成事件在异步 setState 回调执行前被 React 回收（paste 崩溃根因）
+            const val = e.currentTarget.value;
+            setLocalValues(prev => ({ ...prev, [key]: val }));
+          }}
+        onBlur={(e) => updateSetting(key, e.currentTarget.value)}
+        placeholder={placeholder}
+        className="w-full px-4 py-2 bg-black/30 border border-cyber-cyan/30 rounded text-cyber-cyan placeholder-gray-500 focus:outline-none focus:border-cyber-cyan/60 text-base overflow-x-auto"
+      />
+    </div>
+  );
 
   return (
     <div className="space-y-6">
@@ -46,13 +88,13 @@ export default function APISettings({ t }: Props) {
         </NeuralSection>
         <NeuralSection title={t('api_radarr_section')}>
           <div className="space-y-4">
-            <NeuralInput label={t('api_radarr_url')} type="text" value={(config.settings.radarr_url as string) || ''} onChange={(e) => updateSetting('radarr_url', e.currentTarget.value)} placeholder={t('api_radarr_url_placeholder')} />
+            {renderUrlInput('radarr_url', t('api_radarr_url'), t('api_radarr_url_placeholder'))}
             {renderKeyInput('radarr_api_key', t('api_radarr_key'))}
           </div>
         </NeuralSection>
         <NeuralSection title={t('api_sonarr_section')}>
           <div className="space-y-4">
-            <NeuralInput label={t('api_sonarr_url')} type="text" value={(config.settings.sonarr_url as string) || ''} onChange={(e) => updateSetting('sonarr_url', e.currentTarget.value)} placeholder={t('api_sonarr_url_placeholder')} />
+            {renderUrlInput('sonarr_url', t('api_sonarr_url'), t('api_sonarr_url_placeholder'))}
             {renderKeyInput('sonarr_api_key', t('api_sonarr_key'))}
           </div>
         </NeuralSection>

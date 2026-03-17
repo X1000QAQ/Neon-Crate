@@ -1,13 +1,12 @@
 """
 LLM 客户端 - 双引擎支持（云端 API + 本地 Ollama）
-
 功能：
 1. 云端 API 支持（OpenAI/DeepSeek 兼容接口）
 2. 本地 Ollama 支持
 3. 自动重试机制
 4. 统一的调用接口
 5. 协议校验层：force_json 参数强制结构化输出
-6. V2.0 三阶自愈调度：asyncio 非阻塞超时 + 状态感知级联退避 + 血缘溯源
+6. v1.0.0 三阶自愈调度：asyncio 非阻塞超时 + 状态感知级联退避 + 血缘溯源
 """
 import time
 import httpx
@@ -15,33 +14,27 @@ import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
-
-# ── V2.0 参数对齐表 ────────────────────────────────────────────────
+# ── v1.0.0 参数对齐表 ──────────────────────────────────────────────
 _LOCAL_ASYNCIO_TIMEOUT = 30.0   # asyncio.wait_for 外层熔断（本地）
 _CLOUD_ASYNCIO_TIMEOUT = 20.0   # asyncio.wait_for 外层熔断（云端）
 _LOCAL_HTTPX_TIMEOUT   = 45.0   # httpx 传输层超时（1.5x asyncio，确保不先于外层断开）
 _CLOUD_HTTPX_TIMEOUT   = 30.0   # httpx 传输层超时（1.5x asyncio）
 
-
 class LLMClient:
-    """LLM 客户端 - 统一的 LLM 调用接口（V2.0 三阶自愈版）"""
-
+    """LLM 客户端 - 统一的 LLM 调用接口（v1.0.0 三阶自愈版）"""
     def __init__(self, db_manager):
         """
         初始化 LLM 客户端
-
         Args:
             db_manager: DatabaseManager 实例，用于读取配置
         """
         self.db = db_manager
-        # V2.0 血缘溯源：记录最近一次调用的引擎信息
+        # v1.0.0 血缘溯源：记录最近一次调用的引擎信息
         self.last_engine_info: dict = {}
-        logger.info("✅ [LLM] 客户端已初始化 (V2.0 三阶自愈引擎)")
-
+        logger.info("✅ [LLM] 客户端已初始化 (v1.0.0 三阶自愈引擎)")
     # ══════════════════════════════════════════════════════════════
     # 内部方法：单引擎请求执行协程（可被 asyncio.wait_for 取消）
     # ══════════════════════════════════════════════════════════════
-
     async def _call_provider(
         self,
         api_url: str,
@@ -52,26 +45,24 @@ class LLMClient:
     ) -> str:
         """
         向单个 LLM 端点发起请求（带重试）。
-
         此方法为纯 I/O 协程，可被外层 asyncio.wait_for 取消，
         取消时 httpx 连接自动关闭，不会产生资源泄露。
-
         Args:
             api_url:       端点 URL
             headers:       请求头（含 Authorization）
             payload:       请求体
             httpx_timeout: httpx 传输层超时（秒）
             retries:       重试次数
-
         Returns:
             str: LLM 响应内容
-
         Raises:
             RuntimeError: 所有重试耗尽后抛出
         """
         # 🛡️ 网络防火墙：强制 timeout 最小值为 15s，最大值为 120s
         httpx_timeout = max(15.0, min(httpx_timeout, 120.0))
+
         
+
         for attempt in range(max(retries, 1)):
             try:
                 async with httpx.AsyncClient(follow_redirects=True, timeout=httpx_timeout) as client:
@@ -98,11 +89,9 @@ class LLMClient:
                     logger.error(f"❌ [LLM] 所有重试耗尽: {e}", exc_info=True)
                     raise RuntimeError(f"LLM 调用失败: {e}")
         raise RuntimeError("LLM 调用失败: 未知错误")
-
     # ══════════════════════════════════════════════════════════════
     # 公开方法：统一入口（三阶自愈调度）
     # ══════════════════════════════════════════════════════════════
-
     async def call_llm(
         self,
         system_prompt: str,
@@ -113,13 +102,11 @@ class LLMClient:
         prefer_local: bool = False,
     ) -> str:
         """
-        调用 LLM 生成响应（V2.0 三阶自愈调度）
-
+        调用 LLM 生成响应（v1.0.0 三阶自愈调度）
         调度逻辑：
           阶段 1：路由决策 — 根据物理开关 + prefer_local 确定首选引擎
           阶段 2：首选引擎执行 — asyncio.wait_for 非阻塞超时包装
           阶段 3：状态感知级联退避 — 首选失败时检查备用引擎可用性后切换
-
         Args:
             system_prompt: 系统提示词
             user_prompt:   用户提示词
@@ -127,7 +114,6 @@ class LLMClient:
             temperature:   温度参数
             force_json:    强制 JSON 输出（仅云端注入 response_format）
             prefer_local:  True 时将本次任务卸载至本地边缘模型
-
         Returns:
             str: LLM 响应文本
         """
@@ -138,15 +124,12 @@ class LLMClient:
             if isinstance(val, bool):
                 return val
             return str(val).lower() not in ("false", "0", "no")
-
         cloud_enabled = _to_bool(self.db.get_config("llm_cloud_enabled", True), True)
         local_enabled = _to_bool(self.db.get_config("llm_local_enabled", False), False)
-
         if not cloud_enabled and not local_enabled:
             error_msg = "error: 所有 AI 推理引擎均已物理关闭，请在设置中开启至少一个引擎。"
             logger.error(f"❌ [LLM] {error_msg}")
             return error_msg
-
         # ── 阶段 1：路由决策 ──────────────────────────────────────────
         if cloud_enabled and local_enabled:
             primary_provider  = "local" if prefer_local else "cloud"
@@ -159,7 +142,6 @@ class LLMClient:
         else:
             primary_provider  = "local"
             fallback_provider = None
-
         # ── 构建 payload 工具函数 ────────────────────────────────────
         def _build_payload(provider: str) -> tuple[dict, dict, str, str]:
             """返回 (payload, headers, api_url, model)"""
@@ -184,11 +166,9 @@ class LLMClient:
                 "Content-Type":  "application/json",
             }
             return _payload, _headers, _url, _model
-
         # ── 阶段 2：执行首选引擎（asyncio.wait_for 非阻塞包装）────────
         _t0 = time.monotonic()
         primary_payload, primary_headers, primary_url, primary_model = _build_payload(primary_provider)
-
         if not primary_url:
             # 首选未配置，直接切换至备用
             if fallback_provider:
@@ -202,7 +182,6 @@ class LLMClient:
             _asyncio_timeout = _LOCAL_ASYNCIO_TIMEOUT if is_local_primary else _CLOUD_ASYNCIO_TIMEOUT
             _httpx_timeout   = _LOCAL_HTTPX_TIMEOUT   if is_local_primary else _CLOUD_HTTPX_TIMEOUT
             _retries         = 1 if is_local_primary else retries
-
             try:
                 result = await asyncio.wait_for(
                     self._call_provider(
@@ -223,7 +202,6 @@ class LLMClient:
                     f" | 耗时 {latency_ms}ms"
                 )
                 return result
-
             except asyncio.TimeoutError:
                 logger.warning(
                     f"⏱️ [LLM] {primary_provider} 协程超时（{_asyncio_timeout}s），"
@@ -231,25 +209,21 @@ class LLMClient:
                 )
             except Exception as e:
                 logger.warning(f"⚠️ [LLM] {primary_provider} 失败: {e}，触发状态感知级联退避")
-
         # ── 阶段 3：状态感知级联退避 ──────────────────────────────────
         _fallback = fallback_provider
         if _fallback is None and primary_provider == "local" and cloud_enabled:
             # 单本地模式首选失败，云端开关开启时尝试补位
             _fallback = "cloud"
-
         if _fallback:
             fb_payload, fb_headers, fb_url, fb_model = _build_payload(_fallback)
             if not fb_url:
                 error_msg = f"error: 缺失 {_fallback} URL 配置（降级补位失败）"
                 logger.error(f"❌ [LLM] {error_msg}")
                 return error_msg
-
             logger.info(f"⚡ [LLM-Fallback] {_fallback} 可用，激活补位引擎")
             _fb_asyncio = _LOCAL_ASYNCIO_TIMEOUT if _fallback == "local" else _CLOUD_ASYNCIO_TIMEOUT
             _fb_httpx   = _LOCAL_HTTPX_TIMEOUT   if _fallback == "local" else _CLOUD_HTTPX_TIMEOUT
             _fb_retries = 1 if _fallback == "local" else retries
-
             try:
                 result = await asyncio.wait_for(
                     self._call_provider(
@@ -269,11 +243,10 @@ class LLMClient:
                     f" | 最终大脑: {fb_model} | 耗时 {latency_ms}ms"
                 )
                 return result
-
             except asyncio.TimeoutError:
                 logger.error(f"❌ [LLM] 备用引擎 {_fallback} 同样超时，所有引擎均不可用")
             except Exception as e:
                 logger.error(f"❌ [LLM] 备用引擎 {_fallback} 失败: {e}")
-
         # ── 最终兜底：所有引擎均失败，由调用方（agent.py）决定降级策略 ──
         raise RuntimeError("所有 LLM 引擎均不可用，请检查配置或网络连接")
+

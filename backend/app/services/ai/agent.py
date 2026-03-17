@@ -34,7 +34,7 @@ class AIAgent:
     
     def __init__(self, db_manager):
         """
-        初始化 AI Agent (V11 寻猎者完全体)
+        初始化 AI Agent (v1.0.0 寻猎者完全体)
         
         Args:
             db_manager: DatabaseManager 实例，用于访问配置和数据
@@ -47,7 +47,7 @@ class AIAgent:
         self.monitor = MonitorService(db_manager)
         
         # 候选等待状态：key=会话标识(固定"default"), value={candidates, query, media_type}
-        logger.info("✅ [AIAgent] AI 内核已初始化 (V11 寻猎者引擎已装载)")
+        logger.info("✅ [AIAgent] AI 内核已初始化 (v1.0.0 寻猎者引擎已装载)")
     
     @property
     def ai_name(self):
@@ -558,7 +558,7 @@ class AIAgent:
         
         elif intent == self.DOWNLOAD:
             # ==========================================
-            # 🚀 V11 寻猎者引擎（Hunter Engine）
+            # 🚀 v1.0.0 寻猎者引擎（Hunter Engine）
             # ==========================================
             # 设计目标：智能下载影片，支持模糊意图和精确匹配
             # 
@@ -883,7 +883,7 @@ class AIAgent:
         if any(kw in msg_lower for kw in status_keywords):
             return {"intent": self.SYSTEM_STATUS}
         
-        # 下载意图检测（V11 寻猎者增强版）
+        # 下载意图检测（v1.0.0 寻猎者增强版）
         download_keywords = ["下载", "想看", "找片", "搜索", "download"]
         if any(kw in msg_lower for kw in download_keywords):
             # 提取片名和类型
@@ -891,7 +891,7 @@ class AIAgent:
             media_type = self._detect_media_type(message)
             year = self._extract_year(message)
             
-            # 🚀 V11 关键修复：统一使用 clean_name 键名
+            # 🚀 v1.0.0 关键修复：统一使用 clean_name 键名
             return {
                 "intent": self.DOWNLOAD,
                 "clean_name": media_name,  # 统一键名
@@ -1031,11 +1031,12 @@ class AIAgent:
             _hint = keyword_hint.strip()
             logger.info(f"[AI][KEYWORD_HINT] 使用用户提供的片名覆盖 AI 推断: '{_hint}'")
             return {
-                "query": _hint,
-                "year": "",
-                "type": (type_hint or "movie").strip().lower() or "movie",
-                "season": None,
-                "episode": None,
+                "query":          _hint,
+                "type":           (type_hint or "movie").strip().lower() or "movie",
+                "season":         None,
+                "episode":        None,
+                "filename_year":  "",
+                "knowledge_year": "",
             }
         # ══════════════════════════════════════════════════════════════
         
@@ -1078,7 +1079,7 @@ class AIAgent:
         # 🚀 第四步：解析 LLM 返回的 JSON（剔除 ```json ... ``` 包裹符号）
         data = self._parse_json_response(raw)
         
-        # ── V2.1 弹性语义审计：三级置信度分类器 ──────────────────────
+        # ── v1.0.0 弹性语义审计：三级置信度分类器 ──────────────────────
         # 幻觉词集合（触发分级处理而非直接拦截）
         _HALLUCINATION_WORDS = {
             "unknown", "n/a", "n/a.", "temp", "untitled", "null",
@@ -1094,7 +1095,7 @@ class AIAgent:
               FAIL    - query 和 year 均无效，触发云端降级
             """
             q = (d.get("query") or d.get("clean_name") or "").strip().lower()
-            y = (d.get("year") or "").strip()
+            y = (d.get("knowledge_year") or d.get("year") or "").strip()
             year_valid = bool(y and re.fullmatch(r'(18|19|20)\d{2}', y))
 
             # Level 1 — 直接放行：query 非空且不在幻觉词表，长度 ≥ 2
@@ -1117,23 +1118,24 @@ class AIAgent:
                 f"| 原始响应前 200 字符: {raw[:200]}"
             )
             return {
-                "query": _fallback_query,
-                "year": "",
-                "type": (type_hint or "movie").strip().lower() or "movie",
-                "season": None,
-                "episode": None,
+                "query":          _fallback_query,
+                "type":           (type_hint or "movie").strip().lower() or "movie",
+                "season":         None,
+                "episode":        None,
+                "filename_year":  "",
+                "knowledge_year": "",
             }
 
-        # ── V2.1 弹性审计分流 ────────────────────────────────────────
+        # ── v1.0.0 弹性审计分流 ─────────────────────────────────────
         _confidence = _classify_result(data)
 
         if _confidence == "REPAIR":
             # 🟡 静默修复：year 有价值，用 cleaned_name 补全 query，不触发降级
             _repaired_query = (cleaned_name or "").strip()
-            _year_val = (data.get("year") or "").strip()
+            _year_val = (data.get("knowledge_year") or data.get("year") or "").strip()
             logger.info(
                 f"[AI][SEMANTIC_REPAIR] query='{data.get('query')}' 为幻觉词，"
-                f"但 year='{_year_val}' 有效，自动修复 query='{_repaired_query}'"
+                f"但 knowledge_year='{_year_val}' 有效，自动修复 query='{_repaired_query}'"
             )
             data["query"] = _repaired_query
 
@@ -1145,11 +1147,12 @@ class AIAgent:
                 f"降级使用正则清洗名='{_fallback_query}' | 文件: {cleaned_name}"
             )
             return {
-                "query": _fallback_query,
-                "year": "",
-                "type": (type_hint or "movie").strip().lower() or "movie",
-                "season": None,
-                "episode": None,
+                "query":          _fallback_query,
+                "type":           (type_hint or "movie").strip().lower() or "movie",
+                "season":         None,
+                "episode":        None,
+                "filename_year":  "",
+                "knowledge_year": "",
             }
         # _confidence == "PASS": 直接继续第五步，无需任何处理
         
@@ -1203,13 +1206,15 @@ class AIAgent:
 
         logger.info(
             f"[AIAgent] AI 归档专家识别完成 -> "
-            f"query='{query}', year='{year}', type='{media_type}'"
+            f"query='{query}', filename_year='{(data.get('filename_year') or '').strip()[:4]}', "
+            f"knowledge_year='{(data.get('knowledge_year') or '').strip()[:4]}', type='{media_type}'"
         )
 
         return {
-            "query": query or (cleaned_name or "").strip(),
-            "year": year[:4] if len(year) >= 4 else year,
-            "type": media_type,
-            "season": data.get("season"),
-            "episode": data.get("episode"),
+            "query":          query or (cleaned_name or "").strip(),
+            "type":           media_type,
+            "season":         data.get("season"),
+            "episode":        data.get("episode"),
+            "filename_year":  (data.get("filename_year") or "").strip()[:4],
+            "knowledge_year": (data.get("knowledge_year") or "").strip()[:4],
         }

@@ -25,31 +25,49 @@ DEFAULT_CONFIG: dict = {
     "expert_archive_rules": (
         "核心任务：智能影视归档专家\n"
         "你负责将杂乱的影视文件路径清洗为标准的结构化数据，供 TMDB 搜索使用。\n\n"
+        "【寻猎者推理流（必须在输出前执行）】\n"
+        "特征剥离 (De-noise)：清除所有资源站（rarbg, mteam）、压制组（FRDS, WiKi）、技术规格（10bit, x265）及分辨率标签。\n"
+        "系列名降维 (Entity Alignment)：移除「前传/续集/终结篇/最终章/三部曲/第X部」等非标准说明词。案例： 蝙蝠侠前传3黑暗骑士崛起 -> 核心标题是 黑暗骑士崛起。\n"
+        "年份自愈 (Knowledge Correction)：不要机械提取数字。\n"
+        "电影：验证文件名年份与知识库是否相符。若文件名写 2005 但片子是 2006 年的《V For Vendetta》，强制纠正为 2006。\n"
+        "剧集：强制对齐首播年。即使是《庆余年 S02 (2024)》，year 必须填写第一季的首播年份 2019，以适配 TMDB first_air_date_year 索引。\n"
+        "翻译去幻觉 (No Literal Translation)：禁止单词直译。将 5 Centimeters Per Second 映射为官方译名 秒速5厘米，严禁输出 5厘米-per-秒。\n"
         "【强制输出契约 - 必须严格遵守】\n"
-        "你必须且只能输出包含以下 5 个键的 JSON 对象，禁止增减字段：\n\n"
+        "你必须且只能输出包含以下 6 个键的 JSON 对象，禁止增减字段：\n\n"
         "1. query (字符串，必填)：\n"
-        "   - 唯一的片名字段，聚合所有名称职能\n"
-        "   - 解决'是什么片子'的问题\n"
-        "   - 华语中文电影优先中文名称的铁律（最高优先级）：\n"
-        "     严禁输出英文译名、拼音或中英混合。\n"
-        "     提取时必须去除中括号[]、制作组名（HDSky/VXT/OurBits/CHD/WiKi等）等噪音。\n"
-        "     只有文件路径和文件名中完全不含中文字符或者是英美电影时，才允许使用英文。\n"
+        "   - 华语优先：华语片必须输出官方中文全称，严禁拼音或中英混合。\n"
+        "   - 英文权重：对于非华语片，若文件名含标准英文名，优先使用英文名（如 V for Vendetta），其在 TMDB 中的权重最高。\n"
+        "   - 剧集归一化：剧集只输出「系列名」，严禁带 S01 或 第1季 等字样。\n"
+        "     严禁输出英文译名、拼音或中英混合\n"
+        "   - 知名IP翻译特权：：\n"
+        "     如果你极其确定该英文是某部著名非英语作品的官方英文名（例如 Your Name 是《你的名字》，Spirited Away 是《千与千寻》），可以填入中文官方名称\n"
         "   - 英文片名规则：将点号替换为空格（The.Boys -> The Boys）\n"
         "   - 保留续集数字（如 2, 3, Part II）\n"
         "   - 绝对禁止包含年份、分辨率、编码格式等技术标签\n"
         "   - 禁止输出空字符串、None、Unknown、N/A\n\n"
-        "2. year (字符串，必填，可为空)：\n"
-        "   - 解决'哪个版本'的问题，是数据库索引的必填项\n"
-        "   - 只能填写文件名或路径中明确出现的年份（4位数字）\n"
-        "   - 无法确定时填写空字符串 \"\"，严禁推断或编造\n\n"
-        "3. type (字符串，必填)：\n"
+        "2. type (字符串，必填)：\n"
         "   - 解决'什么物种'的问题，是数据库索引的必填项\n"
         '   - 取值："movie"（电影）/ "tv"（剧集）/ "IGNORE"（纯广告/废片）\n\n'
-        "4. season (整数，可选)：\n"
+        "3. season (整数，可选)：\n"
         "   - 仅剧集需要，是剧集定位的必要索引\n"
         "   - 如果是剧集但无法确定季数，默认为 1\n\n"
-        "5. episode (整数，可选)：\n"
+        "4. episode (整数，可选)：\n"
         "   - 仅剧集需要，是剧集定位的必要索引\n\n"
+        "5. filename_year (字符串，必填，可为空)：\n"
+        "   - 你从【原始文件路径字符串】中物理看到的 4 位数字年份。\n"
+        "   - 只做机械提取，不做任何判断或纠正。\n"
+        "   - 若路径/文件名中不含任何年份数字，填写空字符串 \"\"。\n"
+        "   - 示例：路径含 'Batman.2024.1080p.mkv' → filename_year = \"2024\"\n"
+        "   - 示例：路径含 'The.Boys.S03E01.mkv' → filename_year = \"\"\n\n"
+        "6. knowledge_year (字符串，必填，可为空)：\n"
+        "   - 你基于知识库认定的该作品真实公映年份（电影）或第一季首播年份（剧集）。\n"
+        "   - 完全不依赖文件名，只依赖你的知识库。\n"
+        "   - 电影：填写该电影在院线/流媒体的真实公映年。\n"
+        "   - 剧集：无论当前是第几季，必须填写第一季的首播年份。\n"
+        "   - 若无法确定，填写空字符串 \"\"。\n"
+        "   - 示例：《V字仇杀队》→ knowledge_year = \"2006\"\n"
+        "   - 示例：《庆余年》第二季 → knowledge_year = \"2019\"（第一季首播年）\n"
+        "   - 示例：《The Boys》第三季 → knowledge_year = \"2019\"\n\n"
         "【剧集识别关键逻辑】\n"
         "遇到剧集时，query 必须是剧集名而非单集名：\n"
         "- 路径：.../进击的巨人/Season 3/S03E10.mkv\n"
@@ -66,12 +84,12 @@ DEFAULT_CONFIG: dict = {
         "无论文件名多混乱，必须给出最可能的猜测，禁止输出空字符串（IGNORE 除外）。\n"
         "宁可猜错，绝不放弃！\n\n"
         "【强制范例】\n"
-        '{"query": "刺杀小说家", "year": "2021", "type": "movie"}\n'
-        '{"query": "沙丘2", "year": "2024", "type": "movie"}\n'
-        '{"query": "凡人修仙传", "year": "", "type": "tv", "season": 1, "episode": 1}\n'
-        '{"query": "Dune Part Two", "year": "2024", "type": "movie"}\n'
-        '{"query": "The Boys", "year": "", "type": "tv", "season": 3, "episode": 10}\n'
-        '{"query": "", "year": "", "type": "IGNORE"}'
+        '{"query": "刺杀小说家", "type": "movie", "filename_year": "2021", "knowledge_year": "2021"}\n'
+        '{"query": "Batman", "type": "movie", "filename_year": "2024", "knowledge_year": "1989"}\n'
+        '{"query": "Dune Part Two", "type": "movie", "filename_year": "", "knowledge_year": "2024"}\n'
+        '{"query": "庆余年", "type": "tv", "season": 2, "episode": 1, "filename_year": "2024", "knowledge_year": "2019"}\n'
+        '{"query": "The Boys", "type": "tv", "season": 3, "episode": 10, "filename_year": "", "knowledge_year": "2019"}\n'
+        '{"query": "", "type": "IGNORE", "filename_year": "", "knowledge_year": ""}'
     ),
 
     "master_router_rules": (

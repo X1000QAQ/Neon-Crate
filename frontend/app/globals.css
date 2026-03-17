@@ -7,10 +7,10 @@
 @import url('https://fonts.googleapis.com/css2?family=Advent+Pro:wght@100;200;300;400;500;600;700&display=swap');
 
 :root {
-  /* 现有项目配色 */
-  --cyber-yellow: #f9f002; /* 标志性明黄 */
-  --cyber-cyan: #00e6f6;   /* 霓虹青 */
-  --cyber-red: #ff013c;    /* 警告红 */
+  /* v1.0.0 全局配色（Holographic Void）：霓虹青为主，黄/红仅用于强调与告警 */
+  --cyber-yellow: #f9f002; /* 强调黄（非主视觉） */
+  --cyber-cyan: #00e6f6;   /* 主色：霓虹青 */
+  --cyber-red: #ff013c;    /* 告警红 */
   --cyber-bg: #000000;    /* 纯黑底色 */
   --cyber-border: #8ae66e; /* 辅助绿 */
 
@@ -31,7 +31,7 @@
   --z-toast:      300;  /* 通知/Toast */
   --z-overlay:    9999; /* 全屏覆盖层（CRT扫描线等） */
 
-  /* Cyberpunk-2077-theme-css 关键变量 */
+  /* Holographic Void 动效变量（历史兼容保留；请勿在业务代码中新增依赖旧黄装甲组件） */
   --glitched-duration: 0.9s;
   --glitched-long-duration: 3s;
   --yellow-color: #f9f002;
@@ -54,11 +54,11 @@
   font-style: normal;
 }
 
-/* ========= 全局字体应用：Advent Pro 科技感 ========= */
+/* ========= 全局字体应用：Advent Pro（全息虚空 UI 字体基座） ========= */
 body {
   color: var(--cyber-yellow);
   font-family: 'Advent Pro', 'Orbitron', 'Segoe UI', sans-serif;
-  cursor: crosshair !important; /* 极简准星 */
+  cursor: crosshair !important; /* 极简准星（v1.0.0 统一交互质感） */
   letter-spacing: 0.5px; /* 轻微字符间距，增强科技感 */
   
   /* 纯黑底色背景 */
@@ -100,7 +100,7 @@ h1, h2 {
   letter-spacing: 3px; /* 字符间距加大至 3px */
 }
 
-/* 🎨 背景纹理：点状矩阵扫描线 ========= */
+/* 🎨 背景纹理：点状矩阵 + CRT 扫描线（Holographic Void 底噪层） ========= */
 body::before {
   content: " ";
   display: block; 
@@ -110,7 +110,7 @@ body::before {
   bottom: 0; 
   right: 0;
   
-  /* 点状矩阵纹理 + CRT 扫描线 */
+  /* 点状矩阵纹理 + CRT 扫描线（非业务态；仅视觉底噪） */
   background: 
     radial-gradient(circle, rgba(249, 240, 2, 0.03) 1px, transparent 1px),
     linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), 
@@ -124,7 +124,7 @@ body::before {
   animation: scanline-move calc(var(--glitched-long-duration) * 2) linear infinite;
 }
 
-/* ========= 🛡️ 赛博朋克全局滚动条 (Cyberpunk Scrollbar) ========= */
+/* ========= 全局滚动条（Holographic Void / Cyan） ========= */
 
 /* Webkit 内核（Chrome, Edge, Safari） */
 ::-webkit-scrollbar {
@@ -166,153 +166,91 @@ body::before {
   }
 }
 
-/* ========= Cyberpunk 按钮（装甲化精简版 - 重型黄色装甲 + 右侧能量点缀） ========= */
+/* ========= VHS/Glitch 特效（从 Demo 移植 + 动画补齐） ========= */
+@keyframes vhs-jitter {
+  0%   { transform: translate(0, 0); }
+  10%  { transform: translate(-0.5px, 0.3px); }
+  20%  { transform: translate(0.6px, -0.2px); }
+  30%  { transform: translate(-0.4px, -0.3px); }
+  40%  { transform: translate(0.3px, 0.4px); }
+  50%  { transform: translate(-0.2px, 0.2px); }
+  60%  { transform: translate(0.5px, 0); }
+  70%  { transform: translate(-0.3px, 0.2px); }
+  80%  { transform: translate(0.2px, -0.3px); }
+  90%  { transform: translate(-0.2px, 0.1px); }
+  100% { transform: translate(0, 0); }
+}
 
-button.cyberpunk,
-input[type=submit].cyberpunk, 
-a.cyberpunk {
-  --text: "R-25";
-  --background-color: var(--red-color);
-  display: block;
-  border: none;
-  border-radius: 0%;
-  font-size: 1.5rem;
-  line-height: 1.5rem;
-  letter-spacing: 3px; /* 字符间距拉大至 3px */
-  text-transform: uppercase;
-  font-weight: 700;
-  padding: 35px 75px;
-  margin: 10px 20px 10px 0px;
-  position: relative;
-  color: #fff;
-  
-  /* 🛡️ 重型黄色装甲边框（仅右侧和底部） */
-  border-right: 8px solid var(--cyber-yellow);
-  border-bottom: 5px solid var(--cyber-yellow);
-  box-shadow: 
-    8px 8px 0 rgba(249, 240, 2, 0.3),
-    0 0 20px rgba(138, 230, 110, 0.25);
-  
-  /* 🛡️ 非对称斜角裁剪 */
-  clip-path: polygon(
-    -15px 0%,
-    calc(100% + 15px) 0%,
-    calc(100% + 15px) 100%,
-    30px 100%,
-    -15px calc(100% - 45px)
+@keyframes rgb-split {
+  0%, 100% { transform: translateX(0); opacity: 0.18; }
+  50% { transform: translateX(1px); opacity: 0.26; }
+}
+
+@keyframes vhs-tracking {
+  0%   { transform: translateY(-6%); }
+  100% { transform: translateY(110%); }
+}
+
+@keyframes vhs-noise-shift {
+  0%   { transform: translate(0, 0); opacity: 0.22; }
+  30%  { transform: translate(-1px, 1px); opacity: 0.28; }
+  60%  { transform: translate(1px, -1px); opacity: 0.20; }
+  100% { transform: translate(0, 0); opacity: 0.22; }
+}
+
+.vhs-ignored {
+  animation: vhs-jitter 0.22s linear infinite;
+}
+
+.vhs-filter {
+  filter: grayscale(0.7) contrast(1.1) brightness(0.8) sepia(0.4) saturate(1.5) blur(0.5px);
+  opacity: 0.7;
+}
+
+.vhs-noise {
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+  background-size: 100px 100px;
+  animation: vhs-noise-shift 0.35s steps(2, end) infinite;
+}
+
+.vhs-scanlines {
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(0,0,0,0.5),
+    rgba(0,0,0,0.5) 2px,
+    transparent 2px,
+    transparent 5px
   );
-  
-  cursor: pointer;
-  background-color: var(--background-color);
-  outline: none;
-  display: inline-block;
+  background-size: 100% 5px;
 }
 
-/* 🔋 按钮右侧能量点缀已移除 - 纯净装甲模式 */
-
-button.cyberpunk:after,
-input[type=submit].cyberpunk:after,
-a.cyberpunk:after {
-  content: var(--text);
-  display: block;
-  position: absolute;
-  bottom: 0px;
-  right: 25px;
-  padding: 2px 2px 0px 2px;
-  font-size: 0.6rem;
-  line-height: 0.6rem;
-  color: var(--black-color);
-  background-color: var(--yellow-color);
-  border-left: 2px solid var(--border-color);
-  z-index: var(--z-badge);
-}
-
-button.cyberpunk:hover,
-a.cyberpunk:hover,
-input[type=submit].cyberpunk:hover,
-button.cyberpunk:focus,
-a.cyberpunk:focus,
-input[type=submit].cyberpunk:focus{
-  animation-name: buttonhover;
-  animation-duration: var(--glitched-duration);
-  animation-iteration-count: infinite;
-  animation-timing-function: linear;
-  
-  /* 🛡️ 悬停装甲光晕（增强版） */
-  box-shadow: 
-    10px 10px 0 rgba(249, 240, 2, 0.5),
-    0 0 30px rgba(138, 230, 110, 0.4);
-}
-
-/* 悬停时青色能量点缀已移除 - 纯净装甲模式 */
-
-@keyframes buttonhover {
-  0% {
-    transform: skew(0deg);
-  }
-  60% {
-    transform: skew(0deg);
-  }
-  61% {
-    transform: skew(10deg);
-  }
-  70% {
-    transform: skew(10deg);
-  }
-  71% {
-    transform: skew(0deg);
-  }
-  100% {
-    transform: skew(0deg);
-  }
-}
-
-
-
-/* 🔐 登录按钮特化：黄色 + 斜纹 + 纯净装甲 */
-button.cyberpunk.yellow-stripes {
-  --background-color: var(--yellow-color);
-  color: var(--black-color);
-  font-family: 'Advent Pro', sans-serif !important;
-  font-weight: 700;
-  letter-spacing: 3px;
-  background-image: repeating-linear-gradient(
-    135deg,
-    rgba(0, 0, 0, 0.3) 0px,
-    rgba(0, 0, 0, 0.3) 6px,
-    transparent 6px,
-    transparent 12px
+.vhs-tracking-bar {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255,255,255,0.10) 20%,
+    rgba(255,255,255,0.20) 50%,
+    rgba(255,255,255,0.10) 80%,
+    transparent 100%
   );
-  
-  /* 🛡️ 硬朗直角边框 */
-  border-right: 8px solid var(--cyber-yellow);
-  border-bottom: 5px solid var(--cyber-yellow);
-  box-shadow: 
-    6px 6px 0 rgba(249, 240, 2, 0.3),
-    0 0 20px rgba(249, 240, 2, 0.35);
+  transform: scaleX(1.1);
+  animation: vhs-tracking 1.4s linear infinite;
 }
 
-button.cyberpunk.yellow-stripes:hover {
-  box-shadow: 
-    8px 8px 0 rgba(249, 240, 2, 0.5),
-    0 0 30px rgba(249, 240, 2, 0.5);
-  transform: translateY(-2px);
-  filter: brightness(1.05);
+.vhs-rgb-red {
+  background: linear-gradient(90deg, #ff0000 0%, transparent 100%);
+  transform: translateX(-2px);
+  animation: rgb-split 0.18s linear infinite;
 }
 
-button.cyberpunk.btn-auth {
-  padding: 14px 20px !important;
-  font-size: 0.85rem;
-  line-height: 1.1rem;
-  width: 100%;
-  font-family: 'Advent Pro', sans-serif !important;
-  font-weight: 700;
-  letter-spacing: 2px;
+.vhs-rgb-blue {
+  background: linear-gradient(90deg, transparent 0%, #0000ff 100%);
+  transform: translateX(2px);
+  animation: rgb-split 0.18s linear infinite reverse;
 }
 
-/* ========= Cyberpunk 输入框状态反馈 + 黑客字体 ========= */
+/* ========= Global Inputs（Holographic Void） ========= */
 
-input.cyberpunk,
 input[type="text"],
 input[type="email"],
 input[type="number"],
@@ -335,8 +273,6 @@ input.password-field,
 
 /* 🔐 密码输入框 & 敏感密钥区域：强制 Hacked 黑客字体 */
 input[type="password"],
-input[type="password"].cyberpunk,
-.cyberpunk input[type="password"],
 .hacked-font,
 .secret-key-display {
   font-family: 'Hacked', monospace !important;
@@ -359,17 +295,6 @@ label.password-label,
   text-transform: uppercase;
 }
 
-/* 🎯 登录页输入框聚焦（.cyberpunk 专用）：黄色霓虹光晕 */
-input.cyberpunk:focus {
-  outline: none !important;
-  border-bottom-color: var(--cyber-yellow) !important;
-  box-shadow: 
-    0 0 0 2px var(--yellow-color-opacity),
-    0 0 12px rgba(249, 240, 2, 0.4),
-    0 0 25px rgba(249, 240, 2, 0.2) !important;
-  animation: input-glow-pulse 2.5s ease-in-out infinite;
-}
-
 /* ========= Cyan Input 豁免层：青色透明界面（MediaToolbar 等） ========= */
 .cyan-input {
   background: transparent !important;
@@ -387,7 +312,7 @@ input.cyberpunk:focus {
 }
 
 /* ========= Neural Interface Overrides (cyan, no yellow flood) ========= */
-/* 用于 SettingsHub 神经界面：避免全局 cyberpunk 输入框把文字强制染黄 */
+/* 用于 SettingsHub 神经界面：覆盖全局输入框默认样式，保持 Cyan/Neural 纯净 */
 .neural-input,
 .neural-textarea,
 .neural-select {
@@ -415,21 +340,6 @@ input.cyberpunk:focus {
   border-bottom-color: transparent !important;
   box-shadow: 0 0 20px rgba(0, 230, 246, 0.4), inset 0 0 20px rgba(0, 230, 246, 0.1) !important;
   animation: none !important;
-}
-
-@keyframes input-glow-pulse {
-  0%, 100% {
-    box-shadow: 
-      0 0 0 2px var(--yellow-color-opacity),
-      0 0 12px rgba(249, 240, 2, 0.4),
-      0 0 25px rgba(249, 240, 2, 0.2);
-  }
-  50% {
-    box-shadow: 
-      0 0 0 2px var(--yellow-color-opacity),
-      0 0 18px rgba(249, 240, 2, 0.6),
-      0 0 35px rgba(249, 240, 2, 0.3);
-  }
 }
 
 /* ========= Holographic Void Animations ========= */

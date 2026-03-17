@@ -9,6 +9,7 @@ subtitle_task.py - 字幕补完任务
 import asyncio
 import glob
 import os
+import re
 import time
 import logging
 import threading
@@ -124,6 +125,13 @@ def perform_find_subtitles_task_sync():
     """
     global find_subtitles_status
 
+    # ── 并发锁释放核安全（DO NOT MODIFY）──────────────────────────────
+    # 🚨 架构师警告 (DO NOT MODIFY): 核安全边界，改动极易引发死锁或路径穿越。
+    # - 本任务在同步线程池中运行；必须使用 `threading.Lock` 做物理并发短路。
+    # - 无论发生何种异常，都必须走到 finally，确保：
+    #   1) `find_subtitles_status["is_running"] = False`
+    #   2) 释放 `_subtitle_entry_lock`（且仅在持锁时释放，避免 RuntimeError 反向破坏自愈链路）
+    #
     # 🚀 物理级并发防重逻辑：
     # 1. 尝试非阻塞获取锁（blocking=False），若锁已被占用则立即返回，不排队、不等待，直接丢弃冗余请求。
     # 2. 检查内存状态标记位 is_running，确保逻辑与物理锁状态同步（双重防护）。
@@ -307,8 +315,9 @@ def perform_find_subtitles_task_sync():
         # - is_running 复位为 False，解除前端「运行中」UI 锁定
         # - 释放 threading.Lock，允许下一次任务进入，实现系统自愈
         find_subtitles_status["is_running"] = False
-        _subtitle_entry_lock.release()
-        _subtitle_entry_lock.release()
+        # 防御性释放：避免重复 release 导致 RuntimeError，反向破坏 finally 的“最后一公里”
+        if _subtitle_entry_lock.locked():
+            _subtitle_entry_lock.release()
 
 
 # ==========================================
@@ -318,22 +327,20 @@ def perform_find_subtitles_task_sync():
 @router.post("/find_subtitles", response_model=ScanResponse)
 async def trigger_find_subtitles(background_tasks: BackgroundTasks):
     """
-    POST /find_subtitles - 触发全量待处理字幕补完任务
+    触发全量字幕补完任务（后台线程执行，快速返回）。
 
-    功能说明：
-    - 从数据库中查询所有待字幕任务
-    - 逐一调用 OpenSubtitles API 搜索并下载
-    - 自动应用 AI 命名规范
-    - 更新数据库字幕状态
-    
-    执行模式：
-    - 后台线程执行：不阻塞 API 响应
-    - 单线程顺序处理：遵守 API 频率限制
-    - 任务间隔 5 秒：防止触发限流
-    
-    返回：
-    - 立即返回：任务已启动的确认消息
-    - 实际进度：通过 GET /find_subtitles/status 查询
+    业务链路：
+    查询待字幕任务 → 本地字幕存在性短路（白嫖拦截）→ OpenSubtitles 检索/下载 → AI 命名规范重命名 → 写回字幕状态与计数。
+
+    Args:
+        background_tasks: FastAPI 后台任务容器。内部会将同步逻辑封装进线程执行，避免阻塞事件循环。
+
+    Returns:
+        ScanResponse: 立即返回“已启动/运行中”的确认消息；真实进度通过 `GET /find_subtitles/status` 轮询。
+
+    Raises:
+        HTTPException:
+            - 500: 后台任务投递失败或运行时异常。
     """
     global find_subtitles_status
 
@@ -357,13 +364,17 @@ async def trigger_find_subtitles(background_tasks: BackgroundTasks):
 @router.get("/find_subtitles/status")
 async def get_find_subtitles_status() -> Dict[str, Any]:
     """
-    GET /find_subtitles/status - 获取查找字幕任务状态
-    
-    返回字段：
-    - is_running: 是否正在运行
-    - last_run_time: 上次运行时间（Unix 时间戳）
-    - processed_count: 已处理的任务数量
-    - error: 错误信息（如果有）
+    获取字幕补完任务状态（用于前端轮询渲染运行态）。
+
+    业务链路：
+    只读返回内存态 `find_subtitles_status`，用于 UI 展示与按钮态控制；不触发外部 API 调用。
+
+    Returns:
+        Dict[str, Any]:
+            - is_running: 是否正在运行
+            - last_run_time: 上次运行时间（Unix 时间戳）
+            - processed_count: 已处理的任务数量
+            - error: 错误信息（若有）
     """
     return {
         "is_running": find_subtitles_status["is_running"],

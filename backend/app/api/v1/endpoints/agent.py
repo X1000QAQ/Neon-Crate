@@ -67,12 +67,16 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
 
     Returns:
         ChatResponse: AI 回复文本、意图代码与可选的下载确认载荷
+
+    Raises:
+        HTTPException:
+            - 500: LLM 推理、意图分发或内部依赖（DB/适配器）发生未捕获异常。
     """
     try:
         agent = _get_agent()
         result = await agent.process_message(request.message)
 
-        # ── V2.0 血缘溯源：从 LLM 客户端读取本次调用的引擎信息 ────────────
+        # ── v1.0.0 血缘溯源：从 LLM 客户端读取本次调用的引擎信息 ─────────
         _ei = getattr(agent.llm_client, 'last_engine_info', {})
         _provider  = _ei.get('provider', '')
         _fallback  = _ei.get('fallback', False)
@@ -225,6 +229,10 @@ async def confirm_action(request: ChatRequest, background_tasks: BackgroundTasks
 
     Returns:
         ChatResponse: 执行结果文本
+
+    Raises:
+        HTTPException:
+            - 500: 下载授权执行过程中发生未捕获异常（Servarr/DB/参数解析等）。
     """
     import json
     try:

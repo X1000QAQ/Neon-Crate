@@ -1,26 +1,20 @@
 """
-config_repo.py - 配置仓储
+config_repo.py — 配置仓储（v1.0.0）
 
-职责：管理 config.json 和 secure_keys.json 的读写，
-     处理 6 个敏感密钥的自动加解密。
+职责：
+  1) 管理磁盘 `config.json`（非敏感字段）与 `secure_keys.json`（6 个敏感密钥的加密存储）
+  2) 提供统一配置读写接口（对外保持稳定，调用方零感知）
+  3) 承载 v1.0.0 的「创世自愈注入（Genesis Healing）」实现入口（`_inject_ai_defaults`）
 
-迁入方法（原 db_manager.py）：
-  - get_config              (原行 313)
-  - set_config              (原行 331)
-  - get_all_config          (原行 356)
-  - save_all_config         (原行 372)
-  - get_agent_config        (原行 685)
-  - reset_settings_to_defaults (原行 1008)
-  - _load_defaults          (原行 280) [私有辅助]
-  - _inject_ai_defaults     (原行 292) [私有辅助，由 DatabaseManager.__init__ 调用]
+核心能力：
+  - **敏感键自动加解密**：敏感密钥永不以明文写回 `config.json`
+  - **空值兜底**：读取阶段空值用 `DEFAULT_CONFIG` 保底，保证前端首次加载输入框有值
+  - **创世自愈注入（Genesis Healing）**：绕过 `get_config()` 的内存兜底层，直接读取磁盘原始配置，
+    对 7 个核心字段执行“缺啥补啥”的物理注入，幂等且绝不覆盖用户已填写的非空值
 
-Impact 分析（2026-03-12）：
-  get_config    → CRITICAL（18 impacted，12 direct，20 processes）
-  set_config    → CRITICAL（12 impacted，6 direct，16 processes）
-  get_all_config → CRITICAL（13 impacted，4 direct，15 processes）
-  迁移安全：外观层接口不变，所有调用方（agent.py、scrape_task、scan_task 等）零感知。
-
-依赖：get_crypto_manager()（来自 app.infra.security）
+🚨 架构师警告（DO NOT MODIFY）：
+  - `get_config/set_config/get_all_config/save_all_config` 属于全局依赖接口，任何语义变更都会造成大面积链路风险。
+  - ` _inject_ai_defaults()` 的“绕过兜底、直读直写磁盘”是创世自愈的必要条件，禁止回退到 `get_config()` 判空。
 """
 import json
 import os
@@ -201,20 +195,57 @@ class ConfigRepo(BaseRepository):
 
     def _inject_ai_defaults(self):
         """
-        灵魂注入：将 AI 规则注入为系统默认值。
-        仅在字段为空时注入，避免覆盖用户自定义配置。
+        创世自愈注入（Genesis Config Healing）：
+        直接读取 config.json 原始内容，检查各关键字段是否缺失或为空，
+        缺什么补什么，绝不覆盖用户已填写的非空值。
+
+        ⚠️  不能依赖 get_config() 做存在性判断：
+            get_config() 内置了 DEFAULT_CONFIG 兜底，永远不会返回空值，
+            导致注入逻辑误判「已有值」而跳过写盘，config.json 里实际是空的。
+        正确姿势：直接读取 config.json 的 settings 字典，检查原始值。
+
         由 DatabaseManager.__init__ 在初始化末尾调用。
         """
-        from app.services.scraper.cleaner import MediaCleaner  # noqa: F401
+        GENESIS_KEYS = [
+            "ai_name",
+            "ai_persona",
+            "expert_archive_rules",
+            "master_router_rules",
+            "filename_clean_regex",
+            "supported_video_exts",
+            "supported_subtitle_exts",
+        ]
 
         defaults = self._load_defaults()
-        injected_fields = []
 
-        for key in ["ai_name", "ai_persona", "expert_archive_rules", "master_router_rules", "filename_clean_regex",
-                    "supported_video_exts", "supported_subtitle_exts"]:
-            if key in defaults and not self.get_config(key, "").strip():
-                self.set_config(key, defaults[key])
-                injected_fields.append(key)
+        # ── Step 1: 读取 config.json 原始内容（绕过 get_config 兜底层）──
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    raw_config = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning(f"[ConfigRepo] config.json 读取失败，创世注入使用空配置兜底: {e}")
+                raw_config = {"settings": {}, "paths": []}
+        else:
+            # config.json 不存在 → 全量注入
+            raw_config = {"settings": {}, "paths": []}
+
+        raw_settings = raw_config.get("settings", {})
+
+        # ── Step 2: 缺啥补啥（直接比对原始 settings，而非经过兜底的 get_config）──
+        injected_fields = []
+        for key in GENESIS_KEYS:
+            raw_val = raw_settings.get(key, None)
+            # 缺失（None）或空字符串 → 注入默认值
+            if raw_val is None or (isinstance(raw_val, str) and not raw_val.strip()):
+                if key in defaults:
+                    self.set_config(key, defaults[key])
+                    injected_fields.append(key)
 
         if injected_fields:
-            logger.info(f"[ConfigRepo] 已注入 {len(injected_fields)} 个 AI 规则默认值")
+            logger.info(
+                f"[ConfigRepo] 创世自愈注入完成，补全 {len(injected_fields)} 个字段: "
+                f"{injected_fields}"
+            )
+        else:
+            logger.debug("[ConfigRepo] 创世自愈检查完毕，所有关键字段均已存在，无需注入。")

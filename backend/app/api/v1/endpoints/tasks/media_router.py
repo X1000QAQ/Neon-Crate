@@ -64,16 +64,30 @@ async def get_all_tasks(
     db: DbDep = None,
 ):
     """
-    GET /tasks - 获取所有任务列表（支持关键词搜索、状态过滤、媒体类型过滤）
+    获取任务列表（支持搜索/过滤/分页，返回前端统一 Task 契约）。
 
-    参数：
-    - search: 可选，关键词匹配
-    - status: 可选，状态过滤（pending/success/failed/archived/all）
-    - media_type: 可选，媒体类型过滤（movie/tv）
-    - page/page_size: 可选，分页（前端目前传 page_size=99999 做前端分页）
+    业务链路：
+    根据 status 选择数据源（tasks / media_archive / 合并去重）→ 统一字段映射（type→media_type，补 file_path）→
+    路径规范化（反斜杠→正斜杠，URL 透传）→ 可选 media_type 过滤 → 返回列表与总数。
 
-    核心修复：将数据库的 type 字段映射为前端期待的 media_type
-    archived 状态从 media_archive 表读取，其余从 tasks 表读取
+    Args:
+        search: 可选。关键词搜索（后端按库内策略匹配）。
+        status: 可选。状态过滤（pending/failed/archived/ignored/all...）。
+        media_type: 可选。媒体类型过滤（movie/tv/all）。
+        page: 可选。分页页码（当前前端主要走前端分页）。
+        page_size: 可选。分页大小（前端常传大值以一次性拉全量后前端分页）。
+        db: 数据库依赖注入（DbDep）。
+
+    Returns:
+        Dict[str, Any]:
+            - tasks: 任务列表（已做全栈契约兜底与字段映射）
+            - total: 总数
+            - page: 当前页（兼容字段）
+            - page_size: 返回数量
+
+    Raises:
+        HTTPException:
+            - 500: 数据库读取/合并去重/字段规范化过程中出现未捕获异常。
     """
     try:
         # 根据 status 决定查哪张表
@@ -180,8 +194,24 @@ async def get_all_tasks(
 @router.post("/delete_batch")
 async def delete_tasks_batch(body: DeleteBatchRequest, db: DbDep = None):
     """
-    POST /tasks/delete_batch - 批量删除任务记录（仅数据库，不删物理文件）
-    支持删除 tasks 表和 media_archive 表中的记录
+    批量删除任务记录（仅删数据库记录，不删除任何物理文件）。
+
+    业务链路：
+    接收 id 列表 → 同步删除 tasks + media_archive 双表记录 → 返回删除数量。
+
+    Args:
+        body: DeleteBatchRequest，请求体包含 `ids`（待删除的任务 ID 列表）。
+        db: 数据库依赖注入（DbDep）。
+
+    Returns:
+        Dict[str, Any]:
+            - success: 是否成功
+            - deleted: 实际删除数量
+            - message: 人类可读提示
+
+    Raises:
+        HTTPException:
+            - 500: 数据库删除失败或运行时异常。
     """
     if not body.ids:
         return {"success": True, "deleted": 0, "message": "未提供任何 ID"}
@@ -200,8 +230,24 @@ async def delete_tasks_batch(body: DeleteBatchRequest, db: DbDep = None):
 @router.delete("/{task_id}", summary="销毁单条任务记录")
 async def delete_task_by_id(task_id: int, db: DbDep = None):
     """
-    ☢️ 危险操作：从数据库中物理移除该任务。注意：此操作仅影响元数据，不会删除磁盘上的物理视频文件。
-    支持删除 tasks 表和 media_archive 表中的记录
+    销毁单条任务记录（仅删数据库记录，不删除任何物理文件）。
+
+    业务链路：
+    根据 task_id 同步删除 tasks + media_archive 双表记录（若存在）→ 返回结果。
+
+    Args:
+        task_id: 任务 ID（Path 参数）。
+        db: 数据库依赖注入（DbDep）。
+
+    Returns:
+        Dict[str, Any]:
+            - success: 是否成功
+            - message: 人类可读提示
+
+    Raises:
+        HTTPException:
+            - 404: 任务不存在或已被删除。
+            - 500: 数据库删除失败或运行时异常。
     """
     try:
         # ✅ 调用公开的 service 方法（替代直接 db._get_conn()）
@@ -222,13 +268,24 @@ async def delete_task_by_id(task_id: int, db: DbDep = None):
 @router.post("/purge")
 async def purge_all_tasks(payload: PurgeRequest, db: DbDep = None):
     """
-    DELETE /tasks/purge - 全量清空 tasks 表（核弹按钮）
-    仅清空数据库记录，不删物理文件
+    全量清空任务表（核弹按钮，仅删数据库记录）。
 
-    核心功能：
-    1. 清空所有任务记录
-    2. 重置自增 ID 计数器
-    3. 确保下次插入从 ID 1 开始
+    业务链路：
+    校验确认口令（CONFIRM）→ 清空 tasks 表/重置自增 → 返回清空数量。
+
+    Body:
+        payload: PurgeRequest，包含 `confirm` 字段，必须为 "CONFIRM" 才允许执行。
+
+    Returns:
+        Dict[str, Any]:
+            - success: 是否成功
+            - deleted: 实际删除数量
+            - message: 人类可读提示
+
+    Raises:
+        HTTPException:
+            - 400: confirm 口令不匹配。
+            - 500: 数据库清空失败或运行时异常。
     """
     if payload.confirm.strip().upper() != "CONFIRM":
         raise HTTPException(status_code=400, detail="请正确输入 CONFIRM")
@@ -245,18 +302,23 @@ async def purge_all_tasks(payload: PurgeRequest, db: DbDep = None):
 @router.post("/{task_id}/retry")
 async def retry_task(task_id: int, db: DbDep = None):
     """
-    POST /tasks/{task_id}/retry - 重试单个失败的任务
+    重试单个任务（将状态复位为 pending，等待流水线再次处理）。
 
-    功能说明：
-    - 将任务状态重置为 pending
-    - 清空错误信息，以便扫描引擎再次处理
+    业务链路：
+    将 task_id 对应任务状态更新为 pending → 前端刷新任务列表后可被扫描/刮削流程重新拾取。
 
-    参数：
-    - task_id: 任务 ID
+    Args:
+        task_id: 任务 ID（Path 参数）。
+        db: 数据库依赖注入（DbDep）。
 
-    返回：
-    - success: 是否成功
-    - message: 操作结果描述
+    Returns:
+        Dict[str, Any]:
+            - success: 是否成功
+            - message: 人类可读提示
+
+    Raises:
+        HTTPException:
+            - 500: 数据库更新失败或运行时异常。
     """
     try:
         # 直接重置任务状态为 pending（不需要提前检查是否存在）

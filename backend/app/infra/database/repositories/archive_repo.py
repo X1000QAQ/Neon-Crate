@@ -203,17 +203,21 @@ class ArchiveRepo(BaseRepository):
         sub_status: str,
         last_check: Optional[str] = None
     ) -> bool:
-        """更新归档表中的字幕状态（字幕引擎写回专用）"""
+        """更新归档表中的字幕状态（字幕引擎写回专用）
+        
+        ⚠️ ID 契约：archive_id 传入的是 original_task_id（前端可见的虚拟 ID），
+        非 media_archive 的物理自增 id。WHERE 子句必须使用 original_task_id 匹配。
+        """
         with self.db_lock:
             conn = self._get_conn()
             if last_check:
                 conn.execute(
-                    "UPDATE media_archive SET sub_status = ?, archived_at = ? WHERE id = ?",
+                    "UPDATE media_archive SET sub_status = ?, archived_at = ? WHERE original_task_id = ?",
                     (sub_status, last_check, archive_id)
                 )
             else:
                 conn.execute(
-                    "UPDATE media_archive SET sub_status = ? WHERE id = ?",
+                    "UPDATE media_archive SET sub_status = ? WHERE original_task_id = ?",
                     (sub_status, archive_id)
                 )
             conn.commit()

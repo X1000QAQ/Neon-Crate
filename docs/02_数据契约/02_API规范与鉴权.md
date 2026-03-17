@@ -70,7 +70,7 @@
 
 ---
 
-## 五、核级重构端点（/api/v1/tasks/manual_rebuild）— v1.0.1-Enhanced
+## 五、核级重构端点（/api/v1/tasks/manual_rebuild）— v1.0.0
 
 ### POST /tasks/manual_rebuild
 
@@ -125,8 +125,9 @@
 
 **关键设计**：
 - **is_archive 致命重要**：决定操作哪张表，若未传递则后端无法确定
+- **物理感知护盾**：金标准 IMDb 校验通过后，仍需 `NFO 存在 + poster.* 物理存在` 才允许短路；若 **有 NFO 但无海报**，系统将强制解除护盾触发补领
+- **TV 季/集号作用域护盾**：`season/episode` 在 `manual_rebuild` 生命周期内提前初始化（请求优先、DB 兜底），保证非核级精准补录同样能写回 DB，避免 TV 单点补录触发 `UnboundLocalError`
 - **核级清理**：删除旧元数据文件，确保新数据写入无冲突
-- **原子性**：所有操作在单个事务内完成，失败则全部回滚
 - **字幕白嫖**：归档完成后立即检测本地字幕，零 API 消耗
 
 ---
