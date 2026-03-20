@@ -9,7 +9,7 @@ interface Props {
   t: (key: I18nKey) => string;
 }
 
-// [P-08 修复] Local State 缓冲层：键盘输入仅更新本地 state，
+// 本地缓冲：受控输入先写组件 state，失焦或提交时再写父级，降低全树重渲染
 // onBlur 失焦时才 flush 到全局 Context，彻底终结击键触发的全组件重绘。
 const API_KEYS = ['tmdb_api_key', 'os_api_key', 'radarr_api_key', 'sonarr_api_key'] as const;
 const URL_KEYS = ['radarr_url', 'sonarr_url'] as const;
@@ -41,7 +41,7 @@ export default function APISettings({ t }: Props) {
           type={isVisible ? 'text' : 'password'}
           value={getVal(key)}
           onChange={(e) => {
-            // 立即提取 value，防止合成事件在异步 setState 回调执行前被 React 回收（paste 崩溃根因）
+            // 事件边界：在异步 setState 前同步读取 e.target.value，避免合成事件池回收导致空读
             const val = e.currentTarget.value;
             setLocalValues(prev => ({ ...prev, [key]: val }));
           }}
@@ -66,7 +66,7 @@ export default function APISettings({ t }: Props) {
         type="text"
         value={getVal(key)}
         onChange={(e) => {
-            // 立即提取 value，防止合成事件在异步 setState 回调执行前被 React 回收（paste 崩溃根因）
+            // 事件边界：在异步 setState 前同步读取 e.target.value，避免合成事件池回收导致空读
             const val = e.currentTarget.value;
             setLocalValues(prev => ({ ...prev, [key]: val }));
           }}

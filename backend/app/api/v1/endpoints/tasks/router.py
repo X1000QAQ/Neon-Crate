@@ -18,6 +18,7 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints.tasks.scan_task import router as scan_router
 from app.api.v1.endpoints.tasks.scrape_task import router as scrape_router
+from app.api.v1.endpoints.tasks.rebuild_task import router as rebuild_router
 from app.api.v1.endpoints.tasks.subtitle_task import router as subtitle_router
 from app.api.v1.endpoints.tasks.settings_router import router as settings_router
 from app.api.v1.endpoints.tasks.media_router import (
@@ -34,6 +35,7 @@ router = APIRouter()
 # 聚合任务/设置/字幕子路由
 router.include_router(scan_router)
 router.include_router(scrape_router)
+router.include_router(rebuild_router)
 router.include_router(subtitle_router)
 router.include_router(settings_router)
 

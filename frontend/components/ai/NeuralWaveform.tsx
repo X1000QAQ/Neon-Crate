@@ -7,9 +7,8 @@ const CYAN = 'var(--cyber-cyan)';
 /**
  * NeuralWaveform — 神经波形背景动画
  *
- * [C-02 修复] waveAmplitude 状态完全封装在此组件内部，
- * 彻底切断与 AiSidebar 主状态树的联动，消除每秒 60 次的全组件重渲染。
- * SVG 路径通过 useRef 直接操作 DOM，绕过 React 渲染管线，实现零开销动画。
+ * 动画隔离：振幅与路径动画状态内聚于本组件，不上升触发 AiSidebar 重渲染。
+ * SVG 路径经 ref 直驱 DOM，动画帧在 React commit 之外更新。
  */
 export default function NeuralWaveform() {
   const path1Ref = useRef<SVGPathElement>(null);

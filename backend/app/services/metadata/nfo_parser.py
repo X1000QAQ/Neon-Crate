@@ -32,7 +32,7 @@ _SEASON_DIR_RE = re.compile(
 # 目标：面对第三方“脏 NFO/脏 XML”保持极强生存能力。
 #
 # 第一层：errors=replace（读取容错，抵抗错误编码/二进制污染）
-# 第二层：生化清洗（BOM/HTML实体/裸&/控制字符修复与剔除）
+# 第二层：生化清洗（BOM/HTML 实体/裸 &/控制字符归一化与剔除）
 # 第三层：正则兜底（ET 彻底失败时抢救 tmdb/imdb/title/year 关键字段）
 #
 # 🚨 架构师警告（DO NOT MODIFY）：
@@ -55,11 +55,11 @@ _HTML_ENTITIES: Dict[str, str] = {
 
 def _sanitize_xml(raw: str) -> str:
     """
-    XML 内容预清洗：在交给严格解析器之前修复常见毒化模式。
+    XML 内容预清洗：在严格解析前归一化常见毒化输入。
 
     处理顺序（顺序不可颠倒）：
     1. 剥除 UTF-8 BOM
-    2. 替换已知 HTML 实体（避免被步骤 3 的裸 & 修复误伤）
+    2. 替换已知 HTML 实体（避免与步骤 3 裸 & 转义相互干扰）
     3. 将裸 & 替换为 &amp;
     4. 剔除 XML 1.0 禁止的控制字符
     """
@@ -202,6 +202,7 @@ def parse_nfo(file_path: str) -> Dict[str, Optional[str]]:
             result["title"] = (root.findtext("title") or "").strip() or None
             result["year"]  = (root.findtext("year")  or "").strip() or None
             result["plot"]  = (root.findtext("plot")  or "").strip() or None
+            result["showtitle"] = (root.findtext("showtitle") or "").strip()
 
             # ── tmdb_id：优先 <tmdbid>，回退 <uniqueid type="tmdb"> ────
             tmdb_id = (root.findtext("tmdbid") or "").strip()
@@ -252,3 +253,27 @@ def parse_nfo(file_path: str) -> Dict[str, Optional[str]]:
         logger.warning(f"[NfoParser] 未知解析错误: {file_path} — {e}")
 
     return result
+
+
+def get_tvshow_gold_standard(video_path: str):
+    """
+    向上最多回溯 3 层目录查找 tvshow.nfo，获取剧集金标准身份。
+    返回含 title/tmdb_id/imdb_id/year 的字典（仅当 tmdb_id 有效时）；否则返回 None。
+    身份隔离：以剧集根 tvshow.nfo 为金标，避免单集 NFO 内 episode 级 ID 上升污染整剧身份（TMM3 等工具并存场景）。
+    """
+    from pathlib import Path
+    try:
+        current_dir = Path(video_path).parent
+        for _ in range(3):
+            nfo_path = current_dir / "tvshow.nfo"
+            if nfo_path.exists() and nfo_path.is_file():
+                try:
+                    result = parse_nfo(str(nfo_path))
+                    if result.get("tmdb_id"):
+                        return result
+                except Exception:
+                    pass
+            current_dir = current_dir.parent
+    except Exception:
+        pass
+    return None

@@ -229,7 +229,7 @@ class TaskRepo(BaseRepository):
                 WHERE status = 'pending'
                    OR (status = 'archived'
                        AND (imdb_id IS NULL OR imdb_id = '')
-                       AND (sub_status IS NULL OR sub_status != 'success'))
+                       AND (sub_status IS NULL OR sub_status NOT IN ('scraped', 'found')))
                 ORDER BY created_at ASC
                 """
             )
@@ -255,7 +255,7 @@ class TaskRepo(BaseRepository):
                        imdb_id, tmdb_id, target_path, sub_status, 1 as is_archive
                 FROM media_archive
                 WHERE (imdb_id IS NULL OR imdb_id = '')
-                  AND (sub_status IS NULL OR sub_status != 'success')
+                  AND (sub_status IS NULL OR sub_status NOT IN ('scraped', 'found'))
                   AND (target_path IS NOT NULL AND target_path != '')
                 ORDER BY archived_at ASC
                 """
@@ -331,14 +331,14 @@ class TaskRepo(BaseRepository):
             
             # ── Step 3: 查询热表 tasks ──
             # 业务链路：1. 查询已归档的任务 -> 2. 过滤条件：有 target_path + 有 imdb_id -> 
-            # 3. 字幕状态为 NULL 或非 success -> 4. 标记 is_archive=False
+            # 3. 字幕状态为 NULL 或非（已完成：scraped/found）-> 4. 标记 is_archive=False
             cursor2 = conn.execute(
                 "SELECT id, path, file_name, type, tmdb_id, imdb_id, target_path, sub_status "
                 "FROM tasks "
                 "WHERE status = 'archived' "
                 "  AND (target_path IS NOT NULL AND target_path != '') "
                 "  AND (imdb_id IS NOT NULL AND imdb_id != '') "
-                "  AND (sub_status IS NULL OR sub_status != 'success') "
+                "  AND (sub_status IS NULL OR sub_status NOT IN ('scraped', 'found')) "
                 "ORDER BY created_at ASC"
             )
             rows2 = cursor2.fetchall()

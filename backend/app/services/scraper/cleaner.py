@@ -30,7 +30,7 @@ _YEAR_PATTERN = re.compile(
 )
 
 _SEASON_EPISODE_PATTERNS: List[re.Pattern] = [
-    re.compile(r'[Ss](\d{1,2})[Ee](\d{1,3})'),            # S01E01
+    re.compile(r'[Ss](\d{1,2})[\s\._-]*[Ee](\d{1,3})'),   # S01E01 / S01 E01 / S01.E01
     re.compile(r'[Ss]eason[\s\._-]*(\d{1,2})[\s\._-]*[Ee](?:pisode)?[\s\._-]*(\d{1,3})', re.IGNORECASE),  # Season 1 Episode 1
     re.compile(r'(\d{1,2})x(\d{1,3})'),                    # 1x01
     re.compile(r'[Ee][Pp]?[\s\._-]*(\d{1,3})'),            # EP01 / E01
@@ -76,21 +76,40 @@ class MediaCleaner:
     # 内部：从数据库加载过滤正则
     # ------------------------------------------------------------------
     def _load_patterns(self):
-        """从 db_manager 读取 filename_clean_regex，编译为 pattern 列表"""
+        """
+        从 db_manager 读取 filename_clean_regex，编译为 pattern 列表。
+
+        规则分两类：
+        - CLEAN_RULES（默认）：用于 clean_name() 删除噪声
+        - EXTRACTION_RULES（注释行含 [EXTRACT]）：仅用于结构化提取，
+          不参与 clean_name() 删除，防止集数信息（E14）被误删。
+        """
         self._filter_patterns = []
         try:
             raw = self._db.get_config('filename_clean_regex', '').strip()
             count = 0
+            is_extraction_rule = False
             for line in raw.splitlines():
-                rule = line.strip()
-                if not rule or rule.startswith('#'):
+                stripped = line.strip()
+                if not stripped:
+                    is_extraction_rule = False
+                    continue
+                if stripped.startswith('#'):
+                    # 若注释含 [EXTRACT]，下一条规则为提取专用，跳过删除
+                    is_extraction_rule = '[EXTRACT]' in stripped
+                    continue
+                if is_extraction_rule:
+                    # 提取专用规则：不加入 _filter_patterns（clean_name 不删除）
+                    logger.debug(f'[CLEAN] 跳过提取专用规则（不删除）: {stripped[:60]}')
+                    is_extraction_rule = False
                     continue
                 try:
-                    self._filter_patterns.append(re.compile(rule, re.IGNORECASE))
+                    self._filter_patterns.append(re.compile(stripped, re.IGNORECASE))
                     count += 1
                 except re.error as e:
-                    logger.warning(f'[CLEAN] 正则编译失败，已跳过: {rule[:60]} | {e}')
-            logger.debug(f'[CLEAN] 已加载 {count} 条过滤规则')
+                    logger.warning(f'[CLEAN] 正则编译失败，已跳过: {stripped[:60]} | {e}')
+                is_extraction_rule = False
+            logger.debug(f'[CLEAN] 已加载 {count} 条过滤规则（EXTRACTION_RULES 已隔离）')
             self._loaded = True
         except Exception as e:
             logger.warning(f'[CLEAN] 读取正则规则失败: {e}')

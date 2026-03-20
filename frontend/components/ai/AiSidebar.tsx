@@ -70,7 +70,7 @@ export default function AiSidebar() {
   }, [messages, loading]);
 
   // Matrix-drop stagger
-  // [P-03 修复] 依赖 messages.length 而非 messages 对象，避免内容更新重触发动画。
+  // 动画依赖：以 messages.length 为 effect 依赖，避免引用变更导致波形重复触发
   // 用 useRef 追踪定时器，在 cleanup 中正确清理，消除已卸载组件上的 setState。
   const staggerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
@@ -86,7 +86,7 @@ export default function AiSidebar() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages.length]);
 
-  // [C-02 已修复] waveAmplitude 状态已迁移至 NeuralWaveform.tsx，
+  // 状态边界：waveAmplitude 由 NeuralWaveform 自持，本组件仅消费展示
   // 通过 useRef 直接操作 SVG DOM，完全绕过 React 渲染管线，消除每秒 60 次全组件重渲染。
 
   if (pathname === '/auth/login') return null;
@@ -299,7 +299,7 @@ export default function AiSidebar() {
             borderLeft: `1px solid ${CYAN_DIM}`,
           }}
         >
-          {/* Neural Waveform Background — [C-02 已修复] 迁移至 NeuralWaveform.tsx，零 setState 开销 */}
+          {/* Neural Waveform：独立子树，振幅状态内聚于 NeuralWaveform */}
           <NeuralWaveform />
           {/* Depth glow */}
           <div className="absolute inset-0 pointer-events-none"

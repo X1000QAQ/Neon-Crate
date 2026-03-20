@@ -85,7 +85,7 @@ export default function MiniLog() {
   // 防御性数据处理：确保 logs 始终是数组
   const safeLogs = Array.isArray(logs) ? logs : [];
 
-  // [Action 3 修复] filteredLogs 和 displayLogs 包裹进 useMemo，
+  // 派生数据 memo：filteredLogs / displayLogs 与依赖稳定对齐，降低列表重算
   // 避免每次父组件渲染都重新执行高昂的 filter + slice + 补全逻辑。
   const { filteredLogs, displayLogs } = useMemo(() => {
     const placeholderMessages = [

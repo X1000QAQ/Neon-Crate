@@ -148,7 +148,7 @@ async def get_all_tasks(
                 # 兜底：仅替换分隔符，避免抛异常
                 return val_str.replace("\\", "/")
 
-        # 致命修复：将数据库的 type 映射为前端期待的 media_type，并在下发前统一路径格式
+        # DTO 对齐：持久层 type 映射为前端 media_type；路径字段统一 Web 正斜杠语义
         normalized_tasks = []
         for task in tasks:
             normalized_task = dict(task)
@@ -172,6 +172,12 @@ async def get_all_tasks(
             #    (前端 types/index.ts 将 created_at 定义为必填 string，后端 Optional[str] 需在此层兜底)
             if not normalized_task.get("created_at"):
                 normalized_task["created_at"] = ""
+
+            # 5) 阻断底层字段外泄：对外 DTO 不透出持久层字段名（type/path）
+            #    仅保留映射后的 media_type/file_path
+            normalized_task.pop("type", None)
+            normalized_task.pop("path", None)
+            normalized_task.pop("last_sub_check", None)
 
             normalized_tasks.append(normalized_task)
 

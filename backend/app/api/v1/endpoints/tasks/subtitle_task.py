@@ -17,75 +17,7 @@ from typing import Dict, Any
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from app.infra.constants import VALID_SUB_EXTS
-
-
-def _check_local_subtitles(video_path: str) -> bool:
-    """
-    检查视频同级目录下是否存在字幕文件（支持极致模糊匹配）
-    
-    设计目标：
-    - 避免重复下载已有的字幕
-    - 支持多种字幕命名规范
-    - 兼容手动添加的字幕文件
-    
-    检测策略（三级匹配）：
-    
-    1. 严格匹配（精确匹配）：
-       - 格式：视频文件名.字幕扩展名
-       - 例如：The.Matrix.1999.mkv → The.Matrix.1999.srt
-       - 适用：标准命名的字幕
-    
-    2. 通配匹配（多语言字幕）：
-       - 格式：视频文件名.*.字幕扩展名
-       - 例如：The.Matrix.1999.mkv → The.Matrix.1999.zh-CN.srt
-       - 适用：带语言代码的字幕
-    
-    3. 终极模糊匹配（宽松匹配）：
-       - 剧集：只要字幕名包含同样的季集号（如 S01E01）就放行
-       - 电影：同目录下只要有任何字幕文件，直接放行
-       - 适用：命名不规范的字幕、手动添加的字幕
-    
-    支持的字幕格式：
-    - .srt（SubRip，最常见）
-    - .ass（Advanced SubStation Alpha，支持特效）
-    - .vtt（WebVTT，网页字幕）
-    - .sub/.idx（VobSub，DVD 字幕）
-    
-    Args:
-        video_path: 视频文件路径
-    
-    Returns:
-        True: 存在字幕文件
-        False: 不存在字幕文件
-    """
-    if not video_path or not os.path.exists(video_path):
-        return False
-    dir_name = os.path.dirname(video_path)
-    base_name = os.path.splitext(os.path.basename(video_path))[0]
-    valid_exts = VALID_SUB_EXTS
-    
-    # 1. 严格与通配匹配 (原有逻辑)
-    for ext in valid_exts:
-        if os.path.exists(os.path.join(dir_name, f"{base_name}{ext}")):
-            return True
-        if glob.glob(os.path.join(glob.escape(dir_name), f"{glob.escape(base_name)}.*{ext}")):
-            return True
-
-    # 2. 终极模糊匹配（只要有字幕文件就算过）
-    try:
-        episode_match = re.search(r'(S\d+E\d+)', base_name, re.IGNORECASE)
-        for file in os.listdir(dir_name):
-            if os.path.splitext(file)[1].lower() in valid_exts:
-                if episode_match:
-                    # 剧集：只要字幕名包含同样的季集号 (如 S01E01) 就放行
-                    if episode_match.group(1).lower() in file.lower():
-                        return True
-                else:
-                    # 电影：同目录下只要有任何字幕文件，直接放行
-                    return True
-    except Exception:
-        pass
-    return False
+from app.services.rebuilder.rebuild_utils import _check_local_subtitles
 
 from app.infra.database import get_db_manager
 from app.models.domain_media import ScanResponse
@@ -205,14 +137,14 @@ def perform_find_subtitles_task_sync():
                 # - 支持手动字幕：用户自行添加的字幕也能识别
                 # 
                 # 状态更新：
-                # - 发现字幕：标记为 success，不再进入字幕队列
+                # - 发现字幕：标记为 found，不再进入字幕队列
                 # - 未发现字幕：继续执行下载流程
                 # ==========================================
                 _sub_path = target_path or file_path
                 if _sub_path and _check_local_subtitles(_sub_path):
                     logger.info(f"[SUBTITLE] [白嫖] 发现本地字幕，跳过下载 -> {_sub_path}")
                     if _task_id:
-                        db.update_any_task_metadata(_task_id, _is_arc, sub_status="success")
+                        db.update_any_task_metadata(_task_id, _is_arc, sub_status="found")
                     processed += 1
                     continue
 
@@ -265,7 +197,7 @@ def perform_find_subtitles_task_sync():
                 if target_path and result and result.startswith("成功:"):
                     # 双表感知写回字幕状态
                     if _task_id:
-                        db.update_any_task_metadata(_task_id, _is_arc, sub_status="success")
+                        db.update_any_task_metadata(_task_id, _is_arc, sub_status="found")
 
                 processed += 1
 

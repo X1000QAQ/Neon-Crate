@@ -338,22 +338,41 @@ def perform_scan_task_sync():
                 # ── [优先层] NFO 左移注入 ─────────────────────────────────
                 try:
                     from app.services.metadata.nfo_parser import find_nfo, parse_nfo as _parse_nfo_scan
+                    from app.services.metadata.nfo_parser import get_tvshow_gold_standard as _get_gold
                     _nfo_path_scan = find_nfo(file_path)
                     if _nfo_path_scan:
                         _nfo_scan = _parse_nfo_scan(_nfo_path_scan)
                         if _nfo_scan.get("tmdb_id"):
-                            task_data["tmdb_id"] = _nfo_scan["tmdb_id"]
-                            task_data["imdb_id"] = _nfo_scan.get("imdb_id") or None
-                            if _nfo_scan.get("title"):
-                                task_data["clean_name"] = _nfo_scan["title"]
-                            if _nfo_scan.get("year"):
-                                task_data["year"] = _nfo_scan["year"]
-                            task_data["status"] = "archived"
+                            _cname = file_info.get("clean_name", "")
+                            # TV 类型：尝试金标准（tvshow.nfo）覆盖单集 episode ID
+                            _gold = _get_gold(file_path) if task_type == "tv" else None
+                            if _gold:
+                                final_tmdb_id = _gold.get("tmdb_id") or _nfo_scan.get("tmdb_id")
+                                final_imdb_id = _gold.get("imdb_id") or _nfo_scan.get("imdb_id")
+                                final_title   = _gold.get("title") or _cname
+                                final_year    = _gold.get("year") or _nfo_scan.get("year")
+                            else:
+                                # 兜底：无 tvshow.nfo，使用 showtitle 回退链
+                                _nfo_showtitle = _nfo_scan.get("showtitle") or ""
+                                final_tmdb_id = _nfo_scan.get("tmdb_id")
+                                final_imdb_id = _nfo_scan.get("imdb_id")
+                                final_year    = _nfo_scan.get("year")
+                                if task_type == "tv":
+                                    final_title = _nfo_showtitle or _cname or _nfo_scan.get("title") or ""
+                                else:
+                                    final_title = _nfo_scan.get("title") or _cname
+                            task_data["tmdb_id"]    = final_tmdb_id
+                            task_data["imdb_id"]    = final_imdb_id or None
+                            task_data["clean_name"] = final_title or _cname
+                            if final_year:
+                                task_data["year"] = final_year
+                            task_data["status"]      = "archived"
                             task_data["target_path"] = file_path
                             has_nfo = True
                             logger.info(
                                 f"[SCAN] [NFO Shift-Left] 越级归档: "
                                 f"tmdb={task_data['tmdb_id']}, title={task_data['clean_name']}"
+                                + (" [金标准]" if _gold else "")
                             )
                 except Exception as _nfo_scan_err:
                     logger.debug(f"[SCAN] [NFO Shift-Left] 跳过（{_nfo_scan_err}）")
@@ -403,7 +422,7 @@ def perform_scan_task_sync():
 
                 try:
                     task_id = db.insert_task(task_data)
-                    # 🚀 关键修复：存量库文件插入后，立刻流转至 media_archive 冷表
+                    # 生命周期：新插入任务若初始即为 archived，同步 archive_task 写入冷表，热冷语义一致
                     if task_data.get("status") == "archived" and task_id:
                         try:
                             db.archive_task(task_id)

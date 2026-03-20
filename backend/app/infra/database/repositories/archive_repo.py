@@ -108,9 +108,8 @@ class ArchiveRepo(BaseRepository):
     def get_archived_data(self, search_keyword: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取 media_archive 表中的归档数据（媒体墙展示用）
 
-        Bug 2b 修复：SELECT 加入 original_task_id，并映射为 "id" 返回前端。
-        前端持有的 task.id 永远是全局唯一身份证（original_task_id），
-        update_any_task_metadata(is_archive=True) 用 original_task_id 匹配，链路完全闭环。
+        数据契约：结果集含 original_task_id，并映射为 "id" 下发，与热表 id 语义对齐。
+        冷表更新与元数据写回均以 original_task_id 为全局主键，保证归档链路闭环。
         """
         with self.db_lock:
             conn = self._get_conn()
@@ -141,7 +140,6 @@ class ArchiveRepo(BaseRepository):
                     "sub_status": r[11], "last_sub_check": None, "created_at": r[12],
                     "poster_path": r[13], "local_poster_path": r[14],
                     "season": r[15], "episode": r[16],
-                    "media_archive_pk": r[0],   # 冷表自增 PK，仅供调试，业务逻辑勿用
                 }
                 for r in rows
             ]

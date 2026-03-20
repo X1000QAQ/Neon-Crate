@@ -24,11 +24,11 @@ export default function PersonaSettings({ t }: Props) {
     try {
       const result = await api.resetSettings('ai');
       if (result.success) {
-        // [C-04 修复] 删除 alert()，改为安全的 console 日志，成功反馈由父层 Toast 承接
+        // 反馈分层：失败仅诊断日志，成功由父级 SettingsHub Toast 统一呈现
         console.info('[PersonaSettings] reset success:', t('persona_reset_success'));
         await refreshSettings();
       } else {
-        // [S-05 修复] '未知错误' → t('error_unknown')
+        // 文案契约：异常摘要经 i18n 键 error_unknown 下发，与全局错误语系一致
         console.error('[PersonaSettings] reset failed:', result.message || t('error_unknown'));
       }
     } catch (error) {

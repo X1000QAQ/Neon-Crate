@@ -46,9 +46,7 @@ async def get_settings(db: DbDep):
     if "paths" not in config:
         config["paths"] = []
 
-    # 🔧 修复：不再脱敏，让前端负责隐藏敏感信息
-    # 前端会在显示时用 *** 替换，但编辑时可以获取真实值
-    # 这样用户可以编辑已保存的密钥
+    # 数据契约：服务端返回完整配置字段；敏感字段脱敏由展现层负责，编辑态需真实值回写
 
     return config
 
@@ -117,8 +115,7 @@ async def update_settings(config: SettingsConfig, db: DbDep):
         db.save_all_config(config_dict)
         logger.info("[API] 系统配置已更新并持久化")
         
-        # 🔧 关键修复：配置保存后立即重新计算媒体库数量缓存
-        # 防止用户修改媒体库路径后，仪表盘显示为0的问题
+        # 缓存失效：持久化成功后立即重算媒体库计数缓存，与 paths 配置强一致
         _update_library_counts()
         logger.info("[API] 媒体库数量缓存已更新")
         

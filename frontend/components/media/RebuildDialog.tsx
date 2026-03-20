@@ -22,25 +22,27 @@ interface RebuildDialogProps {
   open: boolean;
   task: Task;
   mode: RebuildMode;
+  scope?: 'series' | 'season' | 'episode';
   onConfirm: (params: {
     tmdb_id?: number;
     media_type: string;
     nuclear_reset: boolean;
     season?: number;
     episode?: number;
+    scope?: 'series' | 'season' | 'episode';
   }) => Promise<void> | void;
   onClose: () => void;
 }
 
-const MODE_META: Record<RebuildMode, { icon: React.ReactNode; label: string; i18nKey: string; color: string }> = {
-  nfo:      { icon: <FileText size={16} />,  label: 'NFO 深度纠偏',  i18nKey: 'rebuild_mode_nfo',      color: 'text-cyber-cyan'  },
-  poster:   { icon: <Image size={16} />,     label: '海报强制覆盖',  i18nKey: 'rebuild_mode_poster',    color: 'text-purple-400'  },
-  subtitle: { icon: <Subtitles size={16} />, label: '字幕即时触发',  i18nKey: 'rebuild_mode_subtitle',  color: 'text-green-400'   },
+const MODE_META: Record<RebuildMode, { icon: React.ReactNode; i18nKey: string; color: string }> = {
+  nfo:      { icon: <FileText size={16} />,  i18nKey: 'rebuild_mode_nfo',      color: 'text-cyber-cyan'  },
+  poster:   { icon: <Image size={16} />,     i18nKey: 'rebuild_mode_poster',    color: 'text-purple-400'  },
+  subtitle: { icon: <Subtitles size={16} />, i18nKey: 'rebuild_mode_subtitle',  color: 'text-green-400'   },
 };
 
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/w92';
 
-export default function RebuildDialog({ open, task, mode, onConfirm, onClose }: RebuildDialogProps) {
+export default function RebuildDialog({ open, task, mode, scope = 'episode', onConfirm, onClose }: RebuildDialogProps) {
   const { t } = useLanguage();
   const [mediaType, setMediaType] = useState<string>(task.media_type || 'movie');
   const [keyword, setKeyword]     = useState<string>(task.title || '');
@@ -53,18 +55,16 @@ export default function RebuildDialog({ open, task, mode, onConfirm, onClose }: 
   const [episode, setEpisode] = useState<number | ''>(task.episode ?? '');
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // [P-04 修复] 组件卸载时清理防抖定时器，防止在已卸载组件上调用 setState
+  // 1. [生命周期边界] -> 2. [卸载时释放搜索防抖定时器] -> 3. [杜绝卸载后 setState]
   useEffect(() => {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, []);
 
-  // ── 开门重置器：当弹窗打开且任务变化时，重置所有本地状态 ──
-  // 业务链路：1. 监听 open 状态与 task.id 变化 -> 2. 触发弹窗展示 -> 
-  // 3. 彻底清空上一轮的幽灵记忆 (keyword, results, selected) -> 4. 重新灌入当前 task 的基础参数
-  // 防止 Dialog 幽灵记忆陷阱：if (!open) return null 只隐藏不卸载，
-  // 导致状态被永久冻结。此 useEffect 确保每次打开新任务时，状态都被重置。
+  // ── 会话状态重置（Dialog 存活节点语义）──
+  // 1. [监听 open 与 task.id] -> 2. [弹窗可见且任务切换时触发] -> 3. [清空派生搜索态与选中态，再自 task 注入基线字段]
+  // 数据契约：组件在 !open 时可能仍挂载，须显式重置局部状态，禁止跨 task 泄漏 keyword / results / selected
   useEffect(() => {
     if (open) {
       // 1. 重置媒体类型（从 task 读取或默认为 movie）
@@ -99,13 +99,13 @@ export default function RebuildDialog({ open, task, mode, onConfirm, onClose }: 
       // 3. 清空上一轮的选中项（新搜索结果需重新选择）
       setSelected(null);
     } catch (e) {
-      // 4. 捕获异常并显示错误信息
-      setSearchErr((e as Error).message || 'TMDB 搜索失败');
+      // 4. [异常路径] -> 优先透出后端 message；否则经 i18n 键下发兜底文案（展现层零硬编码）
+      setSearchErr((e as Error).message?.trim() || t('error_tmdb_search'));
     } finally {
       // 5. 关闭加载状态
       setSearching(false);
     }
-  }, []);
+  }, [t]);
 
   // ── 关键词变化处理（防抖） ──
   // 业务链路：1. 更新关键词状态 -> 2. 清除上一轮的防抖定时器 -> 3. 设置新的防抖定时器（400ms 延迟）-> 4. 触发搜索
@@ -123,8 +123,7 @@ export default function RebuildDialog({ open, task, mode, onConfirm, onClose }: 
   };
 
   // ── 核级重构执行器 ──
-  // [C-01 修复] 改为 async + try/finally，确保 executing 在任何情况下（含 onConfirm 抛出）都被重置，
-  // 消除「按钮永久灰死」死锁。onClose() 移入 try 块，仅在成功时关闭。
+  // 1. [互斥门控 executing] -> 2. [try 内 await onConfirm；成功路径关闭弹窗] -> 3. [finally 无条件复位 executing，覆盖抛错与中断，保证按钮可再次触发]
   const handleNuclearExecute = async () => {
     if (executing) return;
     try {
@@ -135,10 +134,11 @@ export default function RebuildDialog({ open, task, mode, onConfirm, onClose }: 
         nuclear_reset: true,
         season: mediaType === 'tv' && season !== '' ? Number(season) : undefined,
         episode: mediaType === 'tv' && episode !== '' ? Number(episode) : undefined,
+        scope,
       });
       onClose();
     } finally {
-      // 无论成功、失败、还是异常，executing 状态必被重置
+      // 状态机尾相：executing 恒回落，维持 UI 与异步边界一致
       setExecuting(false);
     }
   };
@@ -147,6 +147,46 @@ export default function RebuildDialog({ open, task, mode, onConfirm, onClose }: 
 
   const meta = MODE_META[mode];
   const isNfo = mode === 'nfo';
+  const isMovie = mediaType === 'movie';
+
+  const getPosterDescKey = () => {
+    if (isMovie) return 'overlay_rebuild_poster_movie';
+    if (scope === 'series') return 'overlay_rebuild_poster_tv_series';
+    if (scope === 'season') return 'overlay_rebuild_poster_tv_season';
+    return 'overlay_rebuild_poster_tv_episode';
+  };
+
+  const getSubtitleDescKey = () => {
+    if (isMovie) return 'overlay_rebuild_subtitle_movie';
+    if (scope === 'series') return 'overlay_rebuild_subtitle_tv_series';
+    if (scope === 'season') return 'overlay_rebuild_subtitle_tv_season';
+    return 'overlay_rebuild_subtitle_tv_episode';
+  };
+
+  const getNonNfoDescKey = () => {
+    if (mode === 'poster') return getPosterDescKey();
+    if (mode === 'subtitle') return getSubtitleDescKey();
+    return 'overlay_rebuild_action_generic';
+  };
+
+  const getConfirmTitleKey = () => {
+    if (isMovie) return 'overlay_confirm_title_movie';
+    return 'overlay_confirm_title_tv';
+  };
+
+  const getConfirmContentKey = () => {
+    if (isMovie) return 'overlay_confirm_content_movie';
+    if (scope === 'series') return 'overlay_confirm_content_tv_series';
+    if (scope === 'season') return 'overlay_confirm_content_tv_season';
+    return 'overlay_confirm_content_tv_episode';
+  };
+
+  const getNfoScopeKey = () => {
+    if (isMovie) return 'overlay_nfo_scope_movie';
+    if (scope === 'series') return 'overlay_nfo_scope_tv_series';
+    if (scope === 'season') return 'overlay_nfo_scope_tv_season';
+    return 'overlay_nfo_scope_tv_episode';
+  };
 
   return (
     <div
@@ -186,11 +226,13 @@ export default function RebuildDialog({ open, task, mode, onConfirm, onClose }: 
 
           {/* Non-NFO: simple confirm */}
           {!isNfo && (
-            <p className="text-cyber-cyan/60 text-sm">
-              {mode === 'poster'
-                ? '将强制删除旧 poster.jpg 并从 TMDB 重新下载。'
-                : '将立即触发字幕搜索，结果通常在 30 秒内返回。'}
-            </p>
+            <div className="space-y-2">
+              <p className="text-cyber-cyan/60 text-sm">{t(getNonNfoDescKey() as Parameters<typeof t>[0])}</p>
+              <div className="border border-cyber-cyan/20 bg-cyber-cyan/5 px-3 py-2">
+                <p className="text-cyber-cyan text-xs font-semibold">{t(getConfirmTitleKey() as Parameters<typeof t>[0])}</p>
+                <p className="text-cyber-cyan/55 text-xs mt-1">{t(getConfirmContentKey() as Parameters<typeof t>[0])}</p>
+              </div>
+            </div>
           )}
 
           {/* NFO: nuclear-only flow */}
@@ -199,8 +241,15 @@ export default function RebuildDialog({ open, task, mode, onConfirm, onClose }: 
               {/* Mission briefing */}
               <div className="border border-red-500/30 bg-red-500/5 px-4 py-3">
                 <p className="text-red-400/80 text-xs leading-relaxed">
-                  ☢️ <strong className="text-red-400">核级重构模式</strong>：执行此操作将立即清理目录杂质、
-                  重写 NFO 并重新触发云端识别。<strong className="text-red-400/70">不可撤销。</strong>
+                  <span className="text-red-400 font-semibold">☢️ {t('overlay_nfo_brief_title')}</span>
+                  {' '}
+                  {t('overlay_nfo_brief_content')}
+                  {' '}
+                  <strong className="text-red-400/70">{t('overlay_nfo_irreversible')}</strong>
+                  {' '}
+                  <span className="text-red-300/60">
+                    {t('overlay_nfo_scope_prefix')} {t(getNfoScopeKey() as Parameters<typeof t>[0])}
+                  </span>
                 </p>
               </div>
 
@@ -318,8 +367,8 @@ export default function RebuildDialog({ open, task, mode, onConfirm, onClose }: 
                 </div>
               )}
 
-              {/* TV-only: Season / Episode override inputs */}
-              {mediaType === 'tv' && (
+              {/* TV-only, Episode scope only: Season / Episode override inputs */}
+              {mediaType === 'tv' && scope === 'episode' && (
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-xs text-cyber-cyan/50 uppercase tracking-wider mb-1.5">
@@ -384,7 +433,7 @@ export default function RebuildDialog({ open, task, mode, onConfirm, onClose }: 
                 {t('btn_cancel')}
               </button>
               <button
-                onClick={async () => { await onConfirm({ media_type: mediaType, nuclear_reset: false }); onClose(); }}
+                onClick={async () => { await onConfirm({ media_type: mediaType, nuclear_reset: false, scope }); onClose(); }}
                 className="flex-1 py-2 font-bold text-sm uppercase tracking-wider
                            bg-cyber-cyan text-black hover:bg-cyber-cyan/80 border border-cyber-cyan transition-all"
                 style={{ boxShadow: '0 0 20px rgba(0,230,246,0.35)' }}

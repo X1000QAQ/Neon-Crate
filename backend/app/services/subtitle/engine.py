@@ -308,7 +308,7 @@ class SubtitleEngine:
             "type": "episode" if (media_type or "").lower() == "tv" else "movie",
         }
         
-        # 🚀 致命修复：构建搜索参数时，优先使用 ID，如果 ID 为空则使用 query 参数（文件名降级搜索）
+        # 搜索策略：OpenSubtitles 请求优先携带 IMDb/TMDB ID；无 ID 时降级为 query（如文件名）检索
         has_valid_id = False
         
         if (media_type or "").lower() == "movie":

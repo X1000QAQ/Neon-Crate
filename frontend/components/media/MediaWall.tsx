@@ -11,6 +11,13 @@ const PAGE_SIZE = 20;
 
 export default function MediaWall() {
   const { t } = useLanguage();
+  // React Hooks 死循环止血点：useLanguage 每次渲染都会返回新引用的 `t` 函数，
+  // 若把 `t` 放入 loadTasks 的依赖数组，会导致 loadTasks 身份每渲染变化 -> useEffect 重复发包。
+  const tRef = useRef(t);
+  useEffect(() => {
+    tRef.current = t;
+  }, [t]);
+
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -18,7 +25,6 @@ export default function MediaWall() {
   const [searchKeyword, setSearchKeyword] = useState('');
   const [debouncedKeyword, setDebouncedKeyword] = useState('');
   const [page, setPage] = useState(1);
-  const [total, setTotal] = useState(0);
   const [scraping, setScraping] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [findingSubs, setFindingSubs] = useState(false);
@@ -30,12 +36,12 @@ export default function MediaWall() {
   const [batchDeleteModalOpen, setBatchDeleteModalOpen] = useState(false);
   const [batchDeleting, setBatchDeleting] = useState(false);
 
-  // 🚀 Toast 计时器防抖：防止多次触发导致 Toast 提前消失
+  // 交互契约：Toast 采用单次计时器串行复位，避免并发提示导致可见时长坍缩
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // 🚀 loadTasks AbortController：防止快速切换筛选时旧请求覆盖新数据
+  // 并发控制：列表拉取使用 AbortController，新请求签发时废止前一飞行实例，保证状态与最新筛选一致
   const loadAbortRef = useRef<AbortController | null>(null);
 
-  // 组件卸载时清理 timer 和飞行请求
+  // 生命周期：卸载时释放计时器与中止未决请求，杜绝悬挂异步回写
   useEffect(() => {
     return () => {
       if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -43,15 +49,22 @@ export default function MediaWall() {
     };
   }, []);
 
-  // showToast 必须在 loadTasks 之前定义（loadTasks 依赖它）
+  // 依赖次序：showToast 先于 loadTasks 声明，闭包内引用稳定
   const showToast = useCallback((msg: string) => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     setToast(msg);
     toastTimerRef.current = setTimeout(() => setToast(null), 3000);
   }, []);
 
+  // 语义路由：后端 message 已为 i18n 键或直出句；键命中则翻译，否则原样透出（兼容过渡期混排）
+  const resolveMessageKey = useCallback((raw?: string | null) => {
+    if (!raw) return t('msg_rebuild_complete_default');
+    const translated = (t as (key: string) => string)(raw);
+    return translated !== raw ? translated : raw;
+  }, [t]);
+
   const loadTasks = useCallback(async () => {
-    // 🚀 中止上一次飞行中的请求，防止旧数据覆盖新状态
+    // 1. [请求废止] -> 2. [签发新 Controller] -> 3. [后续分支以 signal 判定是否丢弃过期回包]
     loadAbortRef.current?.abort();
     loadAbortRef.current = new AbortController();
     const signal = loadAbortRef.current.signal;
@@ -69,11 +82,15 @@ export default function MediaWall() {
       const data = await api.getTasks(params);
       if (signal.aborted) return;
       setTasks(data.tasks);
-      setTotal(data.total);
     } catch (error) {
       if ((error as Error)?.name === 'AbortError') return;
       const err = error as Error & { status?: number; body?: unknown };
-      showToast(`加载任务列表失败: ${err?.message ?? '网络错误'}`);
+      showToast(
+        tRef.current('error_load_tasks').replace(
+          '{detail}',
+          err?.message?.trim() ? err.message : tRef.current('error_network_generic'),
+        ),
+      );
     } finally {
       if (!signal.aborted) setLoading(false);
     }
@@ -88,12 +105,12 @@ export default function MediaWall() {
     loadTasks();
   }, [loadTasks]);
 
-  // 🚀 修复分页越界 Bug：当任何过滤条件（状态、类型、搜索词）发生变化时，强制重置回第一页
+  // 1. [筛选语义变更] -> 2. [作品聚合集合重置] -> 3. [页码强制归一，消除「新条件下仍停留在旧页码」的索引空洞]
   useEffect(() => {
     setPage(1);
   }, [statusFilter, typeFilter, debouncedKeyword]);
 
-  // 分页变更时自动回到顶部，避免页面停留在底部影响浏览体验
+  // 物理视图：页码递增后滚动复位，保证列表首屏可见
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, [page]);
@@ -140,13 +157,13 @@ export default function MediaWall() {
   const handleRetry = useCallback(async (taskId: number) => {
     try {
       await api.retryTask(taskId);
-      showToast('任务已解锁，将在下次扫描时重新处理');
+      showToast(t('msg_task_unlocked_rescan'));
       loadTasks();
     } catch (error) {
       console.error('Failed to unlock task:', error);
-      showToast('解锁失败，请重试');
+      showToast(t('msg_unlock_failed'));
     }
-  }, [loadTasks, showToast]);
+  }, [loadTasks, showToast, t]);
 
   const handleDelete = useCallback(async (taskId: number) => {
     if (!confirm(t('confirm_delete_task'))) return;
@@ -167,16 +184,16 @@ export default function MediaWall() {
 
   const handleDeleteBatch = useCallback(async (ids: number[]) => {
     if (ids.length === 0) return;
-    if (!confirm(`确认删除这 ${ids.length} 项记录（含下属所有集）？`)) return;
+    if (!confirm(t('confirm_delete_batch_with_episodes').replace('{count}', String(ids.length)))) return;
     try {
       await api.deleteBatchTasks(ids);
       await loadTasks();
-      showToast(`成功删除 ${ids.length} 条记录`);
+      showToast(t('delete_batch_records_success').replace('{count}', String(ids.length)));
     } catch (error) {
       console.error('Batch delete failed:', error);
-      showToast('批量删除失败');
+      showToast(t('msg_batch_delete_failed'));
     }
-  }, [loadTasks, showToast]);
+  }, [loadTasks, showToast, t]);
 
   const toggleSelect = useCallback((id: number) => {
     setSelectedIds((prev) => {
@@ -261,7 +278,7 @@ export default function MediaWall() {
         setScanning(false);
       }, 2000);
     } catch (error) {
-      showToast(t('scan_trigger_failed') || '扫描触发失败，请重试');
+      showToast(t('scan_trigger_failed'));
       setScanning(false);
     }
   };
@@ -270,9 +287,9 @@ export default function MediaWall() {
     setScraping(true);
     try {
       await api.triggerScrapeAll();
-      setTimeout(() => { loadTasks().catch(() => showToast('刮削后刷新列表失败')); }, 1000);
+      setTimeout(() => { loadTasks().catch(() => showToast(t('msg_refresh_list_after_scrape_failed'))); }, 1000);
     } catch (error) {
-      showToast('刮削触发失败，请重试');
+      showToast(t('msg_scrape_trigger_failed'));
     } finally {
       setScraping(false);
     }
@@ -282,9 +299,9 @@ export default function MediaWall() {
     setFindingSubs(true);
     try {
       await api.triggerFindSubtitles();
-      setTimeout(() => { loadTasks().catch(() => showToast('字幕任务后刷新列表失败')); }, 1000);
+      setTimeout(() => { loadTasks().catch(() => showToast(t('msg_refresh_list_after_subtitle_failed'))); }, 1000);
     } catch (error) {
-      showToast('字幕任务触发失败，请重试');
+      showToast(t('msg_subtitle_task_trigger_failed'));
     } finally {
       setFindingSubs(false);
     }
@@ -300,57 +317,38 @@ export default function MediaWall() {
     keyword_hint?: string;
     tmdb_id?: number;
     nuclear_reset?: boolean;
+    season?: number;
+    episode?: number;
+    scope?: 'series' | 'season' | 'episode';
   }) => {
     try {
       const res = await api.rebuildTask(params);
-      // 解析后端返回的复合 message，转为本地化 Toast
-      const raw = res.message || '';
-      let toastMsg: string;
-      if (raw.startsWith('rebuild_complete:')) {
-        const payload = raw.slice('rebuild_complete:'.length);
-        const labels: string[] = [];
-        for (const part of payload.split(';')) {
-          if (part.startsWith('nfo:')) {
-            const st = part.slice(4);
-            labels.push(t('msg_nfo_rebuild').replace('{status}', st === 'ok' ? '✅' : '❌'));
-          } else if (part.startsWith('poster:')) {
-            const st = part.slice(7);
-            labels.push(t('msg_poster_rebuild').replace('{status}', st === 'ok' ? '✅' : '❌'));
-          } else if (part.startsWith('subtitle:')) {
-            const st = part.slice(9);
-            labels.push(st === 'triggered' ? t('msg_subtitle_triggered') : t('msg_nfo_rebuild').replace('{status}', st));
-          }
-        }
-        toastMsg = labels.length
-          ? t('msg_rebuild_complete') + labels.join(' | ')
-          : t('msg_rebuild_complete');
-      } else {
-        toastMsg = raw || t('msg_rebuild_complete');
-      }
-      showToast(toastMsg);
+      showToast(resolveMessageKey(res.message));
       // 立即刷新一次，同步后端同步写入的字段（nfo/poster）
       await loadTasks();
       // 字幕任务走后台异步链路（OpenSubtitles API 约 4-6 秒），指数退避轮询
       // 轮询计划：3s → 再等 3s → 再等 4s，最多 3 次，检测到终态即停止
       if (params.refix_subtitle) {
         const terminalStates = new Set(['scraped', 'success', 'failed', 'missing']);
-        const intervals = [3000, 3000, 4000]; // 累计 3s / 6s / 10s
-        const taskId = Number(params.task_id); // 强制 number，防止 string/number 严格相等失效
+        // 时序策略：三档间隔累计覆盖异步字幕链路典型耗时窗口
+        const intervals = [3000, 3000, 4000];
+        // 类型契约：task_id 规范为 number，与快照列表中的 id 严格相等匹配
+        const taskId = Number(params.task_id);
         for (const ms of intervals) {
           await new Promise<void>(resolve => setTimeout(resolve, ms));
           await loadTasks();
           try {
-            // _t 参数强制击穿浏览器 GET 缓存，确保每次拿到最新快照
+            // 观测：全量拉取任务快照以读取目标 sub_status；与列表刷新解耦，专用于终态判定
             const snapshot = await api.getTasks({ page: 1, page_size: 99999 });
             const target = snapshot.tasks.find((tk: import('@/types').Task) => Number(tk.id) === taskId);
             if (target && terminalStates.has((target.sub_status || '').toLowerCase())) break;
-          } catch { /* 轮询检测失败静默，不影响主流程 */ }
+          } catch { /* 轮询观测失败不阻断主流程：终态可能延后由后续扫描呈现 */ }
         }
       }
     } catch (error) {
-      showToast(`${t('msg_rebuild_complete').replace('：', '')}${t('op_failed')}: ${(error as Error)?.message ?? t('error_unknown')}`);
+      showToast(t('msg_rebuild_failed_generic'));
     }
-  }, [loadTasks, showToast, t]);
+  }, [loadTasks, resolveMessageKey, showToast, t]);
 
   return (
     <div className="w-full h-full flex flex-col">

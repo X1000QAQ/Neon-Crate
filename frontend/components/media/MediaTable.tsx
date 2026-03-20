@@ -80,6 +80,7 @@ export interface MediaTableProps {
     nuclear_reset?: boolean;
     season?: number;
     episode?: number;
+    scope?: 'series' | 'season' | 'episode';
   }) => Promise<void>;
 }
 
@@ -96,6 +97,14 @@ function getSubStatusColor(sub?: string | null) {
   if (s === 'scraped' || s === 'success' || s === 'found') return 'border-cyber-cyan text-cyber-cyan bg-cyber-cyan/10';
   if (s === 'failed' || s === 'missing') return 'border-cyber-red text-cyber-red bg-cyber-red/10';
   return 'border-cyber-cyan/20 text-cyber-cyan/50 bg-cyber-cyan/5';
+}
+
+function getStatusLabel(status: string | null | undefined, t: (k: I18nKey) => string): string {
+  const raw = (status || 'pending').toLowerCase();
+  const key = (`status_${raw}`) as I18nKey;
+  const translated = (t as (k: string) => string)(key);
+  if (translated !== key) return translated;
+  return (t as (k: string) => string)('status_unknown');
 }
 
 // ── sub_status 复合字符串解析器 ──────────────────────────────────────
@@ -124,10 +133,11 @@ function formatSubStatus(raw: string | null | undefined, t: (k: I18nKey) => stri
       : t('msg_rebuild_complete');
   }
   // 2. 标准枚举映射：直接查 sub_status_{raw}
-  //    找不到时严禁显示 key 名，直接返回原始值（不带前缀）
+  //    找不到时回退 sub_status_unknown（严禁把 key 名直接暴露给用户）
   const key = ('sub_status_' + raw.toLowerCase()) as I18nKey;
   const trans = (t as (k: string) => string)(key);
-  return trans !== key ? trans : raw;
+  if (trans !== key) return trans;
+  return (t as (k: string) => string)('sub_status_unknown');
 }
 
 // ── 补录按钮是否可用 ─────────────────────────────────────────────────
@@ -149,11 +159,13 @@ interface UniversalMediaRowProps {
   progress?: number;
   onDelete: () => void;
   task?: Task;
-  onRebuildClick?: (task: Task, mode: RebuildMode) => void;
+  onRebuildClick?: (task: Task, mode: RebuildMode, scope?: 'series' | 'season' | 'episode') => void;
   rebuildingId?: number | null;
   processingId?: number | null;
   setProcessingId?: (id: number | null) => void;
   onRetry?: (id: number) => void;
+  hidePoster?: boolean;
+  scopeOverride?: 'series' | 'season' | 'episode';
 }
 
 // ── UniversalMediaRow — 等高行组件（所有层级共用）────────────────────
@@ -161,9 +173,11 @@ const UniversalMediaRow = memo(function UniversalMediaRow({
   level, isExpandable, isExpanded, onToggle,
   posterSrc, title, subtitle, status = 'pending', progress,
   onDelete, task, onRebuildClick, rebuildingId, processingId,
-  setProcessingId, onRetry,
+  setProcessingId, onRetry, hidePoster = false, scopeOverride,
 }: UniversalMediaRowProps) {
   const { t } = useLanguage();
+  const resolvedScope: 'series' | 'season' | 'episode' =
+    scopeOverride ?? (level === 1 ? 'season' : level === 2 ? 'episode' : 'series');
 
   const effectiveStatus = (task?.status ?? status ?? 'pending').toLowerCase();
   const isIgnored = effectiveStatus === 'ignored';
@@ -225,13 +239,13 @@ const UniversalMediaRow = memo(function UniversalMediaRow({
           {/* VHS Glitch — 仅 ignored 状态激活 */}
           {isIgnored && (
             <div className="absolute inset-0 pointer-events-none vhs-ignored">
-              {/* VHS 噪点纹理（Demo：SVG turbulence） */}
+              {/* VHS 叠层 · 噪点纹理（视觉语义层 / SVG turbulence） */}
               <div className="absolute inset-0 z-10 opacity-30 vhs-noise" />
 
-              {/* VHS 扫描线（Demo：粗糙 5px 间距） */}
+              {/* VHS 叠层 · 扫描线（视觉语义层 / 5px 栅格） */}
               <div className="absolute inset-0 z-20 opacity-40 vhs-scanlines" />
 
-              {/* 磁带拉伸条（Demo：横向 tracking bar） */}
+              {/* VHS 叠层 · 磁带拉伸条（视觉语义层 / tracking bar） */}
               <div className="absolute left-0 right-0 h-6 z-20 opacity-60 vhs-tracking-bar" style={{ top: '30%' }} />
               <div
                 className="absolute left-0 right-0 h-5 z-20 opacity-40"
@@ -242,18 +256,18 @@ const UniversalMediaRow = memo(function UniversalMediaRow({
                 }}
               />
 
-              {/* VHS 色彩分离（Demo：红/蓝偏移） */}
+              {/* VHS 叠层 · 色彩分离（视觉语义层 / RGB 通道偏移） */}
               <div className="absolute inset-0 z-25 mix-blend-screen opacity-20 vhs-rgb-red" />
               <div className="absolute inset-0 z-25 mix-blend-screen opacity-20 vhs-rgb-blue" />
 
-              {/* 顶部时间码（Demo：REC bar） */}
+              {/* VHS 叠层 · 顶部时间码条（视觉语义层 / REC bar） */}
               <div className="absolute top-0.5 left-0.5 right-0.5 z-30">
                 <div className="px-1 py-[1px] bg-black/70 backdrop-blur-sm text-orange-400 text-[7px] font-mono leading-none">
                   ▶ REC 00:00:00:00 [CORRUPTED]
                 </div>
               </div>
 
-              {/* VHS 时间码错误印章（Demo：橙色 TAPE ERROR） */}
+              {/* VHS 叠层 · 故障印章（视觉语义层 / TAPE ERROR） */}
               <div className="absolute inset-0 flex items-center justify-center z-30">
                 <div
                   className="px-1.5 py-1 bg-orange-600/80 border border-orange-400 text-white font-mono text-[8px] backdrop-blur-sm"
@@ -298,7 +312,7 @@ const UniversalMediaRow = memo(function UniversalMediaRow({
           {task ? (
             <div className="flex items-center gap-1.5 flex-shrink-0">
               <span className={cn('px-2 py-0.5 text-xs font-semibold border', getStatusColor(task.status))}>
-                {t(('status_' + task.status.toLowerCase()) as Parameters<typeof t>[0]) || task.status}
+                {getStatusLabel(task.status, t)}
               </span>
               <span className={cn('px-2 py-0.5 text-xs font-semibold border', getSubStatusColor(task.sub_status))}>
                 {formatSubStatus(task.sub_status, t)}
@@ -306,7 +320,7 @@ const UniversalMediaRow = memo(function UniversalMediaRow({
             </div>
           ) : (
             <span className={cn('px-2 py-0.5 text-xs font-semibold border flex-shrink-0', getStatusColor(status))}>
-              {t(('status_' + status.toLowerCase()) as Parameters<typeof t>[0]) || status}
+              {getStatusLabel(status, t)}
             </span>
           )}
 
@@ -334,21 +348,23 @@ const UniversalMediaRow = memo(function UniversalMediaRow({
               </span>
               {canRebuild(task.status) && (
                 <div className="flex items-center gap-1">
-                  <button onClick={(e) => { e.stopPropagation(); onRebuildClick(task, 'nfo'); }} disabled={rebuildingId === task.id}
+                  <button onClick={(e) => { e.stopPropagation(); onRebuildClick(task, 'nfo', resolvedScope); }} disabled={rebuildingId === task.id}
                     title={t('tooltip_rebuild_nfo')}
                     className={cn('p-1 border text-xs transition-all',
                       rebuildingId === task.id ? 'border-cyber-cyan/20 text-cyber-cyan/20 cursor-wait'
                         : 'border-cyber-cyan/50 text-cyber-cyan/70 hover:border-cyber-cyan hover:bg-cyber-cyan/10')}>
                     <FileText size={12}/>
                   </button>
-                  <button onClick={(e) => { e.stopPropagation(); onRebuildClick(task, 'poster'); }} disabled={rebuildingId === task.id}
-                    title={t('tooltip_rebuild_poster')}
-                    className={cn('p-1 border text-xs transition-all',
-                      rebuildingId === task.id ? 'border-purple-400/20 text-purple-400/20 cursor-wait'
-                        : 'border-purple-400/50 text-purple-400/70 hover:border-purple-400 hover:bg-purple-400/10')}>
-                    <Image size={12}/>
-                  </button>
-                  <button onClick={(e) => { e.stopPropagation(); onRebuildClick(task, 'subtitle'); }} disabled={rebuildingId === task.id}
+                  {!hidePoster && (
+                    <button onClick={(e) => { e.stopPropagation(); onRebuildClick(task, 'poster', resolvedScope); }} disabled={rebuildingId === task.id}
+                      title={t('tooltip_rebuild_poster')}
+                      className={cn('p-1 border text-xs transition-all',
+                        rebuildingId === task.id ? 'border-purple-400/20 text-purple-400/20 cursor-wait'
+                          : 'border-purple-400/50 text-purple-400/70 hover:border-purple-400 hover:bg-purple-400/10')}>
+                      <Image size={12}/>
+                    </button>
+                  )}
+                  <button onClick={(e) => { e.stopPropagation(); onRebuildClick(task, 'subtitle', resolvedScope); }} disabled={rebuildingId === task.id}
                     title={t('tooltip_trigger_subtitle')}
                     className={cn('p-1 border text-xs transition-all',
                       rebuildingId === task.id ? 'border-green-400/20 text-green-400/20 cursor-wait'
@@ -426,11 +442,11 @@ function MediaTable({
   const [dialogTask, setDialogTask] = useState<Task | null>(null);
   const [dialogMode, setDialogMode] = useState<RebuildMode>('nfo');
 
-  // Accordion open state: Set of group keys (L1) and season keys "key:season" (L2)
+  // 折叠状态机：L1 为作品组 key 集合；L2 为「组 key:季号」二级键集合
   const [openL1, setOpenL1] = useState<Set<string>>(new Set());
   const [openL2, setOpenL2] = useState<Set<string>>(new Set());
 
-  // useMemo grouping — O(n) single pass
+  // 派生数据：单次线性扫描构建分组映射，禁止在 render 路径做 O(n²) 聚合
   const groups = useMemo((): MediaGroup[] => {
     const map = new Map<string, MediaGroup>();
     for (const task of tasks) {
@@ -474,13 +490,27 @@ function MediaTable({
     setOpenL2(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
   }, []);
 
-  const handleRebuildClick = useCallback((task: Task, mode: RebuildMode) => {
+  const [dialogScope, setDialogScope] = useState<'series' | 'season' | 'episode'>('episode');
+
+  const handleRebuildClick = useCallback((
+    task: Task,
+    mode: RebuildMode,
+    scope: 'series' | 'season' | 'episode' = 'episode',
+  ) => {
     setDialogTask(task);
     setDialogMode(mode);
+    setDialogScope(scope);
     setDialogOpen(true);
   }, []);
 
-  const handleRebuildConfirm = useCallback(async (params: { tmdb_id?: number; media_type: string; nuclear_reset: boolean; season?: number; episode?: number }) => {
+  const handleRebuildConfirm = useCallback(async (params: {
+    tmdb_id?: number;
+    media_type: string;
+    nuclear_reset: boolean;
+    season?: number;
+    episode?: number;
+    scope?: 'series' | 'season' | 'episode';
+  }) => {
     if (!dialogTask) return;
     setRebuildingId(dialogTask.id);
     try {
@@ -495,11 +525,12 @@ function MediaTable({
         nuclear_reset: params.nuclear_reset,
         season: params.season,
         episode: params.episode,
+        scope: params.scope ?? dialogScope,
       });
     } finally {
       setRebuildingId(null);
     }
-  }, [dialogTask, dialogMode, onRebuild]);
+  }, [dialogTask, dialogMode, dialogScope, onRebuild]);
 
   if (loading) {
     return (
@@ -531,7 +562,7 @@ function MediaTable({
 
   return (
     <>
-      {/* Batch toolbar */}
+      {/* 批量选择工具条 */}
       <div className="border-b border-cyber-cyan/50 p-2 mb-1" style={{ backdropFilter: 'blur(15px)' }}>
         <div className="flex items-center gap-3">
           <input type="checkbox" checked={isAllSelected}
@@ -580,6 +611,11 @@ function MediaTable({
               ? 'ignored'
               : (group.archived_count === group.total_count ? 'archived' : 'pending');
 
+            // ── Series 代理任务（用于 Series 级补录按钮）────────────────
+            const seriesRepTask = Array.from(group.seasons.values())
+              .flat()
+              .find(ep => (ep.status || '').toLowerCase() === 'archived' && ep.imdb_id);
+
             const tvRoot = (
               <UniversalMediaRow
                 level={0}
@@ -588,14 +624,20 @@ function MediaTable({
                 onToggle={() => toggleL1(group.key)}
                 posterSrc={group.poster_path}
                 title={group.title || group.clean_name || ''}
-                subtitle={`共 ${group.total_count} 集`}
+                subtitle={t('media_table_tv_total_episodes').replace('{count}', String(group.total_count))}
                 status={tvRootStatus}
                 progress={tvProgress}
                 onDelete={() => onDeleteBatch(allEpisodeIds)}
+                task={seriesRepTask}
+                scopeOverride="series"
+                onRebuildClick={handleRebuildClick}
+                rebuildingId={rebuildingId}
+                processingId={processingId}
+                setProcessingId={setProcessingId}
               />
             );
 
-            if (!l1Open) return tvRoot;
+            if (!l1Open) return <Fragment key={group.key}>{tvRoot}</Fragment>;
 
             return (
               <Fragment key={group.key}>
@@ -618,6 +660,10 @@ function MediaTable({
                     ? 'ignored'
                     : (seasonArchived === episodes.length ? 'archived' : 'pending');
 
+                  // ── Season 代理任务（激活 Season 行右侧补录按钮）────────
+                  const seasonRepTask = episodes
+                    .find(ep => (ep.status || '').toLowerCase() === 'archived' && ep.imdb_id);
+
                   const seasonRow = (
                     <UniversalMediaRow
                       level={1}
@@ -625,15 +671,21 @@ function MediaTable({
                       isExpanded={l2Open}
                       onToggle={() => toggleL2(l2Key)}
                       posterSrc={group.poster_path}
-                      title={`Season ${season}`}
-                      subtitle={`${episodes.length} 集`}
+                      title={t('media_table_season_label').replace('{season}', String(season))}
+                      subtitle={t('media_table_tv_season_episodes').replace('{count}', String(episodes.length))}
                       status={seasonStatus}
                       progress={seasonProgress}
                       onDelete={() => onDeleteBatch(seasonIds)}
+                      task={seasonRepTask}
+                      scopeOverride="season"
+                      onRebuildClick={handleRebuildClick}
+                      rebuildingId={rebuildingId}
+                      processingId={processingId}
+                      setProcessingId={setProcessingId}
                     />
                   );
 
-                  if (!l2Open) return seasonRow;
+                  if (!l2Open) return <Fragment key={l2Key}>{seasonRow}</Fragment>;
 
                   return (
                     <Fragment key={l2Key}>
@@ -645,7 +697,8 @@ function MediaTable({
                             key={ep.id}
                             level={2}
                             task={ep}
-                            title={`E${String(ep.episode ?? 0).padStart(2, '0')} ${ep.title || ''}`}
+                            hidePoster={true}
+                            title={`${group.title || group.clean_name || ''} S${String(season).padStart(2, '0')}E${String(ep.episode ?? 0).padStart(2, '0')}`.trim()}
                             subtitle={ep.file_name || ''}
                             onDelete={() => onDelete(ep.id)}
                             onRetry={onRetry}
@@ -665,12 +718,13 @@ function MediaTable({
           return null;
         })}
       </div>
-      {/* RebuildDialog */}
+      {/* 补录 / 核级确认弹层 */}
       {dialogTask && (
         <RebuildDialog
           open={dialogOpen}
           task={dialogTask}
           mode={dialogMode}
+          scope={dialogScope}
           onConfirm={handleRebuildConfirm}
           onClose={() => setDialogOpen(false)}
         />

@@ -16,7 +16,7 @@ export interface Task {
   poster_path?: string;
   local_poster_path?: string;
   target_path?: string;
-  sub_status?: 'pending' | 'failed' | 'missing' | 'scraped' | 'found';
+  sub_status?: 'pending' | 'failed' | 'missing' | 'scraped' | 'found' | 'success';
   season?: number | null;
   episode?: number | null;
   created_at: string;

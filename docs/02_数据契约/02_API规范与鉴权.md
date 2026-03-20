@@ -2,7 +2,7 @@
 
 **文档编号**：CONTRACT-002  
 **版本**：v1.0.0-Stable  
-**最后更新**：2026-03-14  
+**最后更新**：2026-03-20  
 
 ---
 
@@ -47,6 +47,8 @@
 | GET | `/tasks/scrape_all/status` | 刮削状态 |
 | POST | `/tasks/find_subtitles` | 字幕查找 |
 | GET | `/tasks/find_subtitles/status` | 字幕状态 |
+| POST | `/tasks/manual_rebuild` | 手动补录或全量重建（见下文） |
+| GET | `/tasks/search_tmdb` | TMDB 关键词搜索（补录弹窗候选，最多 10 条） |
 
 ### 媒体库操作
 | 方法 | 路径 | 说明 | is_archive 传递 |
@@ -59,7 +61,7 @@
 | POST | `/tasks/{id}/retry` | 重试失败任务 | 请求体需包含 is_archive |
 | POST | `/tasks/{id}/ignore` | 标记 ignored | 请求体需包含 is_archive |
 | POST | `/tasks/{id}/archive` | 手动归档 | 请求体需包含 is_archive |
-| POST | `/tasks/manual_rebuild` | 核级重构 | 🚨 必须传递 is_archive |
+| POST | `/tasks/manual_rebuild` | 手动补录 / 全量重建 | 🚨 必须传递 `is_archive` |
 
 ### 设置
 | 方法 | 路径 | 说明 |
@@ -70,69 +72,70 @@
 
 ---
 
-## 五、核级重构端点（/api/v1/tasks/manual_rebuild）— v1.0.0
+## 四、手动补录与全量重建（`/api/v1/tasks/manual_rebuild`）
+
+### 路由职责划分
+
+| 标志 | 引擎 | 语义 |
+|------|------|------|
+| `nuclear_reset: false`（默认） | `AssetPatchEngine` | **补录（Patch）**：在门控允许时重写 NFO/海报/字幕，物理位移受 `path_changed` 等约束 |
+| `nuclear_reset: true` | `NuclearEngine` | **全量重建**：按 `scope`（`series` / `season` / `episode`）走 TV 批量或单集/电影主轴，可搬迁视频与级联清理空目录 |
 
 ### POST /tasks/manual_rebuild
 
-**请求体**：
+**请求体（与 `ManualRebuildRequest` 对齐）**：
 ```json
 {
   "task_id": 123,
-  "is_archive": true,              // 🚨 必须传递：0=热表，1=冷表
+  "is_archive": true,
   "tmdb_id": 550,
-  "keyword_hint": "The Matrix",
+  "keyword_hint": null,
   "media_type": "movie",
   "refix_nfo": true,
   "refix_poster": true,
   "refix_subtitle": true,
-  "nuclear_reset": true,           // 核级清理标志
-  "season": 1,                     // TV 专用
-  "episode": 1                     // TV 专用
+  "nuclear_reset": false,
+  "season": 1,
+  "episode": 1,
+  "scope": "episode"
 }
 ```
 
-**响应体**：
+- **`is_archive`**：🚨 必传语义——`false` 查热表 `tasks`，`true` 查冷表 `media_archive`（列表里的 `id` 对冷表即为 `original_task_id`）。
+- **`scope`**：TV 全量重建时使用；`episode` 时请求体中的 `season`/`episode` 可覆盖库内值。
+- **`tmdb_id`**：可选；缺省时尝试用任务记录中的 TMDB；若有则拉 TMDB 详情补齐 title/year/imdb。
+
+**响应体（字段随引擎路径略有差异，典型结构）**：
 ```json
 {
   "success": true,
-  "task_id": 123,
-  "title": "The Matrix",
-  "tmdb_id": 550,
   "rebuilt": {
-    "nfo": true,                   // NFO 是否成功写入
-    "poster": true,                // 海报是否成功下载
-    "subtitle": "success",         // 字幕状态：success/pending/failed
-    "nuclear": true                // 核级清理是否执行
+    "nfo": true,
+    "poster": true,
+    "subtitle": "skipped",
+    "nuclear": false
   },
-  "message": "核级重构完成"
+  "message": "msg_rebuild_success_patch_movie"
 }
 ```
 
-**业务链路**：
-1. 根据 `is_archive` 选择查询表（热表 tasks 或冷表 media_archive）
-2. 校验 `target_path` 有效性
-3. 初始化 TMDB 适配器
-4. 金标准防重预检（检查本地 NFO 中的 IMDb ID）
-5. 核级清理（删除旧 NFO、海报、Fanart）
-6. 视频文件重命名
-7. 文件夹土木工程
-8. 调用 `update_any_task_metadata()`（更新元数据）
-9. 调用 `update_task_status()`（触发归档流程）
-10. NFO 生成与写入
-11. 海报下载与存储
-12. 字幕检测（本地白嫖）
-13. 返回重建结果
+`message` 多为 i18n 键或后端消息键，由前端 `t()` 映射展示。
 
-**关键设计**：
-- **is_archive 致命重要**：决定操作哪张表，若未传递则后端无法确定
-- **物理感知护盾**：金标准 IMDb 校验通过后，仍需 `NFO 存在 + poster.* 物理存在` 才允许短路；若 **有 NFO 但无海报**，系统将强制解除护盾触发补领
-- **TV 季/集号作用域护盾**：`season/episode` 在 `manual_rebuild` 生命周期内提前初始化（请求优先、DB 兜底），保证非核级精准补录同样能写回 DB，避免 TV 单点补录触发 `UnboundLocalError`
-- **核级清理**：删除旧元数据文件，确保新数据写入无冲突
-- **字幕白嫖**：归档完成后立即检测本地字幕，零 API 消耗
+**服务端主路径**：
+1. 按 `is_archive` 加载任务行，校验 `target_path` / `metadata_dir`。
+2. 解析 `library_root`；**TV** 下与白名单 `paths` 纠偏，避免误用 download 目录。
+3. 配置 TMDB Key 与 `MetadataManager`，组装 `ctx`（含 `new_tmdb_id`、`task_season`、`task_episode` 等）。
+4. 分支调用 `NuclearEngine` 或 `AssetPatchEngine.execute()`（同步执行，可能较慢；前端 `api.rebuildTask` 使用延长超时）。
+
+### GET /tasks/search_tmdb
+
+- **Query**：`keyword`（必填）、`media_type`（默认 `movie`，支持 `tv`）。
+- **响应**：`{ tmdb_id, title, year, overview, poster_path, imdb_id }[]`，最多 10 条。
+- **错误**：未配置 TMDB Key → 500；上游失败 → 502。
 
 ---
 
-## 六、系统端点（/api/v1/system）
+## 五、系统端点（/api/v1/system）
 
 ### GET /system/stats
 
@@ -156,7 +159,7 @@ Query: `?path=<URL编码路径>`
 
 ---
 
-## 七、AI 对话端点（/api/v1/agent）
+## 六、AI 对话端点（/api/v1/agent）
 
 ### POST /agent/chat
 
@@ -182,7 +185,7 @@ Query: `?path=<URL编码路径>`
 
 ---
 
-## 八、前端调用规范
+## 七、前端调用规范
 
 ```typescript
 // ✅ 正确：通过 lib/api.ts 调用
@@ -208,11 +211,11 @@ if (posterPath?.startsWith('http')) return posterPath;
 
 ---
 
-## 七、后端开发规范
+## 八、后端开发规范
 
 - 所有新增业务 API 必须通过 `api_router` 挂载，不得绕过全局 JWT 依赖
 - 所有过滤规则必须来自数据库，严禁硬编码
 - 图片访问必须通过 `/api/v1/public/image` 代理
 - 设置保存前必须执行 1+1 路径约束校验
 
-*Neon Crate 系统架构师 | v1.0.0-Stable | 2026-03-14*
+*Neon Crate 系统架构师 | v1.0.0-Stable | 2026-03-20*

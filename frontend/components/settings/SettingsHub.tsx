@@ -17,7 +17,7 @@ export default function SettingsHub() {
   const { isLoading, isSaving, saveSettings } = useSettings();
   const [activeTab, setActiveTab] = useState<'basic' | 'paths' | 'api' | 'regex' | 'inference' | 'persona'>('basic');
 
-  // [C-04 修复] 用局部 Toast 替代 alert() + window.location.reload()，回归 SPA 体验
+  // 反馈契约：配置类操作用页内 Toast，避免 alert 与整页 reload 打断 SPA 状态
   const [toast, setToast] = useState<string | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const showToast = useCallback((msg: string) => {
@@ -130,7 +130,7 @@ export default function SettingsHub() {
         </div>
       </div>
 
-      {/* [C-04] 局部 Toast 通知：替代 alert() + reload() */}
+      {/* 局部 Toast：配置保存结果的非阻塞反馈 */}
       {toast && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg bg-cyber-cyan text-black font-medium shadow-lg animate-slide-up">
           {toast}

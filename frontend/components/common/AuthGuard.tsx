@@ -19,11 +19,10 @@
  * 3. 退出动画 300ms → 移除组件
  * 4. 渲染主界面
  *
- * [架构修复 2026-03-15]
- * authenticatedWrapper prop：
- * - 登录页（/auth/login）直接渲染裸 children，跳过 wrapper
- * - 认证成功后才将 children 包裹在 wrapper 内（如 AuthenticatedShell）
- * - 彻底消除 SettingsProvider/LogProvider 在登录页提前挂载轮询的 401 噪音
+ * authenticatedWrapper：
+ * - /auth/login：始终裸渲染 children，不套 wrapper
+ * - isAuthenticated：用 wrapper 包裹 children（如注入 SettingsProvider 的壳层）
+ * 未认证时不挂载依赖 Token 的全局 Provider，避免登录页周期性 401
  *
  * ============================================================================
  */
@@ -56,11 +55,8 @@ export default function AuthGuard({
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
   const [showBypass, setShowBypass] = useState(false);
-  // 🚀 组件生命周期加固：
-  // 1. 注册追踪：将所有运行时产生的 setTimeout ID 集中存入 useRef 数组，而非分散管理
-  // -> 2. 静默清理：useEffect cleanup 遍历并 clearTimeout 所有未完成的计时器
-  // -> 3. 预防报错：防止组件卸载后异步回调尝试更新已不存在的 state，
-  //    避免 React "unmounted component" 警告与潜在内存泄漏
+  // 1. [计时器登记] -> 2. [卸载清理] -> 3. [卸载后禁写]
+  // timerRefs 集中持有 setTimeout id，cleanup 全量 clear，避免卸载后 setState
   const timerRefs = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   useEffect(() => {

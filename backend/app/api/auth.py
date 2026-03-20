@@ -42,9 +42,8 @@ from app.models.domain_system import (
 )
 
 router = APIRouter()
-# auto_error=False：当请求缺少 Authorization 头时，不自动抛出 403，
-# 而是将 credentials 设为 None，由 get_current_user 统一返回 401。
-# 这修复了局域网设备访问时日志中出现的 403 Forbidden 问题。
+# auto_error=False：缺少 Authorization 头时不由 HTTPBearer 抛 403，而是 credentials=None，
+# 由 get_current_user 统一返回 401（未认证语义），与 Bearer 守卫契约一致。
 security = HTTPBearer(auto_error=False)
 
 
@@ -127,10 +126,10 @@ def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] = Depen
     """
     验证 JWT Token 并返回当前用户名（全局守卫）
 
-    修复说明：
-    - HTTPBearer(auto_error=False) 使得缺少 Authorization 头时 credentials=None
-    - 此处统一处理 None 和无效 token，均返回 401（而非默认的 403）
-    - 401 语义更准确："未认证"，客户端应重新登录
+    守卫语义：
+    - HTTPBearer(auto_error=False) 下无头时 credentials 为 None
+    - None 与无效 token 一律 401，统一为「未认证」
+    - 与 403「已认证但无权限」区分，驱动客户端重登
     """
     if credentials is None:
         raise HTTPException(

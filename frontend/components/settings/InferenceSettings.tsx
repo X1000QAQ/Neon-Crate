@@ -77,7 +77,7 @@ export default function InferenceSettings({ t }: Props) {
           type={isVisible ? 'text' : 'password'}
           value={value}
           onChange={(e) => {
-            // 立即提取 value，防止合成事件在异步 setState 前被回收（paste 崩溃根因）
+            // 事件边界：异步 setState 前同步读取 value，避免合成事件池回收导致空读
             const val = e.currentTarget.value;
             setLocalKeyValue(key, val);
           }}

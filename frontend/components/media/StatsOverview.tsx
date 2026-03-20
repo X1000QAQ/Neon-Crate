@@ -63,12 +63,10 @@ export default function StatsOverview() {
   const [scanning, setScanning] = useState(false);
   const [scraping, setScraping] = useState(false);
   const [findingSubs, setFindingSubs] = useState(false);
-  // 🚀 组件生命周期加固：
-  // 1. 注册追踪：scanBoostTimerRef 追踪高频轮询，toastTimerRef 追踪 Toast 消除
-  // -> 2. 静默清理：useEffect cleanup 取消所有未完成的 clearInterval + clearTimeout
-  // -> 3. 预防报错：防止组件卸载后异步回调尝试 setStats/setToast 更新已卸载的 state
+  // 1. [计时器登记] -> 2. [卸载清理] -> 3. [卸载后禁写]
+  // scanBoostTimerRef：高频轮询；toastTimerRef：Toast 自动消除；cleanup 统一 clear，避免卸载后 setState
   const scanBoostTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // 🚀 Toast 计时器防抖：多次触发时先取消旧计时器再重新计时，确保提示不会过早消失
+  // Toast 门控：新提示前清除旧延时，重置 3s 展示窗口
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [toast, setToast] = useState<string | null>(null);
@@ -105,7 +103,7 @@ export default function StatsOverview() {
       await loadStats();
         if (scanBoostTimerRef.current) clearTimeout(scanBoostTimerRef.current);
 
-      // 🚀 递归 setTimeout 指数退避策略（替代 setInterval 嵌套清除的丧尸炸弹）
+      // 轮询策略：递归 setTimeout + 指数退避，Unmount 时单次 clear 即可，避免多层 interval 泄漏
       // 0-10s: 每 1.5s 刷新（极速响应）
       // 10-30s: 每 5s 刷新（平稳监控）
       // 30s 后: 不再调度，自然退出（休眠保护）

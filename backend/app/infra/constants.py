@@ -27,7 +27,8 @@ VIDEO_EXTS = frozenset({
 VIDEO_EXTS_EXTENDED = frozenset({
     ".mkv", ".mp4", ".avi", ".mov", ".wmv",
     ".ts", ".flv", ".m2ts",
-    ".webm", ".m4v", ".mpg", ".mpeg"  # 扫描引擎专用，支持更多网络视频格式
+    ".webm", ".m4v", ".mpg", ".mpeg",  # 扫描引擎专用，支持更多网络视频格式
+    ".rmvb", ".iso", ".vob"            # 历史兜底扩展名：兼容旧版扫描/清理范围
 })
 
 # ── 字幕扩展名（分用途定义）─────────────────────────────────────

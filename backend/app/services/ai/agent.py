@@ -397,10 +397,10 @@ class AIAgent:
         """
         使用 LLM 生成智能响应（总控中枢神经接通版）
         
-        核心修复：
-        1. 所有意图分支都注入 ai_persona（AI 人格），确保响应符合用户设定的人格
-        2. 抛弃硬编码响应文本，改为动态调用 LLM 生成个性化回复
-        3. 保留系统运行快报，实现全时态感知
+        总控契约：
+        1. 各意图分支统一注入 ai_persona，约束生成风格与用户配置一致
+        2. 非模板类意图走 LLM 动态生成，替代静态应答
+        3. 系统状态类意图附带运行快报上下文，约束输出与观测数据对齐
         
         Args:
             message: 用户消息
@@ -564,7 +564,7 @@ class AIAgent:
             # 
             # 核心流程：
             # 1. 从 LLM 返回的 JSON 中提取结构化数据（片名、类型、年份）
-            # 2. 序号补全：修复 LLM 常把「美国队长1」的「1」丢掉的问题
+            # 2. 序号归一：将用户原话末尾部/集序号并入结构化片名，与 LLM 抽取结果对齐
             # 3. 模糊意图处理：无年份且无序号时，查询 TMDB 候选列表让用户选择
             # 4. 调用 Servarr 客户端（Radarr/Sonarr）下发下载任务
             # 5. 返回下载结果或候选列表
@@ -575,22 +575,20 @@ class AIAgent:
             # - 保存状态：将候选列表存入数据库（跨请求持久化）
             # - 用户选择：下次对话时匹配用户输入的序号或片名
             # 
-            # 序号补全机制：
-            # - 问题：LLM 常把「美国队长1」识别为「美国队长」
-            # - 解决：从原始消息提取末尾序号（中文或阿拉伯数字）
-            # - 支持：「第一部」「第二部」「1」「2」等格式
+            # 序号派生规则：
+            # - 当 clean_name 未含部/集序号时，从用户原话尾部解析（中文或阿拉伯数字）
+            # - 与 clean_name 去重合并，避免重复缀号
             # ==========================================
             # 1. 从 intent_data 中提取结构化数据
             clean_name = intent_data.get("clean_name", "").strip()
             en_name = intent_data.get("en_name", "").strip()  # 80B 提供的英文名，优先用于 TMDB 搜索
-            media_type = intent_data.get("media_type", "movie").strip().lower()  # ← 修复：字段名 media_type 非 type
+            media_type = intent_data.get("media_type", "movie").strip().lower()  # 契约：意图 JSON 使用 media_type，与历史 type 字段区分
             year = intent_data.get("year", "").strip()
             # TMDB 搜索优先用英文名（准确），无英文名时用中文名
             search_name = en_name if en_name else clean_name
             logger.info(f"[DOWNLOAD] 提取意图 -> 片名: {clean_name}, 类型: {media_type}, 年份: {year}")
 
-            # 🚀 序号补全修复：LLM 常把「美国队长1」的「1」丢掉
-            # 若 clean_name 不含序号，但原始消息末尾有数字，则补回去
+            # 序号派生：clean_name 缺尾缀序号且用户消息尾部可解析部/集号时，并入片名
             if clean_name and not year:
                 import re as _re
                 # 中文数字映射
@@ -891,11 +889,11 @@ class AIAgent:
             media_type = self._detect_media_type(message)
             year = self._extract_year(message)
             
-            # 🚀 v1.0.0 关键修复：统一使用 clean_name 键名
+            # 下载意图返回体契约：片名字段固定为 clean_name，供下游 Hunter 引擎消费
             return {
                 "intent": self.DOWNLOAD,
-                "clean_name": media_name,  # 统一键名
-                "type": media_type,
+                "clean_name": media_name,
+                "media_type": media_type,
                 "year": year
             }
         
@@ -984,7 +982,9 @@ class AIAgent:
 
     async def ai_identify_media(
         self, cleaned_name: str, full_path: str, type_hint: str,
-        keyword_hint: Optional[str] = None
+        keyword_hint: Optional[str] = None,
+        locked_season: Optional[int] = None,
+        locked_episode: Optional[int] = None,
     ) -> Optional[Dict]:
         """
         🧠 AI 归档专家 - 智能影视文件识别引擎
@@ -1091,7 +1091,7 @@ class AIAgent:
             """
             对 LLM 返回结果进行三级置信度分类：
               PASS    - query 有效，直接使用
-              REPAIR  - query 为幻觉词但 year 有效，用 cleaned_name 修复 query 后放行
+              REPAIR  - query 为幻觉词但 year 有效，以 cleaned_name 重写 query 后放行
               FAIL    - query 和 year 均无效，触发云端降级
             """
             q = (d.get("query") or d.get("clean_name") or "").strip().lower()
@@ -1102,58 +1102,23 @@ class AIAgent:
             if q and q not in _HALLUCINATION_WORDS and len(q.replace(" ", "")) >= 2:
                 return "PASS"
 
-            # Level 2 — 静默修复：query 为幻觉词，但 year 高价值信息存在
+            # Level 2 — 置信度重整：query 落入幻觉词表且 year 有效，走 REPAIR 分支
             if year_valid:
                 return "REPAIR"
 
             # Level 3 — 真·失败：query 和 year 均无效
             return "FAIL"
 
-        # 降级保护：如果解析失败，使用调用方传入的正则清洗名（cleaned_name）保底
-        # cleaned_name 优先级 > AI 提取的 query（AI 已失效），确保搜索词是最干净的
+        # Fail-Fast：JSON 解析失败时不允许用 cleaned_name 兜底继续执行 TMDB 搜索
         if not data:
-            _fallback_query = (cleaned_name or "").strip()
-            logger.warning(
-                f"[AI][FALLBACK] JSON 解析失败，降级使用正则清洗名='{_fallback_query}' "
-                f"| 原始响应前 200 字符: {raw[:200]}"
-            )
-            return {
-                "query":          _fallback_query,
-                "type":           (type_hint or "movie").strip().lower() or "movie",
-                "season":         None,
-                "episode":        None,
-                "filename_year":  "",
-                "knowledge_year": "",
-            }
+            raise RuntimeError("ai_json_parse_failed")
 
         # ── v1.0.0 弹性审计分流 ─────────────────────────────────────
         _confidence = _classify_result(data)
 
-        if _confidence == "REPAIR":
-            # 🟡 静默修复：year 有价值，用 cleaned_name 补全 query，不触发降级
-            _repaired_query = (cleaned_name or "").strip()
-            _year_val = (data.get("knowledge_year") or data.get("year") or "").strip()
-            logger.info(
-                f"[AI][SEMANTIC_REPAIR] query='{data.get('query')}' 为幻觉词，"
-                f"但 knowledge_year='{_year_val}' 有效，自动修复 query='{_repaired_query}'"
-            )
-            data["query"] = _repaired_query
-
-        elif _confidence == "FAIL":
-            # 🔴 真·失败：query 和 year 全部无效，触发正则兜底
-            _fallback_query = (cleaned_name or "").strip()
-            logger.warning(
-                f"[AI][SEMANTIC_FAIL] query='{data.get('query')}' 且 year 无效，"
-                f"降级使用正则清洗名='{_fallback_query}' | 文件: {cleaned_name}"
-            )
-            return {
-                "query":          _fallback_query,
-                "type":           (type_hint or "movie").strip().lower() or "movie",
-                "season":         None,
-                "episode":        None,
-                "filename_year":  "",
-                "knowledge_year": "",
-            }
+        if _confidence in ("REPAIR", "FAIL"):
+            # Fail-Fast：REPAIR/FAIL 不进入后续 TMDB 与入库链路，阻断低置信命中
+            raise RuntimeError(f"ai_semantic_fail_fast: confidence={_confidence}")
         # _confidence == "PASS": 直接继续第五步，无需任何处理
         
         # ── 第五步：提取并规范化数据 ────────────────────────────────
@@ -1213,8 +1178,8 @@ class AIAgent:
         return {
             "query":          query or (cleaned_name or "").strip(),
             "type":           media_type,
-            "season":         data.get("season"),
-            "episode":        data.get("episode"),
+            "season":         locked_season if locked_season is not None else data.get("season"),
+            "episode":        locked_episode if locked_episode is not None else data.get("episode"),
             "filename_year":  (data.get("filename_year") or "").strip()[:4],
             "knowledge_year": (data.get("knowledge_year") or "").strip()[:4],
         }

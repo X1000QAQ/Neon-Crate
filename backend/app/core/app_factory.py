@@ -43,12 +43,10 @@ def _register_middleware(app: FastAPI) -> None:
       - allow_methods：允许所有 HTTP 方法
       - allow_headers：允许所有请求头
     """
-    # CORS 修复说明：
-    # 1. AIO 单容器部署下，前后端同域，正常页面请求不触发 CORS 预检。
-    # 2. 局域网设备（如 192.168.x.x）直接请求 /api/v1/* 时，浏览器会附带 Origin 头，
-    #    必须放行所有来源，否则出现 403/CORS error。
-    # 3. allow_origins=["*"] 与 allow_credentials=True 不兼容（CORS 规范），
-    #    JWT 通过 Authorization header 传递，无需 Cookie，故 allow_credentials=False 安全可行。
+    # CORS 策略（现状）：
+    # 1. AIO 同域场景下常规导航不触发预检。
+    # 2. 局域网 Origin 直连 API 时须与 CORS_ORIGINS 对齐，否则浏览器拦截跨域响应。
+    # 3. 凭据走 Authorization 头而非 Cookie，故 allow_credentials=False 与通配源策略可共存。
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.CORS_ORIGINS,
@@ -118,9 +116,9 @@ def _register_exception_handlers(app: FastAPI) -> None:
         """
         SPA 单页应用 404 回退
 
-        修复要点：
-        - 使用绝对路径定位 index.html，避免 Docker CWD 不确定导致找不到文件
-        - API 路由 404 仍返回 JSON，不回退到前端
+        路径契约：
+        - index.html 以相对 app_factory 的绝对路径解析，与容器工作目录解耦
+        - /api 前缀 404 返回 JSON，不注入 SPA，避免 API 误落入前端路由
         """
         if request.url.path.startswith("/api"):
             return JSONResponse(status_code=404, content={"detail": "Not Found"})
@@ -236,7 +234,7 @@ def create_app(lifespan=None) -> FastAPI:
     _register_exception_handlers(app)
     _add_health_check(app)
     
-    # ⚠️ 关键修复：在挂载静态资源之前定义所有特定路由
+    # 挂载次序：先于根路径 StaticFiles 注册 /docs、/redoc 等文档路由，避免被 / 通配吞掉
     # 自定义 Swagger UI（支持本地资源回退）
     from fastapi.openapi.docs import get_swagger_ui_html
     
@@ -291,8 +289,7 @@ def create_app(lifespan=None) -> FastAPI:
 </html>"""
         return HTMLResponse(html_content)
     
-    # ⚠️ 关键修复：静态资源挂载必须在所有路由定义之后
-    # 这样 / 根路径才不会覆盖 /docs 和 /redoc
+    # 挂载次序：文档与业务路由全部就绪后，再挂载「/」SPA 静态，保证 /docs、/redoc 优先匹配
     _mount_static_resources(app)
 
     return app

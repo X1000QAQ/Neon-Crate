@@ -332,6 +332,81 @@ class MetadataManager:
             logger.error(f"[META] Fanart 下载失败: {e}")
             return None
 
+    def download_season_poster(
+        self,
+        tmdb_id: str,
+        season: int,
+        output_dir: str,
+        title: str = None,
+    ) -> Optional[str]:
+        """
+        下载指定季的海报，保存为 seasonXX-poster.jpg（Kodi/Jellyfin 标准命名）。
+
+        Args:
+            tmdb_id:    剧集 TMDB ID
+            season:     季号（1-based）
+            output_dir: 剧集根目录（tvshow.nfo 所在目录）
+            title:      可选，用于日志
+
+        Returns:
+            Optional[str]: 本地路径，失败返回 None
+
+        容错策略：海报缺失/网络失败均返回 None，不抛出异常。
+        """
+        try:
+            season_poster_name = f"season{season:02d}-poster.jpg"
+            output_dir_abs = str(Path(output_dir).resolve())
+
+            # ── 优先复用：已存在则跳过下载 ─────────────────────────────
+            existing = os.path.join(output_dir_abs, season_poster_name)
+            if os.path.exists(existing):
+                logger.info(f"[META] 季海报已存在，直接复用: {existing}")
+                return existing
+
+            # ── 调用 /tv/{id}/season/{n} 接口 ────────────────────────
+            url = f"{self.base_url}/tv/{tmdb_id}/season/{season}"
+            params = {"api_key": self.api_key, "language": self.language}
+            resp = _http_get_with_retry(url, params=params)
+            if not resp:
+                logger.warning(
+                    f"[META] 季详情请求失败: tmdb_id={tmdb_id} Season {season}"
+                )
+                return None
+
+            data = resp.json()
+            poster_path = data.get("poster_path", "")
+            if not poster_path:
+                logger.warning(
+                    f"[META] 季海报数据缺失: {title or tmdb_id} Season {season}"
+                )
+                return None
+
+            # ── 下载图片 ──────────────────────────────────────────────
+            poster_url = f"{self.image_base_url}{poster_path}"
+            img_resp = _http_get_with_retry(poster_url, timeout=30.0)
+            if not img_resp:
+                logger.warning(f"[META] 季海报下载失败（网络）: Season {season}")
+                return None
+
+            # ── 路径防穿越校验 ────────────────────────────────────────
+            raw_output_path = os.path.join(output_dir_abs, season_poster_name)
+            try:
+                safe_path = _validate_path(raw_output_path, output_dir_abs)
+            except ValueError as ve:
+                logger.error(str(ve))
+                return None
+
+            os.makedirs(output_dir_abs, exist_ok=True)
+            with open(str(safe_path), "wb") as f:
+                f.write(img_resp.content)
+
+            logger.info(f"[META] [STORAGE] 季海报下载成功: {safe_path}")
+            return str(safe_path)
+
+        except Exception as e:
+            logger.error(f"[META] 季海报下载失败: {e}")
+            return None
+
     def _fetch_movie_details(self, tmdb_id: str) -> Optional[Dict[str, Any]]:
         """获取电影详情（带重试，严谨 .get() 解析）"""
         try:
@@ -508,6 +583,183 @@ class MetadataManager:
         if backdrop:
             ET.SubElement(root, "fanart").text = f"{self.image_base_url}{backdrop}"
 
+        return self._prettify_xml(root)
+
+    def generate_episode_nfo(
+        self,
+        tmdb_id: str,
+        season: int,
+        episode: int,
+        output_path: str,
+        title: str = None,
+    ) -> bool:
+        """
+        生成单集 NFO 元数据文件（Kodi/Jellyfin <episodedetails> 格式）
+
+        Args:
+            tmdb_id:     剧集 TMDB ID
+            season:      季号
+            episode:     集号
+            output_path: NFO 文件输出路径（与视频文件同名，仅后缀不同）
+            title:       可选，剧集标题（用于日志）
+
+        Returns:
+            bool: 是否成功
+
+        容错策略：
+            - TMDB 单集接口失败时，回退生成仅含 title / tmdbid / season / episode
+              的最小化占位 NFO，确保文件存在。
+        """
+        try:
+            # ── 优先复用：NFO 文件已存在则跳过 ─────────────────────────
+            if os.path.exists(output_path):
+                logger.info(f"[META] 单集 NFO 已存在，直接复用: {output_path}")
+                return True
+
+            output_dir = os.path.dirname(os.path.abspath(output_path))
+
+            # ── 路径防穿越校验 ────────────────────────────────────────
+            try:
+                safe_path = _validate_path(output_path, output_dir)
+            except ValueError as ve:
+                logger.error(str(ve))
+                return False
+
+            # ── 尝试获取单集详情 ──────────────────────────────────────
+            ep_detail = self._fetch_episode_details(tmdb_id, season, episode)
+
+            if ep_detail:
+                xml_content = self._build_episode_nfo(ep_detail, tmdb_id, season, episode, show_title=title or "")
+            else:
+                # 容错回退：生成最小化占位 NFO
+                logger.warning(
+                    f"[META] 单集详情获取失败，生成最小化占位 NFO: "
+                    f"tmdb_id={tmdb_id} S{season:02d}E{episode:02d}"
+                )
+                xml_content = self._build_minimal_episode_nfo(
+                    tmdb_id=tmdb_id,
+                    season=season,
+                    episode=episode,
+                    show_title=title or "",
+                )
+
+            os.makedirs(output_dir, exist_ok=True)
+            with open(str(safe_path), "w", encoding="utf-8") as f:
+                f.write(xml_content)
+
+            logger.info(f"[META] [STORAGE] 单集 NFO 生成成功: {safe_path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"[META] 单集 NFO 生成失败: {e}")
+            return False
+
+    def _fetch_episode_details(
+        self, tmdb_id: str, season: int, episode: int
+    ) -> Optional[Dict[str, Any]]:
+        """
+        获取单集详情 /tv/{id}/season/{s}/episode/{e}
+
+        Returns:
+            dict | None: TMDB 单集数据，失败返回 None
+        """
+        try:
+            url = f"{self.base_url}/tv/{tmdb_id}/season/{season}/episode/{episode}"
+            params = {"api_key": self.api_key, "language": self.language}
+            resp = _http_get_with_retry(url, params=params)
+            if not resp:
+                logger.warning(
+                    f"[META] 单集详情请求失败: tmdb_id={tmdb_id} S{season:02d}E{episode:02d}"
+                )
+                return None
+            data = resp.json()
+            if not data.get("id") and not data.get("episode_number"):
+                logger.warning(f"[META] 单集详情数据异常: {data}")
+                return None
+            return data
+        except Exception as e:
+            logger.error(f"[META] 获取单集详情异常: {e}")
+            return None
+
+    def _build_episode_nfo(
+        self,
+        ep_detail: Dict[str, Any],
+        tmdb_id: str,
+        season: int,
+        episode: int,
+        show_title: str = "",
+    ) -> str:
+        """构建完整单集 NFO XML（<episodedetails> 格式，Kodi/Jellyfin 兼容）"""
+        root = ET.Element("episodedetails")
+
+        ET.SubElement(root, "title").text = self._escape_xml(
+            _safe_get(ep_detail, "name", default="")
+        )
+        ET.SubElement(root, "showtitle").text = self._escape_xml(show_title)
+        ET.SubElement(root, "tmdbid").text = str(tmdb_id)  # 指向主剧集（方便播放器关联）
+        ET.SubElement(root, "season").text = str(season)
+        ET.SubElement(root, "episode").text = str(episode)
+        ET.SubElement(root, "plot").text = self._escape_xml(
+            _safe_get(ep_detail, "overview", default="")
+        )
+        ET.SubElement(root, "runtime").text = str(
+            _safe_get(ep_detail, "runtime", default=0)
+        )
+        ET.SubElement(root, "rating").text = str(
+            _safe_get(ep_detail, "vote_average", default=0)
+        )
+        ET.SubElement(root, "votes").text = str(
+            _safe_get(ep_detail, "vote_count", default=0)
+        )
+
+        air_date = _safe_get(ep_detail, "air_date", default="")
+        if air_date:
+            ET.SubElement(root, "aired").text = str(air_date)
+
+        # <uniqueid type="tmdb"> — 指向单集自身的 TMDB episode id
+        ep_tmdb_id = str(_safe_get(ep_detail, "id", default=""))
+        if ep_tmdb_id:
+            uid = ET.SubElement(root, "uniqueid")
+            uid.set("type", "tmdb")
+            uid.set("default", "true")
+            uid.text = ep_tmdb_id
+
+        # 导演
+        for member in _safe_get(ep_detail, "crew", default=[]):
+            if _safe_get(member, "job") == "Director":
+                ET.SubElement(root, "director").text = _safe_get(member, "name", default="")
+
+        # 主演
+        for actor in _safe_get(ep_detail, "guest_stars", default=[])[:5]:
+            actor_elem = ET.SubElement(root, "actor")
+            ET.SubElement(actor_elem, "name").text = _safe_get(actor, "name", default="")
+            ET.SubElement(actor_elem, "role").text = _safe_get(actor, "character", default="")
+
+        # 缩略图
+        still_path = _safe_get(ep_detail, "still_path", default="")
+        if still_path:
+            ET.SubElement(root, "thumb").text = f"{self.image_base_url}{still_path}"
+
+        return self._prettify_xml(root)
+
+    def _build_minimal_episode_nfo(
+        self,
+        tmdb_id: str,
+        season: int,
+        episode: int,
+        show_title: str = "",
+    ) -> str:
+        """
+        容错回退：生成仅含基础字段的最小化占位 <episodedetails> NFO。
+        确保单集 NFO 文件总是存在，即使 TMDB 接口不可用。
+        """
+        root = ET.Element("episodedetails")
+        if show_title:
+            ET.SubElement(root, "showtitle").text = self._escape_xml(show_title)
+        ET.SubElement(root, "season").text = str(season)
+        ET.SubElement(root, "episode").text = str(episode)
+        # tmdbid 指向剧集本身（非单集），方便播放器关联
+        ET.SubElement(root, "tmdbid").text = str(tmdb_id)
         return self._prettify_xml(root)
 
     def _prettify_xml(self, elem: ET.Element) -> str:

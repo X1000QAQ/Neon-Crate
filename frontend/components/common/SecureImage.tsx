@@ -23,8 +23,8 @@ interface SecureImageProps {
  *    → 拼接 API_BASE/public/image?path= 走后端代理引擎（携带 JWT）
  * 5. 其他未知格式 → 原生直通降级兜底
  *
- * Bug 1 修复：原来只判断 /storage 前缀，/home/... 测试路径被旁路导致 404。
- * 现在统一：以 / 开头的所有物理路径都走代理。
+ * 路由补充：凡以 / 开头的本地物理路径（含 /storage、/home 等）一律经 /public/image 代理并携带 JWT，
+ * 避免仅匹配单一前缀时旁路绝对路径。
  */
 export default function SecureImage({
   src,

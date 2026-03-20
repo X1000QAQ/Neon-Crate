@@ -50,6 +50,7 @@ export const translations = {
     status_ignored: '已忽略',
     status_processing: '处理中',
     status_success: '处理成功',
+    status_unknown: '未知状态',
     // Neural Link 状态栏（v1.0.0，全局氛围装饰）
     ui_quantum_state: '量子态',
     ui_neural_link: '神经链路',
@@ -67,6 +68,7 @@ export const translations = {
     sub_status_scraped: '刮削完成',
     sub_status_found: '已命中',
     sub_status_triggered: '已触发',
+    sub_status_unknown: '未知子状态',
     // 媒体类型 (task.media_type)
     
     // 任务列表
@@ -312,8 +314,23 @@ export const translations = {
 
     // 错误提示
     scan_trigger_failed: '扫描触发失败，请重试',
+    error_load_tasks: '加载任务列表失败：{detail}',
+    error_network_generic: '网络错误',
+    msg_task_unlocked_rescan: '任务已解锁，将在下次扫描时重新处理',
+    msg_unlock_failed: '解锁失败，请重试',
+    confirm_delete_batch_with_episodes: '确认删除这 {count} 项记录（含下属所有集）？',
+    delete_batch_records_success: '成功删除 {count} 条记录',
+    msg_batch_delete_failed: '批量删除失败',
+    msg_refresh_list_after_scrape_failed: '刮削后刷新列表失败',
+    msg_scrape_trigger_failed: '刮削触发失败，请重试',
+    msg_refresh_list_after_subtitle_failed: '字幕任务后刷新列表失败',
+    msg_subtitle_task_trigger_failed: '字幕任务触发失败，请重试',
+    error_tmdb_search: 'TMDB 搜索失败',
+    media_table_tv_total_episodes: '共 {count} 集',
+    media_table_tv_season_episodes: '{count} 集',
+    media_table_season_label: '第 {season} 季',
 
-    // Phase 1: RebuildDialog & MediaTable i18n Keys (DEV-RECON-026)
+    // 词典分区：补录弹窗与媒体扁平树（任务墙表格）共用键族
     rebuild_mode_nfo: 'NFO 深度纠偏',
     rebuild_mode_poster: '海报强制覆盖',
     rebuild_mode_subtitle: '字幕即时触发',
@@ -341,7 +358,17 @@ export const translations = {
     msg_poster_rebuild: '海报覆盖 {status}',
     msg_subtitle_triggered: '字幕搜索已触发 ✅',
     msg_rebuild_complete: '重构完成：',
-    // DownloadConfirmOverlay i18n (C-03 修复)
+    msg_rebuild_complete_default: '重构任务已完成',
+    msg_rebuild_failed_generic: '重构执行失败，请稍后重试',
+    "rebuild_complete:patch:movie": "电影元数据已修复",
+    "rebuild_complete:patch:tv:series": "全剧元数据已深度同步",
+    "rebuild_complete:patch:tv:season": "季级元数据已刷新",
+    "rebuild_complete:patch:tv:episode": "单集元数据已校正",
+    msg_rebuild_success_nuclear_series: "核级重构完成：作品已重塑并归档",
+    msg_rebuild_success_nuclear_season: "核级重构完成：本季内容已重塑并归档",
+    msg_rebuild_success_nuclear_tv_episode: "核级重构完成：单集内容已重塑并归档",
+    msg_rebuild_success_nuclear_movie: "核级重构完成：电影内容已重塑并归档",
+    // 词典分区：下载授权与重复资源确认叠层
     overlay_download_auth_title: '下载授权请求',
     overlay_poster_alt: '海报',
     overlay_duplicate_warning: '该资源已存在于您的媒体库中',
@@ -349,10 +376,33 @@ export const translations = {
     overlay_btn_executing: '执行中...',
     overlay_btn_force_download: '强制重新下载',
     overlay_btn_authorize: '授权下载',
-    // S-05 修复
+    overlay_rebuild_action_generic: '确认执行当前操作。',
+    overlay_rebuild_poster_movie: '将强制覆盖这部电影的 poster 与 fanart 资源。',
+    overlay_rebuild_poster_tv_series: '将强制下载全剧总海报、背景图及所有季海报。',
+    overlay_rebuild_poster_tv_season: '将强制下载该季的 seasonXX-poster.jpg 海报。',
+    overlay_rebuild_poster_tv_episode: '将强制刷新该集所在剧集根目录的海报资源。',
+    overlay_rebuild_subtitle_movie: '将立即触发这部电影的字幕搜索任务。',
+    overlay_rebuild_subtitle_tv_series: '将立即触发全剧所有集数的字幕搜索。',
+    overlay_rebuild_subtitle_tv_season: '将立即触发该季所有集数的字幕搜索。',
+    overlay_rebuild_subtitle_tv_episode: '将立即触发该集字幕搜索，结果通常会在短时间内返回。',
+    overlay_confirm_title_movie: '电影操作确认',
+    overlay_confirm_title_tv: '剧集操作确认',
+    overlay_confirm_content_movie: '确认要对这部电影执行该操作吗？系统将按电影轨道执行并覆盖对应元数据。',
+    overlay_confirm_content_tv_series: '确认要对整部剧执行该操作吗？系统将按全剧轨道处理相关资源。',
+    overlay_confirm_content_tv_season: '确认要对当前季执行该操作吗？系统将按单季轨道处理相关资源。',
+    overlay_confirm_content_tv_episode: '确认要对当前集执行该操作吗？系统将按单集轨道处理相关资源。',
+    overlay_nfo_brief_title: '核级重构模式',
+    overlay_nfo_brief_content: '执行此操作将立即清理目录杂质、重写 NFO 并重新触发云端识别。',
+    overlay_nfo_irreversible: '不可撤销。',
+    overlay_nfo_scope_prefix: '作用范围：',
+    overlay_nfo_scope_movie: '电影（movie.nfo）',
+    overlay_nfo_scope_tv_series: '全剧（tvshow.nfo + 所有季 NFO）',
+    overlay_nfo_scope_tv_season: '该季（所有单集 NFO）',
+    overlay_nfo_scope_tv_episode: '单集 NFO',
+    // 词典分区：全局重置按钮态
     btn_resetting: '重置中...',
     error_unknown: '未知错误',
-    // InferenceSettings i18n (S-05 补漏)
+    // 词典分区：推理引擎设置面板 · 双擎状态文案
     inference_status_online: '[◉ ONLINE]',
     inference_status_offline: '[○ OFFLINE]',
     inference_dual_engine_active: '双擎并联已激活 — 云端负责智能交互，本地承接繁重刮削，实现完美协同。',
@@ -412,6 +462,7 @@ export const translations = {
     status_ignored: 'Ignored',
     status_processing: 'Processing',
     status_success: 'Success',
+    status_unknown: 'Unknown status',
     // Neural Link Status Bar (v1.0.0, ambient readout)
     ui_quantum_state: 'Quantum State',
     ui_neural_link: 'Neural Link',
@@ -429,6 +480,7 @@ export const translations = {
     sub_status_scraped: 'Scraped',
     sub_status_found: 'Found',
     sub_status_triggered: 'Triggered',
+    sub_status_unknown: 'Unknown sub-status',
     // Media type (task.media_type)
     
     // Task List
@@ -676,8 +728,23 @@ export const translations = {
 
     // Error messages
     scan_trigger_failed: 'Scan trigger failed, please try again',
+    error_load_tasks: 'Failed to load tasks: {detail}',
+    error_network_generic: 'Network error',
+    msg_task_unlocked_rescan: 'Task unlocked; it will be processed on the next scan',
+    msg_unlock_failed: 'Unlock failed, please try again',
+    confirm_delete_batch_with_episodes: 'Delete {count} records (including all nested episodes)?',
+    delete_batch_records_success: 'Deleted {count} record(s)',
+    msg_batch_delete_failed: 'Batch delete failed',
+    msg_refresh_list_after_scrape_failed: 'Failed to refresh list after scrape',
+    msg_scrape_trigger_failed: 'Scrape trigger failed, please try again',
+    msg_refresh_list_after_subtitle_failed: 'Failed to refresh list after subtitle task',
+    msg_subtitle_task_trigger_failed: 'Subtitle task trigger failed, please try again',
+    error_tmdb_search: 'TMDB search failed',
+    media_table_tv_total_episodes: 'Total {count} episodes',
+    media_table_tv_season_episodes: '{count} ep(s)',
+    media_table_season_label: 'Season {season}',
 
-    // Phase 1: RebuildDialog & MediaTable i18n Keys (DEV-RECON-026)
+    // Dictionary: rebuild dialog & media flat-tree (task wall table)
     rebuild_mode_nfo: 'NFO Deep Correction',
     rebuild_mode_poster: 'Force Poster Override',
     rebuild_mode_subtitle: 'Trigger Subtitle Search',
@@ -705,7 +772,17 @@ export const translations = {
     msg_poster_rebuild: 'Poster {status}',
     msg_subtitle_triggered: 'Subtitle search triggered ✅',
     msg_rebuild_complete: 'Rebuild complete:',
-    // DownloadConfirmOverlay i18n (C-03 fix)
+    msg_rebuild_complete_default: 'Rebuild task completed',
+    msg_rebuild_failed_generic: 'Rebuild failed, please try again later',
+    "rebuild_complete:patch:movie": "Movie metadata has been repaired",
+    "rebuild_complete:patch:tv:series": "Series metadata has been deeply synchronized",
+    "rebuild_complete:patch:tv:season": "Season metadata has been refreshed",
+    "rebuild_complete:patch:tv:episode": "Episode metadata has been corrected",
+    msg_rebuild_success_nuclear_series: "Nuclear rebuild completed: the title has been rebuilt and archived",
+    msg_rebuild_success_nuclear_season: "Nuclear rebuild completed: the season has been rebuilt and archived",
+    msg_rebuild_success_nuclear_tv_episode: "Nuclear rebuild completed: the episode has been rebuilt and archived",
+    msg_rebuild_success_nuclear_movie: "Nuclear rebuild completed: the movie has been rebuilt and archived",
+    // Dictionary: download authorization & duplicate-resource overlay
     overlay_download_auth_title: 'Download Authorization',
     overlay_poster_alt: 'Poster',
     overlay_duplicate_warning: 'This resource already exists in your media library',
@@ -713,10 +790,33 @@ export const translations = {
     overlay_btn_executing: 'Executing...',
     overlay_btn_force_download: 'Force Re-download',
     overlay_btn_authorize: 'Authorize Download',
-    // S-05 fix
+    overlay_rebuild_action_generic: 'Please confirm to execute this action.',
+    overlay_rebuild_poster_movie: 'Force refresh poster and fanart assets for this movie.',
+    overlay_rebuild_poster_tv_series: 'Force refresh show-level poster, fanart, and all season posters.',
+    overlay_rebuild_poster_tv_season: 'Force refresh the seasonXX-poster.jpg asset for this season.',
+    overlay_rebuild_poster_tv_episode: 'Force refresh poster assets from the show root for this episode.',
+    overlay_rebuild_subtitle_movie: 'Trigger subtitle search for this movie immediately.',
+    overlay_rebuild_subtitle_tv_series: 'Trigger subtitle search for all episodes in this series.',
+    overlay_rebuild_subtitle_tv_season: 'Trigger subtitle search for all episodes in this season.',
+    overlay_rebuild_subtitle_tv_episode: 'Trigger subtitle search for this episode immediately.',
+    overlay_confirm_title_movie: 'Movie Action Confirmation',
+    overlay_confirm_title_tv: 'TV Action Confirmation',
+    overlay_confirm_content_movie: 'Confirm applying this action to this movie? The movie pipeline metadata will be updated.',
+    overlay_confirm_content_tv_series: 'Confirm applying this action to the full series? The series pipeline will process all related assets.',
+    overlay_confirm_content_tv_season: 'Confirm applying this action to the current season? The season pipeline will process related assets.',
+    overlay_confirm_content_tv_episode: 'Confirm applying this action to the current episode? The episode pipeline will process related assets.',
+    overlay_nfo_brief_title: 'Nuclear Rebuild Mode',
+    overlay_nfo_brief_content: 'This operation will clean directory noise, rewrite NFO files, and trigger cloud recognition.',
+    overlay_nfo_irreversible: 'This action cannot be undone.',
+    overlay_nfo_scope_prefix: 'Scope:',
+    overlay_nfo_scope_movie: 'Movie (movie.nfo)',
+    overlay_nfo_scope_tv_series: 'Series (tvshow.nfo + all season NFOs)',
+    overlay_nfo_scope_tv_season: 'Season (all episode NFOs)',
+    overlay_nfo_scope_tv_episode: 'Episode NFO',
+    // Dictionary: global reset button state
     btn_resetting: 'Resetting...',
     error_unknown: 'Unknown Error',
-    // InferenceSettings i18n (S-05 补漏)
+    // Dictionary: inference settings · dual-engine status copy
     inference_status_online: '[◉ ONLINE]',
     inference_status_offline: '[○ OFFLINE]',
     inference_dual_engine_active: 'Dual-Engine Matrix Active — Cloud manages smart routing, Edge handles heavy scraping. Perfect synergy.',

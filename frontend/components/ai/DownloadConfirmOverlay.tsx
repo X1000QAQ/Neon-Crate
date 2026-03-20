@@ -11,7 +11,7 @@ const FONT_H = 'Hacked, "Advent Pro", monospace';
 interface DownloadConfirmOverlayProps {
   pending: PendingActionPayload;
   onConfirm: () => void;
-  /** [C-03 竞态修复] 仅在 confirmLoading=false 时允许调用，内部已守卫 */
+  /** 并发门控：confirmLoading 为 true 时调用方应忽略否认；组件内对 onDeny 二次守卫 */
   onDeny: () => void;
   confirmLoading: boolean;
 }
@@ -19,10 +19,8 @@ interface DownloadConfirmOverlayProps {
 /**
  * DownloadConfirmOverlay — 下载授权全屏确认模态框
  *
- * [S-02 拆分] 从 AiSidebar 提取为独立组件
- * [C-03 修复]
- *   1. 所有硬编码中文字符串替换为 t() i18n 调用
- *   2. onDeny 在 confirmLoading=true 时被屏蔽，消除竞态条件
+ * 组件边界：从 AiSidebar 拆出，专责下载授权模态。
+ * 契约：文案经 t() 下发；确认进行中屏蔽否认回调，与上层 finally 语义互斥。
  */
 export default function DownloadConfirmOverlay({
   pending,
@@ -32,7 +30,7 @@ export default function DownloadConfirmOverlay({
 }: DownloadConfirmOverlayProps) {
   const { t } = useLanguage();
 
-  // [C-03 竞态修复] 确认飞行中屏蔽取消，防止与 handleDownloadConfirm finally 块竞态
+  // 交互互斥：确认请求在途时拒绝否认，与父级确认流程的 finally 阶段对齐
   const handleDeny = () => {
     if (confirmLoading) return;
     onDeny();
@@ -71,7 +69,7 @@ export default function DownloadConfirmOverlay({
         <div className="flex items-center justify-between px-6 py-3" style={{ borderBottom: '1px solid rgba(0,230,246,0.12)' }}>
           <div className="flex items-center gap-2">
             <div className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: CYAN, boxShadow: `0 0 8px ${CYAN}` }} />
-            {/* [C-03] 下载授权请求 → i18n */}
+            {/* 标题：下载授权 → i18n */}
             <span className="text-xs tracking-[0.25em] uppercase" style={{ color: CYAN, fontFamily: FONT_A }}>
               {t('overlay_download_auth_title')}
             </span>
@@ -114,7 +112,7 @@ export default function DownloadConfirmOverlay({
                   style={{ background: 'rgba(255,160,0,0.10)', border: '1px solid rgba(255,160,0,0.45)', color: 'rgba(255,185,0,0.9)', fontFamily: FONT_A, letterSpacing: '0.06em' }}
                 >
                   <span style={{ fontSize: '14px' }}>⚠️</span>
-                  {/* [C-03] 该资源已存在... → i18n */}
+                  {/* 已存在资源提示 → i18n */}
                   <span>
                     {t('overlay_duplicate_warning')}
                     {pending.existing_status ? `（${pending.existing_status}）` : ''}
@@ -136,7 +134,7 @@ export default function DownloadConfirmOverlay({
                 className="text-2xl font-bold leading-tight mb-1"
                 style={{ color: CYAN, fontFamily: FONT_H, textShadow: '0 0 20px rgba(0,230,246,0.5)', letterSpacing: '0.03em' }}
               >
-                {/* [C-03] 未知片名 → i18n */}
+                {/* 片名占位 → i18n */}
                 {pending.title || pending.clean_name || t('overlay_unknown_title')}
               </h2>
               {pending.year && (
@@ -151,7 +149,7 @@ export default function DownloadConfirmOverlay({
                 </p>
               ) : (
                 <p className="text-xs" style={{ color: 'rgba(0,230,246,0.18)', fontFamily: FONT_A }}>
-                  {/* [C-03] 暂无简介 → i18n (text_no_overview 已有) */}
+                  {/* 简介缺省 → i18n（text_no_overview） */}
                   {t('text_no_overview')}
                 </p>
               )}
@@ -184,7 +182,7 @@ export default function DownloadConfirmOverlay({
                 }}
               >
                 <Download size={14} />
-                {/* [C-03] 执行中.../授权下载/强制重新下载 → i18n */}
+                {/* 主按钮文案：进行中 / 授权 / 强制 → i18n */}
                 {confirmLoading
                   ? t('overlay_btn_executing')
                   : pending.is_duplicate
@@ -211,7 +209,7 @@ export default function DownloadConfirmOverlay({
                   el.style.color = 'rgba(255,100,100,0.55)';
                 }}
               >
-                {/* [C-03] 取消 → i18n */}
+                {/* 次要操作：取消 → i18n */}
                 {t('btn_cancel')}
               </button>
             </div>

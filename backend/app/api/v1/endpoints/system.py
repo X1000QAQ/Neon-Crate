@@ -47,7 +47,7 @@ APP_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 VALID_TAGS = {"SCAN", "TMDB", "SUBTITLE", "ERROR", "API", "ORGANIZER", "ORG", "CLEAN", "LLM", "AI", "AI-EXEC", "META", "DB", "SECURITY", "DEBUG"}
 
-# ── 并发瓶颈修复：/public/image 白名单路径缓存（避免每请求打 DB）─────────────
+# ── /public/image 托管路径白名单：TTL 缓存 + 单飞刷新，削峰 DB 读 ─────────────
 # 设计目标：
 # - 高并发海报请求（数百并发）时，避免每个请求都同步读取数据库 managed_paths。
 # - 采用 TTL 缓存 + 单飞刷新（singleflight），允许短时间使用旧缓存（stale-while-revalidate）
@@ -207,7 +207,7 @@ def _parse_log_line(line: str) -> dict:
     match = log_pattern.match(line.strip())
     if match:
         ts, level, msg = match.groups()
-        # 关键修复：将空格替换为 T，逗号替换为点号，符合 ISO 8601 标准
+        # 时间戳归一：日志行时间串转为 ISO 8601 友好形式（T 分隔、毫秒点分）
         ts = ts.replace(" ", "T").replace(",", ".")
         return {"raw": line, "timestamp": ts, "level": level, "message": msg, "tag": tag}
     

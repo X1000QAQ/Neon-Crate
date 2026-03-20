@@ -1,51 +1,40 @@
 # =============================================================================
-# Neon-Crate 工业级 .gitignore
-# 覆盖维度：神盾安全隔离 / AIO 构建产物 / 数据持久化 / 跨平台开发规范
+# Neon-Crate .gitignore — 基于真实项目树扫描生成
+# 技术栈：Next.js 14 + FastAPI + SQLite + Docker AIO
+# 最后更新：2026-03-20（全量树状图核对版）
 # =============================================================================
 
 
 # =============================================================================
-# 【神盾计划 - Project Aegis】敏感文件绝对隔离
+# 【高危敏感文件】绝对隔离 — 泄露即全盘密钥暴露
 # =============================================================================
 
-# Fernet 主密钥 — 泄露即全盘 API Keys 暴露
-data/secret.key
-**/secret.key
+# 运行时数据目录：含 Fernet 主密钥、管理员账号、加密 API Keys、SQLite 数据库
+# 树状图确认路径：backend/data/{secret.key,auth.json,secure_keys.json,config.json,media_database.db*}
+backend/data/
 
-# 管理员账号哈希存储
-data/auth.json
-**/auth.json
-
-# 运行时配置（含加密 API Keys：TMDB / OpenSubtitles / LLM）
-data/config.json
-data/config.json.tmp
-
-# 敏感 API Keys 独立加密存储
-data/secure_keys.json
-
-# 整个 data 目录（含 SQLite WAL / 密钥 / 配置 / 海报缓存）
+# docker-compose 将 ./data 挂载至 /app/data，此处一并覆盖
 data/
 
-# 但保留 defaults.json（AI 规则配置模板，需要版本控制）
-!data/defaults.json
-
-# 环境变量（保留 .env.example 作为模板）
+# 环境变量 — 精确列举，避免通配符误杀
 .env
 .env.local
 .env.production
 .env.staging
-
-# 前端各环境变量文件（含本地开发专用，均不提交）
 frontend/.env
 frontend/.env.local
 frontend/.env.local.bak
 frontend/.env.development.local
 frontend/.env.production.local
 frontend/.env.test.local
+backend/.env
+
+# 保留模板文件（可入库供协作者参考）
+!backend/.env.example
 
 
 # =============================================================================
-# 【Python 后端】构建产物与缓存
+# 【Python 后端】构建产物、缓存、虚拟环境
 # =============================================================================
 
 # 字节码缓存
@@ -54,122 +43,124 @@ __pycache__/
 *$py.class
 *.so
 *.pyd
+*.pyo
 
-# 虚拟环境
+# 虚拟环境 — 树状图确认：backend/venv/ 真实存在，需精确匹配
+backend/venv/
 .venv/
 venv/
 env/
 ENV/
-.Python
 
-# 分发与打包
+# 打包产物
 build/
 dist/
 develop-eggs/
-downloads/
-eggs/
 .eggs/
-sdist/
-wheels/
 *.egg-info/
 *.egg
-.installed.cfg
+sdist/
+wheels/
 MANIFEST
-lib/
 lib64/
 parts/
 var/
 
-# 前端 lib/ 目录是源代码，必须纳入版本控制（排除上方 lib/ 的误匹配）
-!frontend/lib/
-
-# 测试与覆盖率
+# 测试覆盖率
 .pytest_cache/
 .coverage
 .coverage.*
 htmlcov/
 .tox/
 .mypy_cache/
-.dmypy.json
-dmypy.json
 .ruff_cache/
+dmypy.json
+
+# 本地运维脚本 — 树状图确认：以下文件真实存在
+backend/force_refresh_config.py
+backend/refresh_config.py
+backend/scripts/
+
+# AIO 多阶段构建注入目录（Dockerfile COPY --from=frontend-builder 自动注入，禁止手动提交）
+# 树状图确认：backend/static/docs/{swagger-ui-bundle.js,...} 真实存在
+backend/static/
+
+# 运行时生成的 OpenAPI schema（FastAPI 自动生成）
+backend/openapi.json
 
 
 # =============================================================================
-# 【前端 Next.js】构建产物与缓存
+# 【前端 Next.js】构建产物、缓存、依赖
 # =============================================================================
 
-# Next.js 构建输出与缓存
+# Next.js 构建输出 — 树状图确认：frontend/.next/ 和 frontend/out/ 均真实存在
 frontend/.next/
 frontend/out/
+
+# Next.js 缓存
 frontend/.cache/
 
-# Node 依赖
-node_modules/
+# Node 依赖 — 树状图确认：frontend/node_modules/ 真实存在
 frontend/node_modules/
+node_modules/
 
-# TypeScript 增量编译缓存
-tsconfig.tsbuildinfo
+# TypeScript 增量编译缓存 — 树状图确认：frontend/tsconfig.tsbuildinfo 真实存在
 frontend/tsconfig.tsbuildinfo
+tsconfig.tsbuildinfo
 
-# npm / yarn / pnpm
+# npm / yarn / pnpm 日志
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
-.npm/
-.yarn/integrity
-
-# 前端生产构建（由 CI/CD 流水线生成，不提交）
-backend/static/
 
 
 # =============================================================================
-# 【数据库 & 日志】持久化文件
+# 【数据库 & 日志】运行时持久化文件
 # =============================================================================
 
-# SQLite 数据库及 WAL 模式附属文件
+# SQLite 及 WAL 模式附属文件 — 树状图确认：media_database.db/.db-shm/.db-wal 真实存在
 *.db
 *.db-wal
 *.db-shm
 *.sqlite
 *.sqlite3
 
-# 运行日志
+# 运行日志 — 树状图确认：backend/data/logs/app.log 真实存在（已被 backend/data/ 覆盖，此处全局兜底）
 *.log
 logs/
 
 
 # =============================================================================
-# 【GitNexus】索引数据库
+# 【GitNexus】知识图谱索引（本地工具生成，不入库）
 # =============================================================================
 
+# 树状图确认：.gitnexus/ 真实存在
 .gitnexus/
-.gitnexus
+
+# GitNexus analyze 自动生成的上下文文件
+CLAUDE.md
+AGENTS.md
 
 
 # =============================================================================
-# 【Claude / AI 工具】本地 Skills 目录
+# 【AI 工具】本地 Skills 配置
 # =============================================================================
 
+# 树状图确认：.claude/skills/gitnexus/... 真实存在
 .claude/
 
 
 # =============================================================================
-# 【IDE & 编辑器】本地配置
+# 【IDE & 编辑器】个人本地配置
 # =============================================================================
 
-# Cursor
+# 树状图确认：.cursor/ 真实存在
 .cursor/
 
-# VS Code
 .vscode/
-
-# JetBrains / PyCharm
 .idea/
 *.iml
-
-# Vim / Emacs 临时文件
 *.swp
 *.swo
 *~
@@ -192,105 +183,38 @@ logs/
 
 # Windows
 Thumbs.db
-Thumbs.db:encryptable
-ehthumbs.db
-ehthumbs_vista.db
 Desktop.ini
 $RECYCLE.BIN/
 
-# Windows WSL Zone.Identifier 残留
+# Windows / WSL Zone.Identifier
 *.Zone.Identifier
-*:Zone.Identifier
-
-# Linux
-*~
 
 
 # =============================================================================
 # 【临时文件 & 杂项】
 # =============================================================================
 
-# 原子写入临时文件
 *.tmp
 *.bak
 *.orig
-
-# 打包压缩
 *.tar.gz
 *.zip
-*.rar
 
-# 海报 / 图片缓存
-backend/**/poster.jpg
-backend/**/poster.png
-backend/**/fanart.jpg
-backend/**/fanart.png
-backend/**/*.nfo
 
 # =============================================================================
-# 【演示组件 - 不纳入版本控制】
+# 【个人文档 & 本地工具】不纳入版本控制
 # =============================================================================
 
-# 演示用 Demo 页面与组件（仅本地开发使用）
+# 历史报告、开发日志、技术参考资料、CLI 工具文档
+# 树状图确认：以上目录均真实存在且内容丰富
+docs/历史报告/
+docs/开发日志/
+docs/技术参考/
+docs/CLI工具/
+
+# 演示组件 — 树状图确认：frontend/components/demo/ 和 frontend/app/demo/ 真实存在
 frontend/components/demo/
 frontend/app/demo/
 
-# =============================================================================
-# 【个人文档 - 不纳入版本控制】
-# =============================================================================
-
-# 历史报告、开发日志、CLI 工具、技术参考等归档文件
-docs/历史报告/
-docs/开发日志/
-docs/CLI工具/
-docs/技术参考/
-
-# 旧的分散文档（路径已变更，保留兼容规则）
-docs/05_开发日志/
-docs/06_cursor报告/
-docs/07_GitNexu_CLI方式调用/
-docs/技术文档/
-**/05_开发日志/
-**/06_cursor报告/
-**/07_GitNexu_CLI方式调用/
-**/技术文档/
-docs/**/_backup/
-**/_backup/
-
-# =============================================================================
-# 【本地开发工具 - 不纳入版本控制】
-# =============================================================================
-
-# 测试目录
+# 本地测试工具 — 树状图确认：backend/tests/ 真实存在
 backend/tests/
-
-# 数据库重置脚本（本地运维工具）
-backend/reset_all.py
-reset_all.py
-
-# AI 工具配置（个人开发环境）
-AGENTS.md
-CLAUDE.md
-
-# 运行时生成的 OpenAPI 文档
-backend/openapi.json
-
-# =============================================================================
-# 【AIO 构建产物防线 - 严禁提交】
-# Protocol: Flow-123
-# 1. 拦截编译流转 -> 2. 锁定静态注入 -> 3. 保护存储防线
-# =============================================================================
-
-# 第一道防线：前端编译产物（npm run build 输出，成百上千文件）
-frontend/out/
-frontend/.next/
-
-# 第二道防线：AIO 静态注入目录（Dockerfile 多阶段构建注入，禁止手动提交）
-backend/static/
-
-# 第三道防线：Node.js 依赖缓存
-frontend/node_modules/
-
-# AI Agent Instructions
-AGENTS.md
-CLAUDE.md
