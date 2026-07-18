@@ -780,13 +780,16 @@ def _step_archive_and_metadata(
                 sub_status="scraped",
             )
         else:
-            # 热表任务：确保 continue/return 前持久化终态，避免 pending 泄漏
             try:
                 db.update_task_is_active(task_id, 1)
             except Exception:
                 pass
+        # 就地补录：目标路径是文件自身，check_task_exists_by_path 命中的是这条任务本身，
+        # 不是真正的重复，应保持 archived 语义。
+        # 归档全链路：目标路径被另一条任务占用，是真正的物理重复，标记 ignored。
+        final_skip_status = "archived" if _is_library_file else "ignored"
         db.update_task_status(
-            task_id=task_id, status="ignored",
+            task_id=task_id, status=final_skip_status,
             tmdb_id=int(tmdb_id) if tmdb_id else None,
             imdb_id=imdb_id, target_path=target_path,
             local_poster_path=local_poster_path,
@@ -1068,6 +1071,51 @@ def _process_single_task(
         # 2. NFO 短路拦截
         if _step_nfo_shortcut(db, task, file_path, task_id, clean_name):
             return True, False
+
+        # ── 存量库直通道（最高优先级省流）──────────────────────────────
+        # 已归档 + 有 target_path + 文件在媒体库路径内 → 必然走就地补录。
+        # 就地补录的终点是 check_task_exists_by_path(target_path) 必定命中自身，
+        # 最终只补写 imdb_id/sub_status，完全不需要 AI 提炼。
+        # 直接用任务已有的 tmdb_id 向 TMDB 拿 imdb_id，省去 AI + TMDB 搜索开销。
+        if (
+            task.get("status") == "archived"
+            and task.get("target_path")
+            and not task.get("imdb_id")
+        ):
+            _all_cfg_quick = db.get_all_config()
+            _lib_paths_quick = [
+                os.path.normpath(p.get("path", "")).lower()
+                for p in _all_cfg_quick.get("paths", [])
+                if p.get("type") == "library" and p.get("enabled", False) and p.get("path")
+            ]
+            _tp_norm = os.path.normpath(task["target_path"]).lower()
+            if any(_tp_norm.startswith(lp) for lp in _lib_paths_quick):
+                _existing_tmdb_id = task.get("tmdb_id")
+                _resolved_imdb_id = ""
+                _resolved_type    = media_type if media_type in ("movie", "tv") else "tv"
+                if _existing_tmdb_id:
+                    try:
+                        _ext = scraper.get_external_ids(str(_existing_tmdb_id), _resolved_type)
+                        _resolved_imdb_id = _ext.get("imdb_id", "") or ""
+                    except Exception as _quick_err:
+                        logger.warning(f"[SCRAPE][QUICKPATH] imdb_id 获取失败，跳过: {_quick_err}")
+                _is_arc_quick = task.get("is_archive", False)
+                _sub_check = _check_local_subtitles(
+                    task["target_path"],
+                    sub_exts=_parse_sub_exts(db.get_config("supported_subtitle_exts", ""))
+                )
+                _sub_status_quick = "scraped" if _sub_check else "pending"
+                db.update_any_task_metadata(
+                    task_id, _is_arc_quick,
+                    imdb_id=_resolved_imdb_id or None,
+                    tmdb_id=str(_existing_tmdb_id) if _existing_tmdb_id else None,
+                    sub_status=_sub_status_quick,
+                )
+                logger.info(
+                    f"[SCRAPE][QUICKPATH] 存量库直通道: task={task_id}, "
+                    f"imdb_id={_resolved_imdb_id or 'N/A'}, sub_status={_sub_status_quick}"
+                )
+                return True, False
 
         # 2. 极致省流：存量库为补 ID 进来的任务，先看有没有字幕
         # 业务链路：1. 检查任务是否已归档且缺 imdb_id -> 2. 检查本地是否有字幕 ->
