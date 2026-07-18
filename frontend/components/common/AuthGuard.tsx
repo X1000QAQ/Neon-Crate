@@ -63,8 +63,10 @@ export default function AuthGuard({
     return () => { timerRefs.current.forEach(clearTimeout); };
   }, []);
 
+  const isLoginPage = pathname === '/auth/login' || pathname === '/auth/login/';
+
   const checkAuth = useCallback(async () => {
-    if (pathname === '/auth/login') {
+    if (isLoginPage) {
       setIsChecking(false);
       return;
     }
@@ -128,7 +130,7 @@ export default function AuthGuard({
 
   // 登录页：直接渲染裸 children，跳过 authenticatedWrapper
   // 确保 SettingsProvider/LogProvider 不在登录页提前挂载
-  if (pathname === '/auth/login') {
+  if (isLoginPage) {
     return <>{children}</>;
   }
 
