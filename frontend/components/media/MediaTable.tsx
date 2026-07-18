@@ -57,10 +57,31 @@ interface MediaTableProps {
 }
 
 /**
- * 提取任务标题（优先级：title > clean_name > file_name > id）
+ * 从路径中找到 Season X 目录，取其上一级作为剧集名。
+ * 与 useMediaGroups 保持相同的提取逻辑。
+ */
+function seriesNameFromPath(path: string): string | null {
+  const parts = path.replace(/\\/g, '/').split('/').filter(Boolean);
+  for (let i = 0; i < parts.length; i++) {
+    if (/^season\s*\d+$/i.test(parts[i])) {
+      return i > 0 ? parts[i - 1] : null;
+    }
+  }
+  return parts.length >= 3 ? parts[parts.length - 3] : null;
+}
+
+/**
+ * 提取任务标题（优先级：title > clean_name > 路径剧集目录名 > file_name > id）
  */
 function titleOf(task: Task) {
-  return task.title || task.clean_name || task.file_name || `#${task.id}`;
+  if (task.title) return task.title;
+  if (task.clean_name) return task.clean_name;
+  if (task.media_type === 'tv') {
+    const path = task.target_path || task.file_path || '';
+    const fromPath = path ? seriesNameFromPath(path) : null;
+    if (fromPath) return fromPath;
+  }
+  return task.file_name || `#${task.id}`;
 }
 
 /**
