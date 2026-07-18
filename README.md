@@ -1,72 +1,202 @@
-# Neon Crate ⚡️🧠📼
+# Neon Crate
 
-**工业级、全自动、带赛博朋克美学的智能影音归档中枢（v1.0.0）**
+**v1.0.0** — Automated media library management for NAS and home servers.
 
-> 面向 NAS / 家庭媒体服务器：一键扫描 → AI 识别 → TMDB 元数据刮削 → 自动归档 → 字幕补全。  
-> 前端是 **Holographic Void（全息虚空）** 指挥台，后端是带“核安全边界”的工业级流水线。
-
-⚠️ **[AUTHOR NOTE] 碳基与硅基的共生之作**：  
-本项目由一名**编程新人**借助 AI（Cursor / 大模型）从零到一构建。它不仅是一个实用的影音工具，更是一场验证“人类想象力 + AI 架构执行力”能否打造出**工业级、高并发、高可用**全栈系统的极客实验。
+> Scan → Identify → Fetch metadata → Archive → Find subtitles.
 
 ---
 
-## ✨ Why Neon Crate
+## Features
 
-- **全自动流水线**：扫描下载源 → 清洗文件名 → 元数据刮削 → 归档落盘 → 字幕补完。
-- **工业级健壮性**：对第三方脏数据/脏 NFO 具备极强生存能力（短路优先、兜底必达）。
-- **高压不假死**：为高并发请求设计的“单飞缓存（Singleflight）/降载策略”，抵抗图片洪峰与轮询风暴。
-- **极致 UI 体验**：60fps 等高扁平树 + VHS 磁带故障特效 + Neural Link 状态栏（全站统一的量子态指令同步）。
-
----
-
-## 🧱 Core Architecture（硬核底座）
-
-### 🛡️ NFO 三层装甲防御
-1. **读取容错**：`errors=replace`，保证“至少读得出来”。
-2. **生化清洗**：对毒化 XML 做结构修复，让其重新可解析。
-3. **正则兜底**：XML 彻底碎裂时仍抢救 `tmdb_id/imdb_id/title/year`，确保短路链路不断裂。
-
-### 🎯 TMDB 三梯队搜索降级引擎
-`Title + Year` → `Title（无 Year）` → `截断 Title（无 Year）`  
-**核心价值**：专杀大模型“年份幻觉”等噪声，命中率与稳定性同时可控。
-
-### 🧨 金标准物理防爆护盾
-以 IMDb ID 等“金标准”做防重熔断：重复媒体直接进入 `ignored`（已忽略）状态，并继承本地海报锚点，确保 UI 语义稳定不破图。
-
-### 🧬 创世自愈注入（Genesis Healing）
-缺失/空值配置不靠“内存兜底”，而是对 `config.json` 执行物理注入：启动即自愈、幂等、可追溯。
-
-### 🚀 高并发单飞缓存（Singleflight）
-面对海报图片洪峰等高并发场景，以 TTL + Singleflight 将“每请求打 DB”的放大器削平，告别 FastAPI 线程池饥饿引发的前端假死。
+- **Fully Automated Pipeline**: From download to organized library in one workflow
+- **Robust Metadata Handling**: Multi-layer fallback system handles corrupt NFO files and missing data
+- **High Concurrency Support**: Designed for thundering herd scenarios with Singleflight cache and rate limiting
+- **AI-Powered Identification**: Natural language interface for commands and media search
 
 ---
 
-## 🌌 Holographic Void（视觉美学）
+## Core Architecture
 
-- **等高扁平树（Flat Hierarchical List）**：电影/剧集统一 Row 渲染模型，层级仅用极简缩进表达，拒绝嵌套地狱。
-- **VHS 磁带炸裂故障特效**：`ignored` 任务具备噪点 / 扫描线 / RGB 分离 / 故障印章层。
-- **Neural Link 状态栏**：前端 `useNeuralLinkStatus` 全局单例订阅者模式，将量子态/神经链路绑定真实后端轮询，并已接入 i18n 国际化（中英双语）。
+### Metadata Parsing (3-Layer Defense)
+1. **Resilient Reading**: `errors=replace` encoding fallback
+2. **Structure Repair**: Fix malformed XML before parsing
+3. **Regex Extraction**: Recover critical fields even if XML is corrupted
+
+### TMDB Search (Fallback Strategy)
+`Title + Year` → `Title only` → `Truncated Title`  
+Reduces hallucinations and improves match accuracy.
+
+### Duplicate Detection
+IMDb ID-based deduplication ensures one entry per title, prevents duplicates in the archive.
+
+### Automatic Config Healing
+Missing configuration values are auto-populated on startup with sensible defaults.
+
+### High-Concurrency Cache
+Singleflight + TTL prevents resource exhaustion during concurrent poster requests.
 
 ---
 
-## 🐳 部署指南（Docker 一键起飞）
+## Tech Stack
 
-镜像已正式推送至 Docker Hub，支持直接拉取部署。
+| Component | Technology |
+|-----------|------------|
+| Frontend | Next.js 14 + TypeScript + Tailwind CSS |
+| Backend | FastAPI + Python 3.12 |
+| Database | SQLite (WAL mode) |
+| Auth | JWT + bcrypt |
+| Encryption | Fernet |
+| LLM | OpenAI-compatible API (DeepSeek/Together/Ollama) |
+| External | TMDB, OpenSubtitles, Radarr/Sonarr |
+| Deployment | Docker Compose |
 
-### 方式一：Docker Compose (推荐)
-创建 `docker-compose.yml` 文件：
+---
+
+## Quick Start
+
+### Docker Compose (Recommended)
 
 ```yaml
 version: '3.8'
 services:
   neon-crate:
-    image: x1000qaq/neon-crate:v1.0.0  # 或使用 latest
+    image: x1000qaq/neon-crate:v1.0.0
     container_name: neon-crate
     restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
-      # 请根据您的实际 NAS 路径进行映射
       - ./data:/app/data
-      - /your/downloads:/storage/ready_for_ai
-      - /your/media:/storage/media
+      - /path/to/downloads:/storage/ready_for_ai
+      - /path/to/media:/storage/media
+    environment:
+      - JWT_SECRET_KEY=change-me-in-production
+      - TMDB_API_KEY=your-api-key
+```
+
+Start:
+```bash
+docker-compose up -d
+# Access: http://localhost:8000
+```
+
+### Local Development
+
+**Backend:**
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python -m app.main
+```
+
+**Frontend:**
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+---
+
+## Configuration
+
+### Required Environment Variables
+- `TMDB_API_KEY`: Get from https://www.themoviedb.org/settings/api
+- `JWT_SECRET_KEY`: Change to a strong random value in production
+- `DOCKER_STORAGE_PATH`: Media storage path in container (default: `/storage`)
+
+### Optional
+- `LLM_PROVIDER`: `deepseek` | `together` | `ollama`
+- `LLM_API_KEY`: API key for chosen provider
+- `RADARR_URL` / `SONARR_URL`: URLs to *arr services
+- `LOG_LEVEL`: `DEBUG` | `INFO` | `WARNING`
+
+---
+
+## API Overview
+
+All endpoints require JWT authentication (except `/auth/login`).
+
+### AI Agent
+- `POST /agent/chat` - Send message, get AI response
+- `POST /agent/confirm` - Confirm download request
+
+### Tasks
+- `POST /tasks/scan` - Scan download directory
+- `POST /tasks/scrape_all` - Fetch TMDB metadata
+- `POST /tasks/find_subtitles` - Search subtitles
+- `GET /tasks/*/status` - Check task status
+
+### System
+- `GET /system/stats` - Library statistics
+- `GET /system/logs` - Recent logs
+- `GET /system/status` - Service health
+
+---
+
+## Documentation
+
+Full documentation in `/docs`:
+
+- [System Architecture](./docs/01_架构设计/01_系统全景.md)
+- [Backend Architecture](./docs/01_架构设计/02_后端架构白皮书.md)
+- [Frontend Architecture](./docs/01_架构设计/03_前端架构白皮书.md)
+- [Data Contract & API](./docs/02_数据契约/)
+- [Deployment Guide](./docs/04_运维部署/01_AIO部署指南.md)
+- [Module Reference](./docs/05_模块手册/)
+
+---
+
+## Project Structure
+
+```
+Neon-Crate/
+├── backend/              # FastAPI service
+│   ├── app/
+│   │   ├── api/          # HTTP routes
+│   │   ├── core/         # App initialization
+│   │   ├── infra/        # Database, config, security
+│   │   ├── models/       # Pydantic models
+│   │   └── services/     # Business logic
+│   └── data/             # SQLite database (gitignored)
+├── frontend/             # Next.js application
+│   ├── app/              # Pages
+│   ├── components/       # React components
+│   ├── lib/              # API client, i18n
+│   └── out/              # Build output (gitignored)
+├── docs/                 # Documentation
+└── docker-compose.yml
+```
+
+---
+
+## Development
+
+1. **Backend**: FastAPI auto-reloads in dev mode
+2. **Frontend**: Next.js HMR auto-updates on save
+3. **Database**: Use SQLite CLI or migration scripts
+4. **Architecture decisions**: See `/docs`
+
+---
+
+## Known Limitations
+
+- Single admin account (JWT-based)
+- SQLite: suitable for single-user, not heavy concurrent writes
+- Subtitles limited to OpenSubtitles API
+
+---
+
+## License
+
+MIT
+
+---
+
+## Resources
+
+- [Documentation](./docs)
+- [Issues](https://github.com/X1000QAQ/Neon-Crate/issues)
+- [GitHub](https://github.com/X1000QAQ/Neon-Crate)
