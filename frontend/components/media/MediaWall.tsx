@@ -237,6 +237,17 @@ export default function MediaWall() {
     }
   }, [loadTasks, showToast, t]);
 
+  const handleIgnore = useCallback(async (filePath: string) => {
+    try {
+      await api.ignorePath(filePath);
+      await loadTasks();
+      showToast(t('msg_task_ignored'));
+    } catch (error) {
+      console.error('Ignore failed:', error);
+      showToast(t('msg_ignore_failed'));
+    }
+  }, [loadTasks, showToast, t]);
+
   const toggleSelect = useCallback((id: number) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -431,6 +442,7 @@ export default function MediaWall() {
             onRetry={handleRetry}
             onDelete={handleDelete}
             onDeleteBatch={handleDeleteBatch}
+            onIgnore={handleIgnore}
             onRebuild={handleRebuild}
           />
 

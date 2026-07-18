@@ -69,13 +69,14 @@ class DatabaseManager:
 
         # ── 构造各 Repository（注入共享连接池和锁）──────────────────────
         from app.infra.database.repositories import (
-            PathRepo, ConfigRepo, StatsRepo, ArchiveRepo, TaskRepo
+            PathRepo, ConfigRepo, StatsRepo, ArchiveRepo, TaskRepo, IgnoreRepo
         )
         self._path_repo    = PathRepo(self._get_conn, self.db_lock, self.config_path, self.secure_keys_path)
         self._config_repo  = ConfigRepo(self._get_conn, self.db_lock, self.config_path, self.secure_keys_path)
         self._stats_repo   = StatsRepo(self._get_conn, self.db_lock, self.config_path, self.secure_keys_path)
         self._archive_repo = ArchiveRepo(self._get_conn, self.db_lock, self.config_path, self.secure_keys_path, self._path_repo)
         self._task_repo    = TaskRepo(self._get_conn, self.db_lock, self.config_path, self.secure_keys_path, self._archive_repo)
+        self._ignore_repo  = IgnoreRepo(data_dir=os.path.dirname(self.db_path))
 
         # 注入 AI 默认值（通过 config_repo）
         self._config_repo._inject_ai_defaults()
@@ -379,6 +380,17 @@ class DatabaseManager:
     def get_managed_paths(self) -> List[Dict[str, Any]]:                  return self._path_repo.get_managed_paths()
     def add_managed_path(self, p_type: str, path: str, category: str):   return self._path_repo.add_managed_path(p_type, path, category)
     def delete_managed_path(self, path_id: int):                         return self._path_repo.delete_managed_path(path_id)
+
+    # ==========================================
+    # 忽略清单方法（委托给 IgnoreRepo）
+    # ==========================================
+
+    def ignore_path_add(self, path: str) -> bool:                        return self._ignore_repo.add(path)
+    def ignore_path_add_batch(self, paths: List[str]) -> int:            return self._ignore_repo.add_batch(paths)
+    def ignore_path_remove(self, path: str) -> bool:                     return self._ignore_repo.remove(path)
+    def ignore_path_contains(self, path: str) -> bool:                   return self._ignore_repo.contains(path)
+    def ignore_path_list(self) -> List[str]:                             return self._ignore_repo.list_all()
+    def ignore_path_load_set(self) -> frozenset:                         return self._ignore_repo.load_set()
 
     # ==========================================
     # 任务管理方法（委托给 TaskRepo）

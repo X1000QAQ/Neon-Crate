@@ -53,6 +53,7 @@ import {
   ChevronDown,
   ChevronRight,
   Wand2,
+  EyeOff,
 } from 'lucide-react';
 import SecureImage from '@/components/common/SecureImage';
 import { VHSOverlay } from './VHSOverlay';
@@ -74,6 +75,7 @@ interface MediaRowProps {
   status?: string;
   progress?: number;
   onDelete: () => void;
+  onIgnore?: () => void;
   task?: Task;
   onRebuildClick?: (task: Task, mode: RebuildMode, scope?: 'series' | 'season' | 'episode') => void;
   rebuildingId?: number | null;
@@ -157,6 +159,7 @@ export const MediaRow = memo(function MediaRow({
   status = 'pending',
   progress,
   onDelete,
+  onIgnore,
   task,
   onRebuildClick,
   rebuildingId,
@@ -336,6 +339,28 @@ export const MediaRow = memo(function MediaRow({
                 title={t('btn_retry')}
               >
                 <RefreshCw size={14} className={cn(processingId === task.id && 'animate-spin')} />
+              </button>
+            )}
+            {onIgnore && task && !isIgnored && (
+              <button
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  if (processingId !== null) return;
+                  setProcessingId?.(task.id);
+                  try {
+                    await Promise.resolve(onIgnore());
+                  } finally {
+                    setProcessingId?.(null);
+                  }
+                }}
+                disabled={processingId === task.id}
+                className={cn(
+                  'p-1.5 border border-orange-400/70 text-orange-400/70 hover:bg-orange-400 hover:text-black transition-all',
+                  processingId === task.id && 'opacity-50 cursor-not-allowed'
+                )}
+                title={t('btn_ignore')}
+              >
+                <EyeOff size={14} />
               </button>
             )}
             <button

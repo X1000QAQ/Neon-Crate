@@ -43,6 +43,7 @@ interface MediaTableProps {
   onRetry: (taskId: number) => Promise<void> | void;
   onDelete: (taskId: number) => Promise<void> | void;
   onDeleteBatch: (ids: number[]) => Promise<void> | void;
+  onIgnore: (filePath: string) => Promise<void> | void;
   onRebuild: (params: {
     task_id: number;
     is_archive: boolean;
@@ -145,6 +146,7 @@ export default function MediaTable({
   onRetry,
   onDelete,
   onDeleteBatch,
+  onIgnore,
   onRebuild,
 }: MediaTableProps) {
   const { t } = useLanguage();
@@ -241,7 +243,7 @@ export default function MediaTable({
             <div key={group.key} className="flex items-stretch gap-2">
               {renderSelect([rep.id])}
               <div className="flex-1 min-w-0">
-                <MediaRow level={0} title={resolveDisplayTitle(rep, configPaths)} subtitle={subtitleOf(rep)} status={rep.status} task={rep} onDelete={() => deleteIds([rep.id])} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} />
+                <MediaRow level={0} title={resolveDisplayTitle(rep, configPaths)} subtitle={subtitleOf(rep)} status={rep.status} task={rep} onDelete={() => deleteIds([rep.id])} onIgnore={rep.file_path ? () => onIgnore(rep.file_path!) : undefined} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} />
               </div>
             </div>
           );
@@ -253,7 +255,7 @@ export default function MediaTable({
             <div className="flex items-stretch gap-2">
               {renderSelect(groupIds)}
               <div className="flex-1 min-w-0">
-                <MediaRow level={0} isExpandable isExpanded={groupExpanded} onToggle={() => flip(setExpandedGroups, group.key)} posterSrc={group.poster_path} title={group.title || group.clean_name || resolveDisplayTitle(rep, configPaths)} subtitle={t('media_table_tv_summary').replace('{seasons}', String(group.seasons.size)).replace('{episodes}', String(group.total_count))} status={statusOf(groupTasks)} task={rep} onDelete={() => deleteIds(groupIds)} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} scopeOverride="series" />
+                <MediaRow level={0} isExpandable isExpanded={groupExpanded} onToggle={() => flip(setExpandedGroups, group.key)} posterSrc={group.poster_path} title={group.title || group.clean_name || resolveDisplayTitle(rep, configPaths)} subtitle={t('media_table_tv_summary').replace('{seasons}', String(group.seasons.size)).replace('{episodes}', String(group.total_count))} status={statusOf(groupTasks)} task={rep} onDelete={() => deleteIds(groupIds)} onIgnore={() => onIgnore(groupTasks.map(t => t.file_path!).filter(Boolean)[0] ?? rep.file_path!)} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} scopeOverride="series" />
               </div>
             </div>
 
@@ -268,14 +270,14 @@ export default function MediaTable({
                   <div className="flex items-stretch gap-2">
                     {renderSelect(seasonIds)}
                     <div className="flex-1 min-w-0">
-                      <MediaRow level={1} isExpandable isExpanded={seasonExpanded} onToggle={() => flip(setExpandedSeasons, seasonKey)} posterSrc={group.poster_path} title={t('media_table_season_label').replace('{season}', String(season))} subtitle={t('media_table_tv_season_episodes').replace('{count}', String(sorted.length))} status={statusOf(sorted)} task={seasonRep} onDelete={() => deleteIds(seasonIds)} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} hidePoster scopeOverride="season" />
+                      <MediaRow level={1} isExpandable isExpanded={seasonExpanded} onToggle={() => flip(setExpandedSeasons, seasonKey)} posterSrc={group.poster_path} title={t('media_table_season_label').replace('{season}', String(season))} subtitle={t('media_table_tv_season_episodes').replace('{count}', String(sorted.length))} status={statusOf(sorted)} task={seasonRep} onDelete={() => deleteIds(seasonIds)} onIgnore={() => onIgnore(sorted.map(t => t.file_path!).filter(Boolean)[0] ?? seasonRep.file_path!)} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} hidePoster scopeOverride="season" />
                     </div>
                   </div>
                   {seasonExpanded && sorted.map((task) => (
                     <div key={task.id} className="flex items-stretch gap-2">
                       {renderSelect([task.id])}
                       <div className="flex-1 min-w-0">
-                        <MediaRow level={2} title={resolveDisplayTitle(task, configPaths)} subtitle={subtitleOf(task)} status={task.status} task={task} onDelete={() => deleteIds([task.id])} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} hidePoster scopeOverride="episode" />
+                        <MediaRow level={2} title={resolveDisplayTitle(task, configPaths)} subtitle={subtitleOf(task)} status={task.status} task={task} onDelete={() => deleteIds([task.id])} onIgnore={task.file_path ? () => onIgnore(task.file_path!) : undefined} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} hidePoster scopeOverride="episode" />
                       </div>
                     </div>
                   ))}

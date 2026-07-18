@@ -22,7 +22,7 @@ from typing import Optional, Any, Dict
 from fastapi import APIRouter, HTTPException
 
 from app.api.v1.deps import DbDep
-from app.models.domain_system import DeleteBatchRequest, PurgeRequest
+from app.models.domain_system import DeleteBatchRequest, PurgeRequest, IgnorePathRequest, IgnorePathBatchRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -314,3 +314,55 @@ async def retry_task(task_id: int, db: DbDep = None):
     except Exception as e:
         logger.error(f"[API] 重试任务失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"重试任务失败: {str(e)}")
+
+
+# ==========================================
+# 持久化忽略清单接口
+# ==========================================
+
+@router.post("/ignore")
+async def ignore_path(body: IgnorePathRequest, db: DbDep = None):
+    """将单个文件路径加入持久化忽略清单，同时将数据库中对应任务标记为 ignored。"""
+    try:
+        db.ignore_path_add(body.path)
+        # 同步更新数据库：找到对应任务并标记 ignored（可能不存在，静默处理）
+        task_id = db.get_task_id_by_path(body.path)
+        if task_id:
+            db.update_task_status(task_id, "ignored")
+        logger.info(f"[API] 路径已加入忽略清单: {body.path}")
+        return {"success": True, "message": "已加入忽略清单"}
+    except Exception as e:
+        logger.error(f"[API] 忽略路径失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/ignore_batch")
+async def ignore_path_batch(body: IgnorePathBatchRequest, db: DbDep = None):
+    """批量将文件路径加入持久化忽略清单。"""
+    try:
+        added = db.ignore_path_add_batch(body.paths)
+        logger.info(f"[API] 批量忽略: 新增 {added} 条")
+        return {"success": True, "added": added}
+    except Exception as e:
+        logger.error(f"[API] 批量忽略失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/ignore")
+async def unignore_path(body: IgnorePathRequest, db: DbDep = None):
+    """从持久化忽略清单移除路径（取消忽略）。"""
+    try:
+        removed = db.ignore_path_remove(body.path)
+        return {"success": True, "removed": removed}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/ignore_list")
+async def get_ignore_list(db: DbDep = None):
+    """获取完整的持久化忽略清单。"""
+    try:
+        paths = db.ignore_path_list()
+        return {"paths": paths, "total": len(paths)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

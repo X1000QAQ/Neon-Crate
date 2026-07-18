@@ -254,10 +254,19 @@ def perform_scan_task_sync():
             logger.info(f"[SCAN] 下载目录扫描完成，发现 {len(discovered_download_raw)} 个文件，物理熔断后剩余 {len(discovered_download)} 个")
 
         # 智能入库：遍历扫描结果，检查 tasks 表中是否已存在该路径
+        # 一次性加载忽略清单，frozenset O(1) 查找，不在循环内重复读文件
+        ignore_set = db.ignore_path_load_set()
+        logger.info(f"[SCAN] 持久化忽略清单已加载，共 {len(ignore_set)} 条")
+
         new_count = 0
         for discovered_files, default_status in all_scan_batches:
             for file_info in discovered_files:
                 file_path = file_info.get("path")
+
+                # 持久化忽略清单前置拦截（优先级最高，数据库重置后仍生效）
+                if ignore_set and os.path.normcase(os.path.normpath(file_path)) in ignore_set:
+                    logger.debug(f"[SCAN] 忽略清单命中，跳过: {file_path}")
+                    continue
 
                 # 检查是否已存在（路径精确匹配）
                 if db.check_task_exists_by_path(file_path):

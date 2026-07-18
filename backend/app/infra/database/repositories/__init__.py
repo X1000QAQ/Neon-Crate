@@ -20,6 +20,7 @@ from .config_repo import ConfigRepo
 from .stats_repo import StatsRepo
 from .archive_repo import ArchiveRepo
 from .task_repo import TaskRepo
+from .ignore_repo import IgnoreRepo
 
 __all__ = [
     "BaseRepository",
@@ -28,4 +29,5 @@ __all__ = [
     "StatsRepo",
     "ArchiveRepo",
     "TaskRepo",
+    "IgnoreRepo",
 ]

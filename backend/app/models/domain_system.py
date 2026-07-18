@@ -198,6 +198,16 @@ class DeleteBatchRequest(BaseModel):
     ids: List[int]
 
 
+class IgnorePathRequest(BaseModel):
+    """单路径忽略/取消忽略请求。"""
+    path: str
+
+
+class IgnorePathBatchRequest(BaseModel):
+    """批量路径忽略请求。"""
+    paths: List[str]
+
+
 class PurgeRequest(BaseModel):
     """
     全量清空任务请求模型。

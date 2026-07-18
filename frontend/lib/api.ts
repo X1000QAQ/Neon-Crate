@@ -433,6 +433,26 @@ export const api = {
     return safeJson(res);
   },
 
+  async ignorePath(path: string): Promise<{ success: boolean; message: string }> {
+    const res = await secureFetch(`${API_BASE}/tasks/ignore`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({ path }),
+    });
+    if (!res.ok) throw new Error('Failed to ignore path');
+    return safeJson(res);
+  },
+
+  async ignorePathBatch(paths: string[]): Promise<{ success: boolean; added: number }> {
+    const res = await secureFetch(`${API_BASE}/tasks/ignore_batch`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({ paths }),
+    });
+    if (!res.ok) throw new Error('Failed to ignore paths');
+    return safeJson(res);
+  },
+
   async searchTmdb(keyword: string, mediaType: string): Promise<{
     tmdb_id: number;
     title: string;
