@@ -58,7 +58,135 @@ Singleflight + TTL 机制防止并发海报请求时的资源耗尽。
 
 ---
 
-## 快速开始
+---
+
+## 开发部署模式
+
+Neon Crate 支持**两种模式**无缝切换，同一套代码可用于本地开发和生产部署。
+
+| 特性 | 本地开发 | AIO 生产 |
+|------|--------|--------|
+| **前端框架** | `output: 'standalone'` | `output: 'export'` |
+| **前端端口** | 3000 / 3001 | 8000 |
+| **后端端口** | 8000 | 8000 |
+| **API 代理** | ✅ 启用 | ❌ 禁用（同域） |
+| **运行方式** | 分离进程 | 单容器 |
+| **跨域配置** | 需要代理 | 无需（零跨域） |
+
+### 本地开发模式
+
+**前提：** 后端已安装依赖（Python 3.12）、前端已安装依赖（Node.js 20）
+
+**启动后端（终端 1）：**
+
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python3 -m uvicorn app.main:app --reload
+```
+
+后端运行在 `http://127.0.0.1:8000`
+
+**启动前端（终端 2）：**
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+前端运行在 `http://localhost:3000`（或 3001 如果 3000 被占用）
+
+**工作流程：**
+
+```
+浏览器 (localhost:3000)
+    ↓
+Next.js 开发服务器 (standalone 模式)
+    ↓
+API 代理 (/api/v1/*)
+    ↓
+后端 FastAPI (127.0.0.1:8000)
+    ↓
+SQLite 数据库
+```
+
+**特点：**
+- ✅ 前后端独立，互不阻塞
+- ✅ 支持热更新（HMR）
+- ✅ 易于调试（浏览器 DevTools）
+- ✅ 本地数据库隔离
+
+---
+
+### AIO 生产模式（Unraid Docker）
+
+**构建镜像：**
+
+```bash
+cd /path/to/Neon-Crate
+
+# 前端自动构建为 output: 'export' 静态模式
+docker build -t x1000qaq/neon-crate:v1.0.0 .
+
+# 推送到 Docker Hub
+docker push x1000qaq/neon-crate:v1.0.0
+```
+
+**部署到 Unraid：**
+
+编辑 `docker-compose.yml`，修改存储路径，然后：
+
+```bash
+docker compose up -d
+```
+
+访问 `http://Unraid-IP:8000`
+
+**工作流程：**
+
+```
+浏览器 (Unraid-IP:8000)
+    ↓
+FastAPI 服务 (8000)
+    ├─ 静态文件服务 (/) - 前端资源
+    └─ API 路由 (/api/v1/*) - 后端接口
+        ↓
+    SQLite 数据库 (/app/data)
+```
+
+**特点：**
+- ✅ 单容器、单端口
+- ✅ 零跨域配置
+- ✅ NAS 友好（支持挂载点）
+- ✅ 自愈能力（启动时自动初始化）
+
+---
+
+### 配置切换机制
+
+**前端自适配（`frontend/next.config.js`）：**
+
+```javascript
+output: process.env.NEXT_PUBLIC_BUILD_MODE === 'aio' ? 'export' : 'standalone'
+```
+
+- **本地开发**：`NEXT_PUBLIC_BUILD_MODE=dev` → 启用 API 代理
+- **Docker 构建**：`NEXT_PUBLIC_BUILD_MODE=aio` → 静态导出
+
+**环境变量（`frontend/.env.development.local`）：**
+
+```bash
+# 本地开发配置
+NEXT_PUBLIC_BUILD_MODE=dev
+NEXT_PUBLIC_API_BACKEND=http://127.0.0.1:8000
+```
+
+---
+
+## 快速参考
 
 ### Docker Compose（推荐）
 
