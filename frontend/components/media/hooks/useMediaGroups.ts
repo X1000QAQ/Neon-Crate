@@ -50,9 +50,12 @@ export function useMediaGroups(tasks: Task[], configPaths: PathConfig[] = []): M
       g.total_count++;
       if ((task.status || '').toLowerCase() === 'archived') g.archived_count++;
       if ((task.status || '').toLowerCase() === 'ignored') g.ignored_count++;
+      // 元数据：有 TMDB 刮削结果的任务数据质量更高，优先覆盖路径 fallback 填入的值
+      if (task.title) g.title = task.title;
+      if (task.clean_name && !g.title) g.clean_name = task.clean_name;
+      if (task.tmdb_id && !g.tmdb_id) g.tmdb_id = task.tmdb_id;
       if (!g.poster_path) g.poster_path = task.local_poster_path || task.poster_path;
-      if (!g.title && task.title) g.title = task.title;
-      if (!g.clean_name && task.clean_name) g.clean_name = task.clean_name;
+      if (task.local_poster_path) g.poster_path = task.local_poster_path;
 
       if (mtype === 'movie' || mtype === 'mixed') {
         g.task = task;
