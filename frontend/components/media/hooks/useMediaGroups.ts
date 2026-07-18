@@ -69,7 +69,16 @@ export function useMediaGroups(tasks: Task[]): MediaGroup[] {
       if (mtype === 'movie' || mtype === 'mixed') {
         g.task = task;
       } else if (mtype === 'tv') {
-        const s = task.season ?? 1;
+        // 季号提取优先级：task.season > 路径中的 Season X 目录 > fallback 1
+        // 路径结构：/storage/media/tv/{series}/Season 2/file.mkv -> parts[-2] = "Season 2"
+        let s = task.season;
+        if (s == null) {
+          const pathForSeason = task.target_path || task.file_path || '';
+          const seasonParts = pathForSeason.replace(/\\/g, '/').split('/').filter(Boolean);
+          const seasonDir = seasonParts.length >= 2 ? seasonParts[seasonParts.length - 2] : '';
+          const seasonMatch = seasonDir.match(/season\s*(\d+)/i);
+          s = seasonMatch ? Number(seasonMatch[1]) : 1;
+        }
         if (!g.seasons.has(s)) g.seasons.set(s, []);
         g.seasons.get(s)!.push(task);
       }

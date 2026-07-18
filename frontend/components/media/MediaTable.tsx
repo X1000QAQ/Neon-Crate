@@ -74,8 +74,19 @@ function titleOf(task: Task) {
 function parseSeasonEpisode(task: Task) {
   const source = [task.target_path, task.file_path, task.file_name].filter(Boolean).join(' ');
   const match = source.match(/S(\d{1,2})E(\d{1,3})/i);
+
+  let season = task.season ?? (match ? Number(match[1]) : null);
+  // 当结构化字段和 SxxExx 都取不到季号时，从路径的 Season X 目录名提取
+  if (season == null) {
+    const pathForSeason = task.target_path || task.file_path || '';
+    const parts = pathForSeason.replace(/\\/g, '/').split('/').filter(Boolean);
+    const seasonDir = parts.length >= 2 ? parts[parts.length - 2] : '';
+    const seasonMatch = seasonDir.match(/season\s*(\d+)/i);
+    if (seasonMatch) season = Number(seasonMatch[1]);
+  }
+
   return {
-    season: task.season ?? (match ? Number(match[1]) : null),
+    season,
     episode: task.episode ?? (match ? Number(match[2]) : null),
   };
 }
