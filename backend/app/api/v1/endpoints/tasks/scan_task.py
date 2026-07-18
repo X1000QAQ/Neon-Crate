@@ -359,14 +359,26 @@ def perform_scan_task_sync():
                             task_data["clean_name"] = final_title or _cname
                             if final_year:
                                 task_data["year"] = final_year
-                            task_data["status"]      = "archived"
-                            task_data["target_path"] = file_path
                             has_nfo = True
-                            logger.info(
-                                f"[SCAN] [NFO Shift-Left] 越级归档: "
-                                f"tmdb={task_data['tmdb_id']}, title={task_data['clean_name']}"
-                                + (" [金标准]" if _gold else "")
-                            )
+                            # 越级归档仅对媒体库文件有效。
+                            # 下载目录的文件即使有 NFO，也必须保持 pending，
+                            # 等待刮削流水线完成硬链接后再转为 archived。
+                            # 否则 target_path 会指向下载目录，
+                            # 导致就地补录检测误判并跳过硬链接环节。
+                            if default_status == "archived":
+                                task_data["status"]      = "archived"
+                                task_data["target_path"] = file_path
+                                logger.info(
+                                    f"[SCAN] [NFO Shift-Left] 越级归档（媒体库文件）: "
+                                    f"tmdb={task_data['tmdb_id']}, title={task_data['clean_name']}"
+                                    + (" [金标准]" if _gold else "")
+                                )
+                            else:
+                                logger.info(
+                                    f"[SCAN] [NFO Shift-Left] 预填元数据（下载目录，保持 pending）: "
+                                    f"tmdb={task_data['tmdb_id']}, title={task_data['clean_name']}"
+                                    + (" [金标准]" if _gold else "")
+                                )
                 except Exception as _nfo_scan_err:
                     logger.debug(f"[SCAN] [NFO Shift-Left] 跳过（{_nfo_scan_err}）")
 

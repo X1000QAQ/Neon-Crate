@@ -676,7 +676,10 @@ def _step_archive_and_metadata(
         if p.get("type") == "library" and p.get("enabled", False) and p.get("path")
     ]
     _file_norm = os.path.normpath(task_file_path).lower()
-    if task_status == "archived" or any(_file_norm.startswith(lp) for lp in _lib_paths):
+    # 只用物理路径判断文件是否在媒体库内，archived 状态本身不足以作为依据。
+    # 下载目录的文件在 NFO Shift-Left 阶段可能被标记为 archived，
+    # 若此处以 status 作判断，会导致归档全链路被跳过、硬链接不执行。
+    if any(_file_norm.startswith(lp) for lp in _lib_paths):
         _is_library_file = True
 
     target_path       = None
