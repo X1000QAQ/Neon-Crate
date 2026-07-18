@@ -110,8 +110,9 @@ export function useMediaGroups(tasks: Task[]): MediaGroup[] {
       if (mtype === 'movie' || mtype === 'mixed') {
         g.task = task;
       } else if (mtype === 'tv') {
-        if (!g.seasons.has(seasonNum)) g.seasons.set(seasonNum, []);
-        g.seasons.get(seasonNum)!.push(task);
+        const s = seasonNum as number;
+        if (!g.seasons.has(s)) g.seasons.set(s, []);
+        g.seasons.get(s)!.push(task);
       }
     }
 
