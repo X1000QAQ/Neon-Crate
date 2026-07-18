@@ -1,19 +1,27 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // 🚀 AIO 模式：静态导出，由 FastAPI 后端统一托管
-  // 1. 生成纯静态产物（out/ 目录）
-  // -> 2. Dockerfile 多阶段构建将 out/ 注入 backend/static/
-  // -> 3. FastAPI main.py 挂载 /static 目录，单端口（8000）托管前后端
-  output: 'export',
+  // 🚀 双模式支持：本地开发 + AIO 部署
+  // - 本地开发（npm run dev）：output: 'standalone'，启用代理
+  // - AIO 部署（docker build）：output: 'export'，静态导出
+  output: process.env.NEXT_PUBLIC_BUILD_MODE === 'aio' ? 'export' : 'standalone',
 
   // 🔧 SPA 路由回退修复：启用尾部斜杠
-  // 生成 auth/login/index.html 而不是 auth/login.html
-  // 让 FastAPI StaticFiles(html=True) 能正确识别目录并返回 index.html
+  // 本地开发和 AIO 都需要这个
   trailingSlash: true,
 
-  // AIO 模式下前端与后端同域，使用相对路径，彻底消灭跨域问题
-  // API 请求走 /api/v1/... 相对路径，由同一个 8000 端口响应
-  // ⚠️ 注意：output: 'export' 与 rewrites() 不兼容，已移除代理规则
+  // 🌐 本地开发模式：API 代理配置
+  // AIO 模式下 rewrites 不生效（因为 output: 'export'），但没关系
+  // 因为 AIO 时前后端同端口，相对路径会自动指向本地后端
+  async rewrites() {
+    return {
+      beforeFiles: [
+        {
+          source: '/api/v1/:path*',
+          destination: `${process.env.NEXT_PUBLIC_API_BACKEND || 'http://127.0.0.1:8000'}/api/v1/:path*`,
+        },
+      ],
+    };
+  },
 };
 
 module.exports = nextConfig;

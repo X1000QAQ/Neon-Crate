@@ -19,9 +19,10 @@ RUN npm ci
 # 3. 拷贝前端源码
 COPY frontend ./
 
-# 4. 构建静态导出产物（next.config.js 中 output: 'export' 已启用）
+# 4. 构建静态导出产物（AIO 模式）
+#    设置 NEXT_PUBLIC_BUILD_MODE=aio 切换到静态导出模式
 #    产物输出至 /app/frontend/out/
-RUN npm run build
+RUN NEXT_PUBLIC_BUILD_MODE=aio npm run build
 
 # ============================================================================
 # 🚀 第二阶段：后端运行环境（Python 3.12）
