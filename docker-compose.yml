@@ -1,40 +1,125 @@
 # ============================================================================
-# Neon Crate — AIO 极简部署方案
+# Neon Crate — AIO 全栈部署
 # 架构哲学：单容器 · 单端口（8000）· 零跨域 · NAS 友好
+# 文档：docs/04_运维部署/01_AIO部署指南.md
 # ============================================================================
+
 version: '3.8'
 
 services:
   neon-crate:
+    # 多阶段构建：前端（Node.js）+ 后端（Python）
     build:
       context: .
       dockerfile: Dockerfile
-    image: neon-crate:v1.0.0-stable
+    image: x1000qaq/neon-crate:v1.0.0
     container_name: neon-crate
+    
+    # ════════════════════════════════════════════════════════════
+    # 端口映射：单端口 8000 响应前端 + API
+    # ════════════════════════════════════════════════════════════
     ports:
-      # 🚀 AIO 单端口：前端静态资源 + 后端 API 全部由 8000 端口响应
       - "8000:8000"
+    
+    # ════════════════════════════════════════════════════════════
+    # 数据卷挂载
+    # ════════════════════════════════════════════════════════════
     volumes:
-      # 🚨 存储防线：持久化核心数据库、配置文件、海报缓存、运行日志
+      # 数据持久化：SQLite 数据库 + 配置 + 密钥 + 海报 + 日志
       - ./data:/app/data
-      # 🚨 媒体防线：挂载 NAS 真实的媒体根目录（修改为实际路径）
+      
+      # 媒体库根目录（必改：改为实际的 NAS 媒体路径）
+      # 示例：
+      #   - /mnt/media:/storage         (Linux)
+      #   - /Volumes/media:/storage      (macOS)
+      #   - D:/media:/storage            (Windows + Docker Desktop)
       - /path/to/your/storage:/storage
+    
+    # ════════════════════════════════════════════════════════════
+    # 环境变量配置
+    # ════════════════════════════════════════════════════════════
     environment:
+      # 应用基础配置
       - APP_NAME=Neon Crate
       - HOST=0.0.0.0
       - PORT=8000
       - LOG_LEVEL=INFO
+      
+      # NAS 存储路径（必须与上方 volumes 保持一致）
       - DOCKER_STORAGE_PATH=/storage
-      # 🔐 安全：生产环境务必通过 .env 文件或 NAS 环境变量覆盖此值
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production-to-a-secure-key}
+      
+      # JWT 安全密钥（生产必改）
+      # 生成方式：python3 -c "import secrets; print(secrets.token_hex(64))"
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
+      
+      # LLM 配置（可选，默认 DeepSeek）
+      # - LLM_PROVIDER=deepseek
+      # - LLM_API_KEY=${LLM_API_KEY}
+      
+      # TMDB 配置（可选，用于元数据刮削）
+      # - TMDB_API_KEY=${TMDB_API_KEY}
+      
+      # Radarr / Sonarr 配置（可选，用于下载集成）
+      # - RADARR_URL=http://radarr:7878
+      # - SONARR_URL=http://sonarr:8989
+    
+    # 自动重启
     restart: unless-stopped
-    # 健康检查：依赖 Dockerfile 中定义的 HEALTHCHECK 指令
+    
+    # 健康检查（每 30s 检查一次）
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
-# ============================================================================
-# ✅ AIO 架构优势说明
-# ============================================================================
-# 1. 零跨域：前端和后端跑在同一域名的 8000 端口下，彻底消灭 CORS 预检请求
-# 2. 网络极简：无需配置 bridge 网络，无需 depends_on 依赖关系
-# 3. 数据安全：SQLite WAL 模式文件（.db / .db-wal / .db-shm）完整保留在 ./data
-# 4. NAS 友好：单端口映射，无需开放多个端口，降低 NAS 防火墙配置复杂度
-# 5. 内存高效：单容器 vs 双容器，节省约 200MB+ Node.js 运行时内存开销
+# ════════════════════════════════════════════════════════════
+# 快速开始
+# ════════════════════════════════════════════════════════════
+#
+# 1. 生成 JWT 密钥：
+#    $ JWT_SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(64))")
+#
+# 2. 修改存储路径：
+#    编辑本文件，将 /path/to/your/storage 改为实际路径
+#
+# 3. 启动容器：
+#    $ docker compose up -d --build
+#
+# 4. 查看日志：
+#    $ docker compose logs -f neon-crate
+#
+# 5. 访问应用：
+#    http://localhost:8000
+#
+# 6. 停止容器：
+#    $ docker compose down
+#
+
+# ════════════════════════════════════════════════════════════
+# AIO 架构说明
+# ════════════════════════════════════════════════════════════
+#
+# ✅ 优势：
+#   1. 零跨域：前后端共用 8000 端口，无 CORS 预检
+#   2. 极简部署：单容器、单端口、无外部依赖
+#   3. 内存高效：~300MB（vs 双容器 +200MB Node.js）
+#   4. NAS 友好：单端口映射，简化防火墙配置
+#   5. 自自愈：启动时自动初始化数据库和配置
+#
+# 🔐 安全：
+#   - SQLite WAL 模式保证数据完整性
+#   - API Key 加密存储在 secure_keys.json
+#   - JWT 无状态认证，自动 7 天过期
+#   - 管理员密码使用 bcrypt 哈希
+#
+# 📊 数据目录结构：
+#   data/
+#   ├── media_database.db     主数据库
+#   ├── config.json           应用配置
+#   ├── secure_keys.json      加密 API Key
+#   ├── secret.key            Fernet 主密钥
+#   ├── auth.json             管理员账户
+#   ├── posters/              海报缓存
+#   └── logs/app.log          应用日志
