@@ -179,7 +179,9 @@ def _mount_static_resources(app: FastAPI) -> None:
     frontend_static_abs = Path(__file__).resolve().parent.parent.parent / "static"
     frontend_static = str(frontend_static_abs)
     if frontend_static_abs.is_dir():
-        app.mount("/", StaticFiles(directory=frontend_static, html=True), name="frontend")
+        # html=False: 支持目录结构的 Next.js 导出模式
+        # 当请求 /auth/login/ 时，自动返回 /auth/login/index.html
+        app.mount("/", StaticFiles(directory=frontend_static, html=False), name="frontend")
         logging.info(f"[OK] 前端静态文件已挂载: {frontend_static} -> /")
     else:
         logging.info(f"[INFO] 未找到前端静态目录 {frontend_static}，AIO 模式未启用")

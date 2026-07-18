@@ -12,7 +12,8 @@
  */
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { Film, LayoutDashboard, Settings as SettingsIcon, Activity } from 'lucide-react';
 import StatsOverview from '@/components/media/StatsOverview';
 import MiniLog from '@/components/media/MiniLog';
@@ -25,8 +26,21 @@ import { useLanguage } from '@/hooks/useLanguage';
 type View = 'dashboard' | 'media' | 'monitor' | 'settings';
 
 export default function Home() {
+  const router = useRouter();
   const [activeView, setActiveView] = useState<View>('dashboard');
+  const [authChecked, setAuthChecked] = useState(false);
   const { t } = useLanguage();
+
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    if (!token) {
+      router.replace('/auth/login');
+    } else {
+      setAuthChecked(true);
+    }
+  }, [router]);
+
+  if (!authChecked) return null;
 
   const navItems = [
     { id: 'dashboard', label: t('nav_dashboard'), icon: LayoutDashboard },
