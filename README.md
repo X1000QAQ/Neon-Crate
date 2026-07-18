@@ -96,7 +96,7 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python -m app.main
+python3 -m uvicorn app.main:app --reload
 ```
 
 **前端：**
