@@ -20,7 +20,7 @@
 
 import { useState } from 'react';
 import { CheckSquare, MinusSquare, Square } from 'lucide-react';
-import type { Task } from '@/types';
+import type { Task, PathConfig } from '@/types';
 import { cn } from '@/lib/utils';
 import { useLanguage } from '@/hooks/useLanguage';
 import { MediaRow } from './MediaRow';
@@ -32,6 +32,7 @@ type Scope = 'series' | 'season' | 'episode';
 interface MediaTableProps {
   loading: boolean;
   tasks: Task[];
+  configPaths?: PathConfig[];
   selectedIds: Set<number>;
   onToggleSelect: (id: number) => void;
   onSelectAll: () => void;
@@ -161,6 +162,7 @@ function statusOf(tasks: Task[]): Task['status'] {
 export default function MediaTable({
   loading,
   tasks,
+  configPaths = [],
   selectedIds,
   onToggleSelect,
   onSelectAll,
@@ -173,7 +175,7 @@ export default function MediaTable({
   onRebuild,
 }: MediaTableProps) {
   const { t } = useLanguage();
-  const groups = useMediaGroups(tasks);
+  const groups = useMediaGroups(tasks, configPaths);
   
   // 展开状态：记录哪些剧集根和季已被用户展开
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());

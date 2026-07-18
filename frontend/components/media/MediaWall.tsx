@@ -39,6 +39,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { api } from '@/lib/api';
 import type { Task } from '@/types';
 import { useLanguage } from '@/hooks/useLanguage';
+import { useSettings } from '@/hooks/useSettings';
 import MediaPagination from './MediaPagination';
 import MediaTable from './MediaTable';
 import MediaToolbar from './MediaToolbar';
@@ -47,6 +48,8 @@ const PAGE_SIZE = 20;
 
 export default function MediaWall() {
   const { t } = useLanguage();
+  const { config } = useSettings();
+  const configPaths = config?.paths ?? [];
   // React Hooks 死循环止血点：useLanguage 每次渲染都会返回新引用的 `t` 函数，
   // 若把 `t` 放入 loadTasks 的依赖数组，会导致 loadTasks 身份每渲染变化 -> useEffect 重复发包。
   const tRef = useRef(t);
@@ -415,6 +418,7 @@ export default function MediaWall() {
           <MediaTable 
             loading={loading}
             tasks={paginatedTasks}
+            configPaths={configPaths}
             selectedIds={selectedIds}
             onToggleSelect={toggleSelect}
             onSelectAll={selectAllCurrentPage}

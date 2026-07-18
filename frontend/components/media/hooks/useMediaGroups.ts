@@ -7,6 +7,7 @@
  */
 import { useMemo } from 'react';
 import type { Task } from '@/types';
+import type { PathConfig } from '@/types';
 
 export interface MediaGroup {
   key: string;
@@ -23,17 +24,55 @@ export interface MediaGroup {
 }
 
 /**
- * 从路径中提取剧集根目录名和季号。
+ * 根据用户配置的路径列表，提取任务的剧集根目录名和季号。
  *
- * 策略：在路径段中找到 "Season X" 目录，取其上一级作为剧集根目录名。
- * 这样无论路径深度如何，都能稳定提取到正确的剧集名。
+ * 策略：
+ * 1. 遍历所有已启用的路径配置，找到匹配的前缀
+ * 2. 去掉前缀后，取第一段作为剧集根目录名
+ * 3. 再在剩余路径中寻找 Season X 目录确定季号
  *
- * 示例：
+ * 示例（download 路径 /storage/ready_for_ai_tv）：
+ *   /storage/ready_for_ai_tv/Futurama/Futurama.S07E11.mkv
+ *   → seriesName = "Futurama", season = 7 (从文件名 SxxExx 提取)
+ *
+ * 示例（library 路径 /storage/media/tv）：
  *   /storage/media/tv/葬送的芙莉莲 (2023)/Season 1/xxx.mkv
  *   → seriesName = "葬送的芙莉莲 (2023)", season = 1
  */
-function extractSeriesInfo(path: string): { seriesName: string | null; season: number | null } {
-  const parts = path.replace(/\\/g, '/').split('/').filter(Boolean);
+function extractSeriesInfo(
+  path: string,
+  configPaths: PathConfig[],
+): { seriesName: string | null; season: number | null } {
+  const normalized = path.replace(/\\/g, '/');
+
+  // 按路径长度降序排列，优先匹配最长前缀
+  const sorted = [...configPaths]
+    .filter((p) => p.enabled && (p.category === 'tv' || p.category === 'mixed'))
+    .sort((a, b) => b.path.length - a.path.length);
+
+  for (const cp of sorted) {
+    const prefix = cp.path.replace(/\\/g, '/').replace(/\/$/, '');
+    if (!normalized.startsWith(prefix + '/')) continue;
+
+    const relative = normalized.slice(prefix.length + 1);
+    const parts = relative.split('/').filter(Boolean);
+    if (parts.length === 0) continue;
+
+    // 第一段是剧集根目录名
+    const seriesName = parts[0];
+
+    // 在剩余段中寻找 Season X 确定季号
+    let season: number | null = null;
+    for (let i = 1; i < parts.length; i++) {
+      const m = parts[i].match(/^season\s*(\d+)$/i);
+      if (m) { season = Number(m[1]); break; }
+    }
+
+    return { seriesName, season };
+  }
+
+  // 没有匹配的配置路径，fallback：在路径中找 Season X 目录
+  const parts = normalized.split('/').filter(Boolean);
   for (let i = 0; i < parts.length; i++) {
     const m = parts[i].match(/^season\s*(\d+)$/i);
     if (m) {
@@ -43,14 +82,13 @@ function extractSeriesInfo(path: string): { seriesName: string | null; season: n
       };
     }
   }
-  // 没有找到 Season X 目录，倒数第三段作为剧集名
   return {
     seriesName: parts.length >= 3 ? parts[parts.length - 3] : null,
     season: null,
   };
 }
 
-export function useMediaGroups(tasks: Task[]): MediaGroup[] {
+export function useMediaGroups(tasks: Task[], configPaths: PathConfig[] = []): MediaGroup[] {
   return useMemo((): MediaGroup[] => {
     const map = new Map<string, MediaGroup>();
 
@@ -62,12 +100,10 @@ export function useMediaGroups(tasks: Task[]): MediaGroup[] {
 
       if (mtype === 'tv') {
         const path = task.target_path || task.file_path || '';
-        const { seriesName, season } = extractSeriesInfo(path);
+        const { seriesName, season } = extractSeriesInfo(path, configPaths);
 
         // 季号优先级：task.season > 路径 Season X 目录 > SxxExx 正则 > 1
-        if (seasonNum == null && season != null) {
-          seasonNum = season;
-        }
+        if (seasonNum == null && season != null) seasonNum = season;
         if (seasonNum == null) {
           const source = [task.target_path, task.file_path, task.file_name].filter(Boolean).join(' ');
           const m = source.match(/S(\d{1,2})E\d{1,3}/i);
@@ -75,7 +111,7 @@ export function useMediaGroups(tasks: Task[]): MediaGroup[] {
         }
         if (seasonNum == null) seasonNum = 1;
 
-        // 剧集名优先级：task.title > task.clean_name > 路径 Season X 上一级目录 > fallback id
+        // 剧集名优先级：task.title > task.clean_name > 路径提取 > fallback id
         groupName = (task.title || task.clean_name || seriesName || String(task.id)).trim();
       } else {
         groupName = (task.title || task.clean_name || task.file_name || String(task.id)).trim();
@@ -103,7 +139,6 @@ export function useMediaGroups(tasks: Task[]): MediaGroup[] {
       if ((task.status || '').toLowerCase() === 'archived') g.archived_count++;
       if ((task.status || '').toLowerCase() === 'ignored') g.ignored_count++;
       if (!g.poster_path) g.poster_path = task.local_poster_path || task.poster_path;
-      // 优先用有 title 的任务补全组级别的元数据
       if (!g.title && task.title) g.title = task.title;
       if (!g.clean_name && task.clean_name) g.clean_name = task.clean_name;
 
@@ -117,5 +152,5 @@ export function useMediaGroups(tasks: Task[]): MediaGroup[] {
     }
 
     return Array.from(map.values());
-  }, [tasks]);
+  }, [tasks, configPaths]);
 }
