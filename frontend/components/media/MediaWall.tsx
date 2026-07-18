@@ -248,6 +248,17 @@ export default function MediaWall() {
     }
   }, [loadTasks, showToast, t]);
 
+  const handleUnignore = useCallback(async (filePath: string) => {
+    try {
+      await api.unignorePath(filePath);
+      await loadTasks();
+      showToast(t('msg_task_unignored'));
+    } catch (error) {
+      console.error('Unignore failed:', error);
+      showToast(t('msg_unignore_failed'));
+    }
+  }, [loadTasks, showToast, t]);
+
   const toggleSelect = useCallback((id: number) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -443,6 +454,7 @@ export default function MediaWall() {
             onDelete={handleDelete}
             onDeleteBatch={handleDeleteBatch}
             onIgnore={handleIgnore}
+            onUnignore={handleUnignore}
             onRebuild={handleRebuild}
           />
 

@@ -38,7 +38,7 @@
 'use client';
 
 import { useState, useRef, useCallback } from 'react';
-import { Settings, Save, FolderOpen, Key, Code, Brain } from 'lucide-react';
+import { Settings, Save, FolderOpen, Key, Code, Brain, EyeOff } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useSettings } from '@/hooks/useSettings';
 import { useLanguage } from '@/hooks/useLanguage';
@@ -47,11 +47,12 @@ import PathsSettings from './PathsSettings';
 import APISettings from './APISettings';
 import InferenceSettings from './InferenceSettings';
 import PersonaSettings from './PersonaSettings';
+import IgnoreListPanel from './IgnoreListPanel';
 
 export default function SettingsHub() {
   const { t, setLang } = useLanguage();
   const { isLoading, isSaving, saveSettings } = useSettings();
-  const [activeTab, setActiveTab] = useState<'basic' | 'paths' | 'api' | 'inference' | 'persona'>('basic');
+  const [activeTab, setActiveTab] = useState<'basic' | 'paths' | 'api' | 'inference' | 'persona' | 'ignore'>('basic');
 
   // 反馈契约：配置类操作用页内 Toast，避免 alert 与整页 reload 打断 SPA 状态
   const [toast, setToast] = useState<string | null>(null);
@@ -77,6 +78,7 @@ export default function SettingsHub() {
     { id: 'api', label: t('nav_api'), icon: Key },
     { id: 'inference', label: t('nav_inference'), icon: Brain },
     { id: 'persona', label: t('nav_persona'), icon: Code },
+    { id: 'ignore', label: (t as (k: string) => string)('nav_ignore'), icon: EyeOff },
   ];
 
   if (isLoading) {
@@ -160,6 +162,7 @@ export default function SettingsHub() {
             {activeTab === 'api' && <APISettings t={t} />}
             {activeTab === 'inference' && <InferenceSettings t={t} />}
             {activeTab === 'persona' && <PersonaSettings t={t} />}
+            {activeTab === 'ignore' && <IgnoreListPanel t={t} />}
           </div>
         </div>
       </div>

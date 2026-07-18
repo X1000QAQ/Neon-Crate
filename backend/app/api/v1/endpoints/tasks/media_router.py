@@ -348,13 +348,18 @@ async def ignore_path_batch(body: IgnorePathBatchRequest, db: DbDep = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/ignore")
+@router.post("/unignore")
 async def unignore_path(body: IgnorePathRequest, db: DbDep = None):
-    """从持久化忽略清单移除路径（取消忽略）。"""
+    """从持久化忽略清单移除路径，并将数据库中对应任务重置为 pending。"""
     try:
         removed = db.ignore_path_remove(body.path)
+        task_id = db.get_task_id_by_path(body.path)
+        if task_id:
+            db.update_task_status(task_id, "pending")
+        logger.info(f"[API] 路径已从忽略清单移除: {body.path}")
         return {"success": True, "removed": removed}
     except Exception as e:
+        logger.error(f"[API] 取消忽略失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

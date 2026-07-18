@@ -453,6 +453,24 @@ export const api = {
     return safeJson(res);
   },
 
+  async unignorePath(path: string): Promise<{ success: boolean; removed: boolean }> {
+    const res = await secureFetch(`${API_BASE}/tasks/unignore`, {
+      method: 'POST',
+      headers: getHeaders(),
+      body: JSON.stringify({ path }),
+    });
+    if (!res.ok) throw new Error('Failed to unignore path');
+    return safeJson(res);
+  },
+
+  async getIgnoreList(): Promise<{ paths: string[]; total: number }> {
+    const res = await secureFetch(`${API_BASE}/tasks/ignore_list`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error('Failed to fetch ignore list');
+    return safeJson(res);
+  },
+
   async searchTmdb(keyword: string, mediaType: string): Promise<{
     tmdb_id: number;
     title: string;

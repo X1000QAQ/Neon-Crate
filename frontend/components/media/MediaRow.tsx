@@ -54,6 +54,7 @@ import {
   ChevronRight,
   Wand2,
   EyeOff,
+  Eye,
 } from 'lucide-react';
 import SecureImage from '@/components/common/SecureImage';
 import { VHSOverlay } from './VHSOverlay';
@@ -76,6 +77,7 @@ interface MediaRowProps {
   progress?: number;
   onDelete: () => void;
   onIgnore?: () => void;
+  onUnignore?: () => void;
   task?: Task;
   onRebuildClick?: (task: Task, mode: RebuildMode, scope?: 'series' | 'season' | 'episode') => void;
   rebuildingId?: number | null;
@@ -160,6 +162,7 @@ export const MediaRow = memo(function MediaRow({
   progress,
   onDelete,
   onIgnore,
+  onUnignore,
   task,
   onRebuildClick,
   rebuildingId,
@@ -361,6 +364,28 @@ export const MediaRow = memo(function MediaRow({
                 title={t('btn_ignore')}
               >
                 <EyeOff size={14} />
+              </button>
+            )}
+            {onUnignore && task && isIgnored && (
+              <button
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  if (processingId !== null) return;
+                  setProcessingId?.(task.id);
+                  try {
+                    await Promise.resolve(onUnignore());
+                  } finally {
+                    setProcessingId?.(null);
+                  }
+                }}
+                disabled={processingId === task.id}
+                className={cn(
+                  'p-1.5 border border-cyber-cyan/70 text-cyber-cyan/70 hover:bg-cyber-cyan hover:text-black transition-all',
+                  processingId === task.id && 'opacity-50 cursor-not-allowed'
+                )}
+                title={t('btn_unignore')}
+              >
+                <Eye size={14} />
               </button>
             )}
             <button
