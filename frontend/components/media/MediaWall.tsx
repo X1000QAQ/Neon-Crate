@@ -40,6 +40,7 @@ import { api } from '@/lib/api';
 import type { Task } from '@/types';
 import { useLanguage } from '@/hooks/useLanguage';
 import { useSettings } from '@/hooks/useSettings';
+import { buildGroupKey } from './utils/groupingUtils';
 import MediaPagination from './MediaPagination';
 import MediaTable from './MediaTable';
 import MediaToolbar from './MediaToolbar';
@@ -174,7 +175,7 @@ export default function MediaWall() {
     const map = new Map<string, Task[]>();
     for (const task of filteredTasks) {
       const mtype = task.media_type || 'movie';
-      const key = `${mtype}::${(task.title || task.clean_name || task.file_name || String(task.id)).trim()}`;
+      const key = buildGroupKey(task, configPaths);
       if (!map.has(key)) {
         map.set(key, []);
       }

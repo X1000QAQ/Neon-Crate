@@ -26,6 +26,7 @@ import { useLanguage } from '@/hooks/useLanguage';
 import { MediaRow } from './MediaRow';
 import RebuildDialog, { type RebuildMode } from './RebuildDialog';
 import { useMediaGroups, type MediaGroup } from './hooks/useMediaGroups';
+import { resolveDisplayTitle } from './utils/groupingUtils';
 
 type Scope = 'series' | 'season' | 'episode';
 
@@ -55,34 +56,6 @@ interface MediaTableProps {
     episode?: number;
     scope?: Scope;
   }) => Promise<void> | void;
-}
-
-/**
- * 从路径中找到 Season X 目录，取其上一级作为剧集名。
- * 与 useMediaGroups 保持相同的提取逻辑。
- */
-function seriesNameFromPath(path: string): string | null {
-  const parts = path.replace(/\\/g, '/').split('/').filter(Boolean);
-  for (let i = 0; i < parts.length; i++) {
-    if (/^season\s*\d+$/i.test(parts[i])) {
-      return i > 0 ? parts[i - 1] : null;
-    }
-  }
-  return parts.length >= 3 ? parts[parts.length - 3] : null;
-}
-
-/**
- * 提取任务标题（优先级：title > clean_name > 路径剧集目录名 > file_name > id）
- */
-function titleOf(task: Task) {
-  if (task.title) return task.title;
-  if (task.clean_name) return task.clean_name;
-  if (task.media_type === 'tv') {
-    const path = task.target_path || task.file_path || '';
-    const fromPath = path ? seriesNameFromPath(path) : null;
-    if (fromPath) return fromPath;
-  }
-  return task.file_name || `#${task.id}`;
 }
 
 /**
@@ -268,7 +241,7 @@ export default function MediaTable({
             <div key={group.key} className="flex items-stretch gap-2">
               {renderSelect([rep.id])}
               <div className="flex-1 min-w-0">
-                <MediaRow level={0} title={titleOf(rep)} subtitle={subtitleOf(rep)} status={rep.status} task={rep} onDelete={() => deleteIds([rep.id])} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} />
+                <MediaRow level={0} title={resolveDisplayTitle(rep, configPaths)} subtitle={subtitleOf(rep)} status={rep.status} task={rep} onDelete={() => deleteIds([rep.id])} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} />
               </div>
             </div>
           );
@@ -280,7 +253,7 @@ export default function MediaTable({
             <div className="flex items-stretch gap-2">
               {renderSelect(groupIds)}
               <div className="flex-1 min-w-0">
-                <MediaRow level={0} isExpandable isExpanded={groupExpanded} onToggle={() => flip(setExpandedGroups, group.key)} posterSrc={group.poster_path} title={group.title || group.clean_name || titleOf(rep)} subtitle={t('media_table_tv_summary').replace('{seasons}', String(group.seasons.size)).replace('{episodes}', String(group.total_count))} status={statusOf(groupTasks)} task={rep} onDelete={() => deleteIds(groupIds)} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} scopeOverride="series" />
+                <MediaRow level={0} isExpandable isExpanded={groupExpanded} onToggle={() => flip(setExpandedGroups, group.key)} posterSrc={group.poster_path} title={group.title || group.clean_name || resolveDisplayTitle(rep, configPaths)} subtitle={t('media_table_tv_summary').replace('{seasons}', String(group.seasons.size)).replace('{episodes}', String(group.total_count))} status={statusOf(groupTasks)} task={rep} onDelete={() => deleteIds(groupIds)} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} scopeOverride="series" />
               </div>
             </div>
 
@@ -302,7 +275,7 @@ export default function MediaTable({
                     <div key={task.id} className="flex items-stretch gap-2">
                       {renderSelect([task.id])}
                       <div className="flex-1 min-w-0">
-                        <MediaRow level={2} title={titleOf(task)} subtitle={subtitleOf(task)} status={task.status} task={task} onDelete={() => deleteIds([task.id])} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} hidePoster scopeOverride="episode" />
+                        <MediaRow level={2} title={resolveDisplayTitle(task, configPaths)} subtitle={subtitleOf(task)} status={task.status} task={task} onDelete={() => deleteIds([task.id])} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} hidePoster scopeOverride="episode" />
                       </div>
                     </div>
                   ))}
