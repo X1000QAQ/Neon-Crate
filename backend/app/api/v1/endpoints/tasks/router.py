@@ -1,18 +1,18 @@
 """
-router.py - tasks 包统一路由聚合器
+router.py - tasks 路由包统一聚合器。
 
-设计目标：
-- 将所有子模块的 router 合并为单一的 tasks_router
-- 供 app/api/v1/api.py 通过 tasks.router 挂载
+职责：
+- 将扫描、刮削、重构、字幕、设置等任务子路由聚合为单一 `tasks.router`。
+- 为 `app/api/v1/api.py` 提供 `/api/v1/tasks` 下的统一入口。
+- 对媒体 CRUD 路由采用直接注册方式，精确保留 `GET /tasks` 的空路径契约。
 
 路由聚合策略：
-- 常规子路由：直接 include_router（自动携带前缀）
-- 媒体 CRUD 路由：直接注册函数（避免 GET "" 变成 GET "/"）
+- 常规子路由使用 `include_router()`，保留各模块自身定义的路径。
+- 媒体 CRUD 函数直接挂载到聚合 router，避免 FastAPI 将空路径转换为 `/` 后产生路由冲突。
 
-特殊说明（媒体 CRUD 路由直接注册）：
-- get_all_tasks：GET "" 而非 GET "/"，FastAPI 对空路径有特殊处理
-- 如果用 include_router，GET "" 会变成 GET "/"，导致路由冲突
-- 解决方案：直接注册路由函数，精确控制路径
+维护提示：
+- 修改这里的注册方式会直接影响前端请求路径。
+- `GET ""` 与 `GET "/"` 在 FastAPI 中不是完全等价，不能随意替换。
 """
 from fastapi import APIRouter
 

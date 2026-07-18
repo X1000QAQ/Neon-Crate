@@ -1,12 +1,20 @@
 """
-元数据补给站 - MetadataManager
+元数据管理器 - TMDB 详情读取、NFO 生成与图片写盘。
 
-核心功能：
-1. NFO 生成：根据 TMDB 数据生成符合 Jellyfin/Emby/Plex 标准的 XML 格式元数据
-2. 图片下载：下载 TMDB 海报并保存为作品目录下的 poster.jpg
-3. 智能缓存：避免重复下载，提升性能
-4. 路径防穿越：所有写入路径均使用 Path.resolve() 校验
-5. 网络容错：httpx 替代 requests，支持超时和重试
+职责：
+- 根据 TMDB ID 拉取电影、剧集和单集详情。
+- 生成 Jellyfin / Emby / Plex / Kodi 兼容的 NFO XML。
+- 下载并复用 poster、fanart、season poster 等图片资产。
+- 在所有写盘入口执行路径防穿越校验，确保文件只能落在目标元数据目录内。
+
+写盘边界：
+- 已存在的 NFO / 图片优先复用，不重复下载或覆盖。
+- 海报、Fanart 和单集详情获取失败时返回失败值或生成最小化占位 NFO，不向上抛出网络异常。
+- `_validate_path()` 是元数据写盘核安全边界，禁止修改其控制流和路径边界语义。
+
+数据边界：
+- `_safe_get()` 统一处理 TMDB 返回结构中的缺失字段，避免 KeyError / TypeError。
+- `EMPTY_DETAIL` 用于核心字段缺失时返回规范化空对象，保持 NFO 构建链路可控。
 """
 import os
 import logging
@@ -41,7 +49,7 @@ def _validate_path(target_path: str, allowed_base: str) -> Path:
     """
     路径防穿越校验（Docker 软链兼容版）
 
-    🚨 架构师警告 (DO NOT MODIFY): 核安全边界，改动极易引发死锁或路径穿越。
+    架构警告：这是核安全边界，改动极易引发死锁或路径穿越。
     - 这是元数据写盘链路的“路径核安全边界”，被 `generate_nfo/download_poster/download_fanart` 直接调用。
     - 该逻辑需要同时覆盖：
       1) 严格模式：`Path.resolve()` 解析多层软链（含 Unraid `/mnt/user/...` 等场景）
@@ -116,7 +124,16 @@ EMPTY_DETAIL: Dict[str, Any] = {
 
 
 class MetadataManager:
-    """元数据管理器"""
+    """
+    元数据管理器。
+
+    本类负责把 TMDB 上游数据转换为本地媒体库资产：
+    - 作品级 NFO：`movie.nfo` / `tvshow.nfo`。
+    - 单集 NFO：与视频同名的 `<episodedetails>` 文件。
+    - 图片资产：`poster.jpg`、`fanart.jpg`、`seasonXX-poster.jpg`。
+
+    调用方必须传入已经确定的输出目录；本类不会推导媒体库归档路径。
+    """
 
     def __init__(self, tmdb_api_key: str, language: str = "zh-CN"):
         """

@@ -1,25 +1,22 @@
 """
-应用工厂 - FastAPI 应用创建与配置
+应用工厂 - FastAPI 应用创建与装配中心
 
-设计模式：工厂模式
-- 解耦 main.py 的单点故障
-- 提供统一的应用创建接口
-- 便于单元测试和集成测试
+职责：
+- 创建 FastAPI 应用实例。
+- 按固定顺序注册 CORS 中间件、鉴权路由、业务路由、异常处理器、健康检查和静态资源。
+- 提供 `/docs` 与 `/redoc` 文档入口，并在 AIO 模式下托管前端 SPA 静态文件。
 
-核心职责:
-1. 创建 FastAPI 应用实例
-2. 注册所有中间件（CORS、认证等）
-3. 注册所有路由（API、静态资源等）
-4. 配置异常处理器（全局异常捕获、SPA 回退）
-5. 挂载静态资源（海报、前端文件等）
+装配顺序：
+1. `_register_middleware()`：先注册 CORS，确保跨域策略覆盖后续路由。
+2. `_register_routers()`：注册鉴权、公有图片代理和受保护业务 API。
+3. `_register_exception_handlers()`：注册全局异常处理和 SPA 404 回退。
+4. `_add_health_check()`：添加容器健康检查端点。
+5. 文档路由：注册 `/docs`、`/redoc`，避免被根路径静态资源吞掉。
+6. `_mount_static_resources()`：最后挂载 `/api/v1/assets`、`/static/docs` 和 `/` 前端资源。
 
-配置顺序：
-- 中间件 → 路由 → 异常处理器 → 健康检查 → 静态资源
-- 顺序很重要，不可随意调整
-
-SPA 支持：
-- 404 自动回退到 index.html
-- API 路由优先级高于静态文件
+维护提示：
+- 根路径 `StaticFiles` 必须最后挂载，否则 `/docs`、`/redoc` 和部分 API 路由可能被 SPA 捕获。
+- 鉴权路由必须独立注册，不能被全局 JWT 依赖保护。
 """
 import os
 import logging
@@ -34,14 +31,12 @@ from app.api.auth import get_current_user
 
 def _register_middleware(app: FastAPI) -> None:
     """
-    注册所有中间件
-    
-    当前中间件：
-    - CORSMiddleware：跨域资源共享
-      - allow_origins：允许的前端域名（从配置读取）
-      - allow_credentials：允许携带 Cookie
-      - allow_methods：允许所有 HTTP 方法
-      - allow_headers：允许所有请求头
+    注册应用级中间件。
+
+    当前只注册 CORS：
+    - AIO 同域部署下通常不会触发跨域。
+    - 局域网直连 API 或前后端分离调试时依赖该策略放行。
+    - 认证凭据使用 Authorization 头，不依赖 Cookie。
     """
     # CORS 策略（现状）：
     # 1. AIO 同域场景下常规导航不触发预检。
@@ -94,7 +89,14 @@ def _register_routers(app: FastAPI) -> None:
 
 
 def _register_exception_handlers(app: FastAPI) -> None:
-    """注册异常处理器"""
+    """
+    注册全局异常处理器。
+
+    处理范围：
+    - 未捕获异常统一转为 500 JSON，生产环境隐藏内部异常细节。
+    - 非 `/api` 的 404 优先回退到 SPA `index.html`，支持前端路由刷新。
+    - `/api` 前缀 404 保持 JSON，不让 API 错误落入前端页面。
+    """
     @app.exception_handler(Exception)
     async def global_exception_handler(request, exc):
         """全局异常捕获"""
@@ -193,13 +195,20 @@ def _add_health_check(app: FastAPI) -> None:
 
 def create_app(lifespan=None) -> FastAPI:
     """
-    创建并配置 FastAPI 应用
+    创建并装配 FastAPI 应用。
+
+    装配顺序是运行时契约：
+    1. 注册中间件。
+    2. 注册鉴权路由、公有路由和受保护业务路由。
+    3. 注册异常处理器和健康检查。
+    4. 注册自定义文档路由。
+    5. 最后挂载静态资源和 SPA 根路径。
 
     Args:
-        lifespan: 可选的生命周期管理器
+        lifespan: 可选生命周期管理器，通常来自 `app.core.lifespan.lifespan`。
 
     Returns:
-        FastAPI: 配置完成的应用实例
+        FastAPI: 配置完成的应用实例。
     """
     app = FastAPI(
         title="Neon Crate API Gateway",

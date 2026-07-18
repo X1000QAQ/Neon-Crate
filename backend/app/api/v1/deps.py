@@ -1,23 +1,17 @@
 """
-FastAPI 依赖注入容器
+FastAPI 依赖注入容器。
 
-设计目标：
-- 提供统一的 Depends() 可注入依赖
-- 替代路由处理函数中的裸调用（如 get_db_manager()）
-- 所有依赖函数均幂等：底层仍使用全局单例，不产生额外连接
+职责：
+- 提供可复用的 `Depends()` 类型别名，减少路由函数中的重复样板代码。
+- 将数据库管理器作为显式依赖注入到路由层，便于测试替换和类型补全。
+- 保持底层仍使用全局单例，不为每次请求重复创建数据库管理器。
 
-使用方式：
-```python
-from app.api.v1.deps import DbDep
+当前依赖：
+- `DbDep`：注入 `DatabaseManager`，供配置、任务、统计和归档接口调用。
 
-async def my_endpoint(db: DbDep):
-    db.get_config("tmdb_api_key")
-```
-
-优势：
-- 类型提示完整：IDE 可自动补全 DatabaseManager 的所有方法
-- 测试友好：可通过 app.dependency_overrides 替换为 Mock 对象
-- 代码简洁：避免每个路由都重复写 db = get_db_manager()
+维护提示：
+- 本文件只定义依赖类型，不应放入具体业务逻辑。
+- 后续新增依赖时应保持幂等，避免在依赖解析阶段产生昂贵副作用。
 """
 from typing import Annotated
 

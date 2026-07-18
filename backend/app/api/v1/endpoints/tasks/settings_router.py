@@ -1,10 +1,15 @@
 """
-settings_router.py - 配置管理路由
+settings_router.py - 系统配置读取、保存、校验与重置路由。
 
-包含：
-1. get_settings() — GET /settings
-2. update_settings() — POST /settings
-3. reset_settings() — POST /settings/reset
+职责：
+- 提供完整配置读取和保存接口，承接设置页的 `settings + paths` 表单。
+- 保存前校验媒体库路径约束，确保最多且必须启用一个电影库和一个剧集库。
+- 提供第三方 API Key 最小化验证接口，以及 AI / 格式分区重置接口。
+
+配置边界：
+- 敏感密钥的加密存储由 `ConfigRepo` 处理，路由层不直接写 `secure_keys.json`。
+- 保存成功后调用 `_update_library_counts()` 刷新仪表盘缓存。
+- 当前系统不接收 `filename_clean_regex`，也不提供用户自定义文件名物理正则清洗入口。
 """
 import logging
 
@@ -241,10 +246,10 @@ async def reset_settings(payload: ResetSettingsRequest, db: DbDep):
     重置指定配置分区为工业级默认值（仅重置白名单字段）。
 
     业务链路：
-    校验 target（ai/regex/formats...）→ 读取重置映射表 → 对该分区字段执行默认值覆盖 → 返回结果。
+    校验 target（ai/formats）→ 读取重置映射表 → 对该分区字段执行默认值覆盖 → 返回结果。
 
     Args:
-        payload: ResetSettingsRequest，请求体包含 `target`（如 ai/regex）。
+        payload: ResetSettingsRequest，请求体包含 `target`（ai 或 formats）。
         db: 数据库依赖注入（DbDep）。
 
     Returns:

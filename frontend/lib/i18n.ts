@@ -14,7 +14,6 @@ export const translations = {
     nav_api: 'API 密钥',
     nav_inference: '推理引擎',
     nav_persona: 'AI 人格设定',
-    nav_regex: '正则实验室',
     
     // 应用标题
     app_subtitle: '数据容器编排引擎',
@@ -26,6 +25,7 @@ export const translations = {
     btn_cancel: '取消',
     btn_confirm_purge: '确认重置',
     btn_purging: '重置中...',
+    btn_reset_defaults: '重置为默认值',
     modal_confirm: '确认指令',
     modal_cancel: '放弃',
     basic_format_reset_confirm: '确定要重置文件格式规则吗？这将覆盖您当前所有的自定义后缀配置，恢复为系统默认值。',
@@ -87,6 +87,11 @@ export const translations = {
     confirm_purge_all: '危险操作：重置数据库',
     confirm_purge_type_confirm: '此操作将删除所有任务记录（不影响物理文件）。请输入 CONFIRM 确认：',
     purge_success: '数据库已重置',
+    
+    // 分页
+    pagination_jump_to: '跳转到',
+    pagination_page_unit: '页',
+    pagination_jump_btn: 'GO',
     
     // 系统监控
     monitor_title: '系统日志监控',
@@ -180,26 +185,6 @@ export const translations = {
     persona_router_section: '总控中枢',
     persona_signal: '信号',
 
-    // 正则实验室
-    regex_test_filename: '测试文件名',
-    regex_expression: '正则表达式',
-    regex_test_btn: '测试正则',
-    regex_result_title: '匹配结果',
-    regex_match_ok: '匹配成功',
-    regex_no_match: '无匹配',
-    regex_error: '正则表达式错误',
-    regex_preview_highlight: '匹配预览（高亮部分将被删除）',
-    regex_common_title: '常用正则模式',
-    regex_pattern_year: '提取年份',
-    regex_pattern_res: '提取分辨率',
-    regex_pattern_source: '提取来源',
-    btn_reset_defaults: '重置为默认值',
-    regex_lab_title: '正则配置与测试中心',
-    regex_lab_desc: '在此调试正则表达式，测试通过后点击"应用并保存到系统"将规则写入配置文件。',
-    regex_system_rules: '系统规则',
-    regex_filename_clean_regex: '文件名清洗正则',
-    regex_test_signal: '测试信号',
-    regex_reset_confirm: '确定要重置正则清洗规则吗？这将覆盖您当前的所有自定义修改。',
     persona_reset_confirm: '确定要重置 AI 规则吗？这将覆盖您当前的所有自定义修改。',
     persona_reset_success: 'AI 规则已重置为工业级默认值',
     persona_resetting: '重置中...',
@@ -297,6 +282,8 @@ export const translations = {
     filter_type_all: '全部',
     filter_type_movie: '电影',
     filter_type_tv: '剧集',
+    filter_type_mixed: '待 AI 裁决',
+    badge_ai_pending: '待 AI 裁决',
 
     // 路径标签
     path_src: '原始路径',
@@ -327,6 +314,7 @@ export const translations = {
     msg_subtitle_task_trigger_failed: '字幕任务触发失败，请重试',
     error_tmdb_search: 'TMDB 搜索失败',
     media_table_tv_total_episodes: '共 {count} 集',
+    media_table_tv_summary: '{seasons} 季 · 共 {episodes} 集',
     media_table_tv_season_episodes: '{count} 集',
     media_table_season_label: '第 {season} 季',
 
@@ -425,7 +413,6 @@ export const translations = {
     nav_api: 'API Keys',
     nav_inference: 'Inference Engine',
     nav_persona: 'AI Persona',
-    nav_regex: 'Regex Lab',
     
     // App Title
     app_subtitle: 'Intelligent Media Management System',
@@ -437,6 +424,7 @@ export const translations = {
     btn_cancel: 'Cancel',
     btn_confirm_purge: 'Confirm Reset',
     btn_purging: 'Resetting...',
+    btn_reset_defaults: 'Reset to Defaults',
     modal_confirm: 'Confirm',
     modal_cancel: 'Cancel',
     basic_format_reset_confirm: 'Reset file format rules? This will overwrite all your current custom extensions and restore system defaults.',
@@ -499,6 +487,11 @@ export const translations = {
     confirm_purge_all: 'Dangerous Operation: Reset Database',
     confirm_purge_type_confirm: 'This will delete all task records (physical files unaffected). Type CONFIRM to proceed:',
     purge_success: 'Database reset',
+    
+    // Pagination
+    pagination_jump_to: 'Jump to',
+    pagination_page_unit: 'Page',
+    pagination_jump_btn: 'GO',
     
     // System Monitor
     monitor_title: 'System Log Monitor',
@@ -592,26 +585,6 @@ export const translations = {
     persona_router_section: 'Master Router',
     persona_signal: 'Signal',
 
-    // Regex Lab
-    regex_test_filename: 'Test Filename',
-    regex_expression: 'Regular Expression',
-    regex_test_btn: 'Test Regex',
-    regex_result_title: 'Match Result',
-    regex_match_ok: 'Match successful',
-    regex_no_match: 'No match',
-    regex_error: 'Regex error',
-    regex_preview_highlight: 'Match Preview (highlighted parts will be removed)',
-    regex_common_title: 'Common Regex Patterns',
-    regex_pattern_year: 'Extract year',
-    regex_pattern_res: 'Extract resolution',
-    regex_pattern_source: 'Extract source',
-    btn_reset_defaults: 'Reset to Defaults',
-    regex_lab_title: 'Regex Config & Testing Center',
-    regex_lab_desc: 'Debug regular expressions here. Click "Apply & Save" to write rules to config after testing.',
-    regex_system_rules: 'System Rules',
-    regex_filename_clean_regex: 'Filename Clean Regex',
-    regex_test_signal: 'Test Signal',
-    regex_reset_confirm: 'Are you sure you want to reset the regex cleaning rules? This will overwrite all your current custom modifications.',
     persona_reset_confirm: 'Are you sure you want to reset the AI rules? This will overwrite all your current custom modifications.',
     persona_reset_success: 'AI rules have been reset to industrial default values',
     persona_resetting: 'Resetting...',
@@ -711,6 +684,8 @@ export const translations = {
     filter_type_all: 'All',
     filter_type_movie: 'Movie',
     filter_type_tv: 'TV',
+    filter_type_mixed: 'AI Pending',
+    badge_ai_pending: 'AI Pending',
 
     // Path labels
     path_src: 'Source',
@@ -741,6 +716,7 @@ export const translations = {
     msg_subtitle_task_trigger_failed: 'Subtitle task trigger failed, please try again',
     error_tmdb_search: 'TMDB search failed',
     media_table_tv_total_episodes: 'Total {count} episodes',
+    media_table_tv_summary: '{seasons} season(s) · {episodes} episode(s)',
     media_table_tv_season_episodes: '{count} ep(s)',
     media_table_season_label: 'Season {season}',
 
@@ -831,7 +807,12 @@ export const translations = {
 
 export type I18nKey = keyof typeof translations.zh;
 
-export function getTranslation(lang: string, key: I18nKey): string {
+export function getTranslation(lang: string, key: I18nKey): string;
+export function getTranslation(lang: string, key: string, fallback: string): string;
+export function getTranslation(lang: string, key: string, fallback?: string): string {
   const dict = translations[lang as keyof typeof translations] || translations.zh;
-  return dict[key] || key;
+  if (fallback !== undefined) {
+    return (dict as Record<string, string>)[key] ?? fallback;
+  }
+  return dict[key as I18nKey] || key;
 }

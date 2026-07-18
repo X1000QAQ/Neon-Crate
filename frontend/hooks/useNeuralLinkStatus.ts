@@ -1,3 +1,40 @@
+/**
+ * useNeuralLinkStatus - 神经链接状态监控 Hook
+ * 
+ * 核心职责：
+ * - 实时监控后端网络连接状态
+ * - 追踪后台任务的运行状态（扫描、刮削、字幕）
+ * - 向 UI 提供网络和任务状态信息
+ * - 支持全局单例轮询（多个组件共享一个轮询定时器）
+ * 
+ * 状态类型：
+ * - neural_link: 'probing' | 'active' | 'offline'
+ *   - probing: 正在探活（初始状态）
+ *   - active: 连接正常
+ *   - offline: 连接断开
+ * 
+ * - quantum_state: 'stable' | 'syncing' | 'processing' | 'degraded'
+ *   - stable: 系统稳定，无后台任务
+ *   - syncing: 后台有任务正在运行
+ *   - processing: 前端繁忙状态
+ *   - degraded: 系统故障或降级
+ * 
+ * 实现特点：
+ * - 全局单例模式：所有 Hook 实例共享一个轮询定时器
+ * - 自动清理：当最后一个订阅者卸载时，自动停止轮询
+ * - 错误恢复：与 NetworkContext 联动，网络故障时主动更新状态
+ * - 防并发：内置防护机制避免轮询重叠堆叠
+ * 
+ * 使用场景：
+ * - NeuralLinkAlert 组件显示网络状态指示器
+ * - 系统监控面板展示后台任务状态
+ * - 任何需要实时监听系统健康度的组件
+ * 
+ * @example
+ * const status = useNeuralLinkStatus({ enabled: true, intervalMs: 5000 });
+ * return <div>链接: {status.neural_link}, 状态: {status.quantum_state}</div>;
+ */
+
 import { useEffect, useState } from 'react';
 import { API_BASE } from '@/lib/config';
 
@@ -7,7 +44,7 @@ export type QuantumState = 'stable' | 'syncing' | 'processing' | 'degraded';
 export interface NeuralLinkStatus {
   neural_link: NeuralLink;
   quantum_state: QuantumState;
-  updated_at: number; // ms epoch
+  updated_at: number;
 }
 
 type Listener = (s: NeuralLinkStatus) => void;
@@ -18,6 +55,7 @@ const DEFAULT_STATE: NeuralLinkStatus = {
   updated_at: 0,
 };
 
+// 全局状态容器（所有 Hook 实例共享）
 let _state: NeuralLinkStatus = DEFAULT_STATE;
 let _listeners = new Set<Listener>();
 let _timer: number | null = null;
@@ -47,22 +85,29 @@ async function fetchJson(url: string, signal: AbortSignal) {
   return res.json() as Promise<any>;
 }
 
+/**
+ * 单次探活采样
+ * 检测 API 可用性和后台任务运行状态
+ */
 async function sampleOnce(signal: AbortSignal, busy: boolean) {
-  // 防止并发 tick 堆叠（慢网/卡顿时很常见）
   if (_inflight) return;
   _inflight = true;
   try {
-    // 1) 轻量探活：/system/stats 可返回即可视作链路可用
+    // 步骤 1: 轻量探活，检测 API 是否可用
     await fetchJson(`${API_BASE}/system/stats`, signal);
     const link: NeuralLink = 'active';
 
-    // 2) 后台任务运行态：任一 is_running=true 即 syncing；若 UI 自身忙则 processing
+    // 步骤 2: 查询后台任务运行状态
     const [scan, scrape, sub] = await Promise.all([
       fetchJson(`${API_BASE}/tasks/scan/status`, signal),
       fetchJson(`${API_BASE}/tasks/scrape_all/status`, signal),
       fetchJson(`${API_BASE}/tasks/find_subtitles/status`, signal),
     ]);
 
+    // 步骤 3: 决定量子态
+    // - 若前端繁忙则返回 processing
+    // - 若任何后台任务在运行则返回 syncing
+    // - 否则返回 stable
     const anyRunning = Boolean(scan?.is_running || scrape?.is_running || sub?.is_running);
     const q: QuantumState = busy ? 'processing' : anyRunning ? 'syncing' : 'stable';
 
@@ -72,6 +117,7 @@ async function sampleOnce(signal: AbortSignal, busy: boolean) {
       updated_at: Date.now(),
     });
   } catch {
+    // 采样失败时标记离线和降级状态
     const link: NeuralLink = 'offline';
     const q: QuantumState = 'degraded';
     emit({
@@ -84,12 +130,16 @@ async function sampleOnce(signal: AbortSignal, busy: boolean) {
   }
 }
 
+/**
+ * 启动全局轮询（如果尚未启动）
+ * 支持自动清理：当最后一个订阅者卸载时停止轮询
+ */
 function ensurePolling(options?: { enabled?: boolean; intervalMs?: number; busy?: boolean }) {
   const enabled = options?.enabled ?? true;
   if (!enabled) return;
   if (_timer !== null) return;
 
-  const intervalMs = options?.intervalMs ?? 2500;
+  const intervalMs = options?.intervalMs ?? 5000;
   const controller = new AbortController();
 
   const tick = () => {
@@ -99,17 +149,17 @@ function ensurePolling(options?: { enabled?: boolean; intervalMs?: number; busy?
   tick();
   _timer = window.setInterval(tick, intervalMs);
 
+  // 监听网络事件，与 NetworkContext 联动
   const onDown = () => {
-    const link: NeuralLink = 'offline';
-    const q: QuantumState = 'degraded';
     emit({
-      neural_link: link,
-      quantum_state: q,
+      neural_link: 'offline',
+      quantum_state: 'degraded',
       updated_at: Date.now(),
     });
   };
+  
   const onUp = () => {
-    // 只更新 link，量子态交给下一次 tick 决定（避免在网络抖动时误报 stable）
+    // 网络恢复时主动更新链接状态，但量子态由下次轮询决定
     emit({
       ..._state,
       neural_link: 'active',
@@ -117,10 +167,10 @@ function ensurePolling(options?: { enabled?: boolean; intervalMs?: number; busy?
     });
     tick();
   };
+
   window.addEventListener('neon-network-down', onDown as EventListener);
   window.addEventListener('neon-network-up', onUp as EventListener);
 
-  // 在最后一个订阅者移除时清理（见 stopPollingIfIdle）
   (ensurePolling as any)._cleanup = () => {
     controller.abort();
     if (_timer !== null) window.clearInterval(_timer);

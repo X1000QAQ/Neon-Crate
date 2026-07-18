@@ -1,3 +1,22 @@
+"""
+手动重构执行引擎 - 资产补丁与核级重构。
+
+职责：
+- 为 `/manual_rebuild` 路由提供实际执行能力。
+- `AssetPatchEngine` 执行按需补录：NFO、海报、字幕和轻量路径修复。
+- `NuclearEngine` 执行全量重建：重算路径、移动文件、重写 NFO / 海报并清理旧目录。
+- 复用 `MetadataManager`、字幕引擎和重构工具函数完成文件系统操作。
+
+安全边界：
+- 所有删除和移动操作必须受 `library_root`、`metadata_dir`、视频扩展名和路径解析约束。
+- `NuclearEngine` 是高风险全量重构轨道；`AssetPatchEngine` 是防误杀补丁轨道。
+- TV 剧集遵守金标同化：已有 `tvshow.nfo` 时以本地剧集身份为权威，避免单集污染整剧身份。
+
+执行语义：
+- `scope=episode`：只处理单集和单集 NFO。
+- `scope=season`：处理指定季的集、季海报和必要剧集基建。
+- `scope=series`：处理整剧基建、所有集 NFO 和季海报。
+"""
 from __future__ import annotations
 
 import asyncio
@@ -22,7 +41,58 @@ from app.services.rebuilder.rebuild_utils import (
 )
 
 
+def _transfer_video_file(
+    src: str,
+    dst: str,
+    is_in_library: bool,
+    logger
+) -> bool:
+    """
+    统一的视频文件转移（硬链接 vs 移动）
+    
+    Args:
+        src: 源文件路径
+        dst: 目标文件路径
+        is_in_library: 源文件是否在媒体库内
+        logger: 日志记录器
+    
+    Returns:
+        bool: 转移是否成功
+    
+    Raises:
+        HTTPException: 硬链接失败时抛出
+    """
+    import shutil
+    from app.services.organizer.hardlinker import SmartLink
+    
+    if is_in_library:
+        shutil.move(src, dst)
+        logger.info(f"[NUCLEAR] 媒体库内文件已移动: {src} -> {dst}")
+    else:
+        success, link_type = SmartLink.create_link(src, dst)
+        if not success:
+            raise HTTPException(
+                status_code=500,
+                detail=f"[NUCLEAR] 硬链接失败: {link_type}"
+            )
+        logger.info(
+            f"[NUCLEAR] 下载源文件已硬链接入库（{link_type}）: "
+            f"{src} -> {dst}"
+        )
+    return True
+
+
 class BaseRebuildEngine:
+    """
+    重构引擎基类。
+
+    提供两个子引擎共享的能力：
+    - 解析视频扩展名白名单。
+    - 安全删除元数据文件。
+    - 即时调度字幕补完任务。
+
+    子类负责具体的 Patch 或 Nuclear 执行策略。
+    """
     def __init__(self, db, meta_manager, background_tasks=None):
         self.db = db
         self.meta_manager = meta_manager
@@ -178,6 +248,19 @@ class BaseRebuildEngine:
 
 
 class NuclearEngine(BaseRebuildEngine):
+    """
+    核级重构引擎。
+
+    适用场景：用户确认需要重算物理目录结构、重写元数据并清理旧址。
+
+    高风险能力：
+    - 移动视频文件。
+    - 删除旧 NFO、海报、Fanart 和 AI 字幕。
+    - 级联清理废弃目录。
+    - 批量回写双表元数据。
+
+    安全约束：所有路径操作必须停留在媒体库根目录边界内。
+    """
     def execute(self, task: Dict[str, Any], body: Any, context: Dict[str, Any]) -> Dict[str, Any]:
         # NuclearEngine：全量重建语义；TV Series/Season 多集批量路径与单集 / 电影单文件主轴并存。
         # 旧址处置：Series/Season 尾相为沿父链级联空目录清理（Cascading Purge）；Episode/Movie 尾相为自旧址向上的轻量空目录回收。
@@ -436,12 +519,20 @@ class NuclearEngine(BaseRebuildEngine):
         new_video_path = old_video_path
         try:
             import shutil
+            from app.services.organizer.hardlinker import SmartLink
 
             task_season = context.get("task_season")
             task_episode = context.get("task_episode")
 
+            # 检测 old_video_path 是否在媒体库内（用于判断是硬链接还是移动）
+            is_in_library = False
+            try:
+                Path(old_video_path).resolve().relative_to(Path(library_root).resolve())
+                is_in_library = True
+            except ValueError:
+                is_in_library = False
+
             if media_type == "tv" and task_season is not None and task_episode is not None:
-                # 物理流转：单集目标路径基于 library_root 绝对坐标计算，与 Series/Season 分支路径语义对齐
                 ep_ext = Path(old_video_path).suffix
                 new_video_path = _calc_tv_target_path(
                     library_root, new_title, new_year,
@@ -451,24 +542,22 @@ class NuclearEngine(BaseRebuildEngine):
 
                 if Path(old_video_path).resolve() != Path(new_video_path).resolve():
                     if not Path(new_video_path).exists():
-                        shutil.move(old_video_path, new_video_path)
-                        # 1. [锚定旧址] -> 2. [拔除伴生 NFO] -> 3. [释放目录回收锁]
-                        _old_path_obj = Path(old_video_path)
-                        _old_nfo = _old_path_obj.with_suffix(".nfo")
-                        if _old_nfo.exists():
-                            try:
-                                _old_nfo.unlink()
-                                logger.debug(f"[CLEANUP] 单点核爆命中旧 NFO 清除: {_old_nfo}")
-                            except OSError:
-                                pass
-                    else:
-                        # 目标已存在（同路径），直接使用
-                        new_video_path = old_video_path
+                        _transfer_video_file(old_video_path, new_video_path, is_in_library, logger)
+                        
+                        # 清理旧址伴生 NFO（仅媒体库内，保护下载源）
+                        if is_in_library:
+                            _old_path_obj = Path(old_video_path)
+                            _old_nfo = _old_path_obj.with_suffix(".nfo")
+                            if _old_nfo.exists():
+                                try:
+                                    _old_nfo.unlink()
+                                    logger.debug(f"[CLEANUP] 已清除媒体库旧 NFO: {_old_nfo}")
+                                except OSError:
+                                    pass
 
                 rebuilt["nuclear"] = True
 
             elif media_type == "movie":
-                # 电影主轴：按规范片名（年）重命名并迁入目标目录
                 rebuilt["nuclear"] = True
 
                 safe_title = re.sub(r"[\\/:*?\"<>|]", "_", new_title.strip())
@@ -477,57 +566,57 @@ class NuclearEngine(BaseRebuildEngine):
                 new_name = f"{safe_title}{year_str}{ep_ext}"
                 expected_dir = f"{safe_title}{year_str}"
 
-                # 目标目录：library_root / Movie (Year) /
                 new_movie_dir = Path(library_root) / expected_dir
                 new_movie_dir.mkdir(parents=True, exist_ok=True)
                 new_video_path = str(new_movie_dir / new_name)
 
                 if Path(old_video_path).resolve() != Path(new_video_path).resolve():
                     if not Path(new_video_path).exists():
-                        shutil.move(old_video_path, new_video_path)
-                        # 1. [前置清障] -> 2. [拔除伴生与专属 NFO] -> 3. [释放目录回收锁]
-                        _old_path_obj = Path(old_video_path)
-                        _old_dir = _old_path_obj.parent
-                        _old_nfo = _old_path_obj.with_suffix(".nfo")
-                        if _old_nfo.exists():
+                        _transfer_video_file(old_video_path, new_video_path, is_in_library, logger)
+                        
+                        # 清理旧址 NFO（仅媒体库内，保护下载源）
+                        if is_in_library:
+                            _old_path_obj = Path(old_video_path)
+                            _old_dir = _old_path_obj.parent
+                            _old_nfo = _old_path_obj.with_suffix(".nfo")
+                            if _old_nfo.exists():
+                                try:
+                                    _old_nfo.unlink()
+                                    logger.debug(f"[CLEANUP] 已清除媒体库旧 NFO: {_old_nfo}")
+                                except OSError:
+                                    pass
+
+                            if media_type == "movie":
+                                _movie_nfo = _old_dir / "movie.nfo"
+                                if _movie_nfo.exists():
+                                    try:
+                                        _movie_nfo.unlink()
+                                    except OSError:
+                                        pass
+                        
+                        # 扫描目录视频占用，有存活则中止级联清理
+                        _has_other_videos = False
+                        if is_in_library:
                             try:
-                                _old_nfo.unlink()
-                                logger.debug(f"[CLEANUP] 单点核爆命中旧 NFO 清除: {_old_nfo}")
+                                for f in _old_dir.rglob("*"):
+                                    if f.is_file() and f.suffix.lower() in db_video_exts:
+                                        _has_other_videos = True
+                                        break
                             except OSError:
                                 pass
 
-                        if media_type == "movie":
-                            _movie_nfo = _old_dir / "movie.nfo"
-                            if _movie_nfo.exists():
+                            # 边界检查后安全删除废弃目录
+                            _old_dir_resolved = _old_dir.resolve()
+                            _lib_root_path = Path(library_root).resolve()
+                            _new_parent_path = Path(new_video_path).parent.resolve()
+                            if _has_other_videos:
+                                logger.warning(f"[CLEANUP] ⚠️ 探测到旧目录仍有其他视频文件，拒绝爆破: {_old_dir}")
+                            elif _old_dir_resolved != _lib_root_path and _old_dir_resolved != _new_parent_path:
                                 try:
-                                    _movie_nfo.unlink()
-                                except OSError:
-                                    pass
-                        # 1. [目录占用扫描] -> 2. [探测是否仍有其他视频存活] -> 3. [有存活则中止级联清理]
-                        _has_other_videos = False
-                        try:
-                            for f in _old_dir.rglob("*"):
-                                if f.is_file() and f.suffix.lower() in db_video_exts:
-                                    _has_other_videos = True
-                                    break
-                        except OSError:
-                            pass
-
-                        # 1. [边界锁定与核平] -> 2. [确认不越界] -> 3. [安全执行整包删除]
-                        _old_dir_resolved = _old_dir.resolve()
-                        _lib_root_path = Path(library_root).resolve()
-                        _new_parent_path = Path(new_video_path).parent.resolve()
-                        if _has_other_videos:
-                            logger.warning(f"[CLEANUP] ⚠️ 探测到旧目录仍有其他视频文件，拒绝爆破: {_old_dir}")
-                        elif _old_dir_resolved != _lib_root_path and _old_dir_resolved != _new_parent_path:
-                            try:
-                                shutil.rmtree(_old_dir)
-                                logger.info(f"[CLEANUP] ☢️ 废弃电影目录已彻底核平: {_old_dir}")
-                            except OSError as e:
-                                logger.error(f"[CLEANUP] ❌ 拆除失败（可能存在权限不足或进程锁定）: {_old_dir} -> {e}")
-                    else:
-                        logger.warning(f"[NUCLEAR] 电影目标已存在，跳过搬运并保留原路径: {new_video_path}")
-                        new_video_path = old_video_path
+                                    shutil.rmtree(_old_dir)
+                                    logger.info(f"[CLEANUP] ☢️ 废弃电影目录已彻底核平: {_old_dir}")
+                                except OSError as e:
+                                    logger.error(f"[CLEANUP] ❌ 拆除失败（可能存在权限不足或进程锁定）: {_old_dir} -> {e}")
 
                 # 数据契约：若物理搬运未发生，metadata_dir 必须锚定当前视频真实所在目录，禁止元数据与视频分离
                 metadata_dir = str(Path(new_video_path).parent)
@@ -626,6 +715,7 @@ class NuclearEngine(BaseRebuildEngine):
         rebuilt["poster"] = bool(local_poster)
 
         # 原子回写：合并 tmdb / 海报路径 / 目标路径等字段至双表之一
+        # 注意：这里不更新 status 和 sub_status，保持数据契约一致性
         self.db.update_any_task_metadata(
             task["id"],
             context["is_archive"],
@@ -640,6 +730,27 @@ class NuclearEngine(BaseRebuildEngine):
             target_path=new_video_path,
         )
 
+        # Nuclear 重构完成后，统一调用 finalize_task 触发归档流程
+        # 与 AI 刮削流程对齐：status="archived"，sub_status 保持原值（通常是 pending）
+        if not context["is_archive"]:
+            try:
+                from app.services.task_finalization import TaskFinalizationMetadata, finalize_task
+                
+                metadata = TaskFinalizationMetadata(
+                    title=new_title or None,
+                    year=new_year or None,
+                    season=context.get("task_season") if media_type == "tv" else None,
+                    tmdb_id=new_tmdb_id,
+                    imdb_id=new_imdb_id or "",
+                    target_path=new_video_path,
+                    local_poster_path=local_poster,
+                    task_type=media_type,
+                )
+                finalize_task(self.db, task_id=task["id"], status="archived", metadata=metadata)
+                logger.info(f"[NUCLEAR] 任务状态已更新为 archived: task_id={task['id']}")
+            except Exception as e:
+                logger.warning(f"[NUCLEAR] 状态更新失败（非阻断）: {e}")
+
         # 1. [单文件尾相：目录回收] -> 2. [自视频旧址父目录起向上回收空壳] -> 3. [止于 library_root；与 Series/Season 尾相级联清理互补（轻量空目录链）]
         try:
             _old_dir = Path(old_video_path).parent
@@ -652,6 +763,16 @@ class NuclearEngine(BaseRebuildEngine):
 
 
 class AssetPatchEngine(BaseRebuildEngine):
+    """
+    资产补丁引擎。
+
+    适用场景：用户只需要修复 NFO、海报、字幕或轻量路径差异。
+
+    防误杀策略：
+    - `path_changed` 控制是否移动视频和拆除旧址 NFO。
+    - `is_subtitle_only` 控制是否跳过 NFO / 海报基建。
+    - TV 单集轨道不覆盖既有 `tvshow.nfo`，避免破坏整剧金标。
+    """
     def execute(self, task: Dict[str, Any], body: Any, context: Dict[str, Any]) -> Dict[str, Any]:
         # AssetPatchEngine：补录（Patch）语义；Movie / TV 双轨隔离执行，scope 驱动 NFO 与海报策略分化。
         # 防误杀护盾：path_changed 门控物理位移与旧址 NFO 拆除；is_subtitle_only 门控基建 I/O，避免误伤未变更路径侧车文件。

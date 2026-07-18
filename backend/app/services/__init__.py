@@ -2,7 +2,7 @@
 业务逻辑层 - Services
 
 模块说明：
-- scraper: 扫描引擎（并发扫描、正则清洗、物理过滤）
+- scraper: 扫描引擎（并发扫描、结构化文件名工具）
 - organizer: 归档器（智能链接引擎）
 - subtitle: 字幕引擎（简体优先评分系统）
 - metadata: 元数据适配器（TMDB）

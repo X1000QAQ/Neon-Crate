@@ -1,15 +1,52 @@
 /**
  * MediaToolbar - 媒体库操作工具栏
- *
- * 职责：
- * - 搜索栏：关键词过滤任务列表
- * - 危险操作：批量删除（需选中）、重置数据库（需输入 CONFIRM）
- * - 任务触发：扫描 / 刮削 / 字幕三大后台任务的入口按钮
- * - 筛选器：按状态（4 项）和类型（电影/剧集）过滤列表
- *
- * 注意：statusFilter 有效值为 all/pending/archived/failed/ignored
- * success 已移除（tasks 表从不写入该状态，选择后永远返回空列表）
+ * 
+ * 核心职责：
+ * 1. 搜索栏：关键词过滤任务列表（防抖 500ms）
+ * 2. 危险操作：批量删除（需选中）、清空数据库（需二次确认）
+ * 3. 任务触发：扫描 / 刮削 / 字幕三大后台任务的入口按钮
+ * 4. 筛选器：按状态（4 种）和类型（电影/剧集）过滤列表
+ * 
+ * Props 说明：
+ * - searchKeyword：当前搜索关键词
+ * - onSearchChange：搜索词变更回调
+ * - onRefresh：刷新任务列表按钮回调
+ * - loading：是否正在加载（刷新按钮 loading 态）
+ * - selectedCount：当前选中的任务数量（0 时批量删除禁用）
+ * - onBatchDelete：批量删除选中记录回调（仅数据库，不删文件）
+ * - onPurge：清空全部数据库记录回调（需二次确认）
+ * - onScan/scanning：扫描任务相关
+ * - onScrapeAll/scraping：刮削任务相关
+ * - onFindSubtitles/findingSubs：字幕查找任务相关
+ * - statusFilter/onStatusChange：状态筛选相关
+ * - typeFilter/onTypeChange：类型筛选相关
+ * 
+ * 状态筛选值：
+ * - 'all'：显示所有任务
+ * - 'pending'：待处理
+ * - 'archived'：已归档
+ * - 'failed'：匹配失败
+ * - 'ignored'：已忽略
+ * 
+ * 类型筛选值：
+ * - 'all'：全部
+ * - 'movie'：电影
+ * - 'tv'：剧集
+ * - 'mixed'：待 AI 裁决
+ * 
+ * 布局结构：
+ * 1. 上半部分：搜索 + 刷新 + 批量删除 + 清空数据库
+ * 2. 下半部分：过滤器（状态 + 类型）+ 三大操作按钮（扫描/刮削/字幕）
+ * 
+ * 视觉效果：
+ * - 青色边框和发光效果
+ * - 按钮 hover 时变色
+ * - 禁用状态时降低透明度
+ * - 危险操作（删除/清空）用红色警告
+ * 
+ * @component
  */
+
 'use client';
 
 import { Search, RefreshCw, Trash2, Database, Filter, Radar, Wand2, Subtitles } from 'lucide-react';
@@ -32,7 +69,7 @@ interface MediaToolbarProps {
   findingSubs: boolean;           // 字幕查找是否进行中
   statusFilter: string;           // 当前状态筛选值（all/pending/archived/failed/ignored）
   onStatusChange: (val: string) => void;  // 状态筛选变更回调
-  typeFilter: string;             // 当前类型筛选值（all/movie/tv）
+  typeFilter: string;             // 当前类型筛选值（all/movie/tv/mixed）
   onTypeChange: (val: string) => void;    // 类型筛选变更回调
 }
 
@@ -210,6 +247,7 @@ export default function MediaToolbar({
               <option value="all" className="bg-black">{t('filter_type_all')}</option>
               <option value="movie" className="bg-black">{t('filter_type_movie')}</option>
               <option value="tv" className="bg-black">{t('filter_type_tv')}</option>
+              <option value="mixed" className="bg-black">{t('filter_type_mixed')}</option>
             </select>
           </div>
         </div>

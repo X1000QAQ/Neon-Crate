@@ -1,3 +1,14 @@
+/**
+ * AiSidebar - 全局 AI 助手侧栏
+ *
+ * 负责承载用户与 AI 管家的对话、快速指令、候选项选择，以及下载授权确认流程。
+ * 组件会把用户输入发送给后端 AI 接口，并根据返回结果展示普通回复、候选列表或授权弹窗。
+ *
+ * 新手提示：
+ * - `messages` 保存对话历史，`loading` 表示当前是否等待 AI 回复。
+ * - 新消息发送前会中止上一条未完成请求，避免多个 LLM 请求并发堆积。
+ * - 下载类操作不会直接执行，而是先进入 `DownloadConfirmOverlay` 二次确认。
+ */
 'use client';
 
 import { Send } from 'lucide-react';
@@ -42,7 +53,7 @@ export default function AiSidebar() {
   const neural = useNeuralLinkStatus({
     enabled: isOpen,
     busy: loading || confirmLoading,
-    intervalMs: 2500,
+    intervalMs: 5000,
   });
 
   const tr = (key: string, fallback: string) => {
@@ -94,9 +105,7 @@ export default function AiSidebar() {
   const handleSendText = async (text: string, displayText?: string) => {
     if (!text.trim() || loading) return;
     const userMsg: ChatMessage = { role: 'user', content: displayText ?? text };
-    // 幽灵取消防护：发送新消息前立即清除 downloadPending，避免竞态触发 handleDownloadDeny
     setDownloadPending(null);
-    // 发送任何消息时，封死当前所有候选消息（防止用户二次选择）
     setMessages(prev => {
       const deadIdxs = new Set(
         prev.map((m, i) => {
@@ -110,32 +119,31 @@ export default function AiSidebar() {
     setInput('');
     setMenuOpen(false);
     setLoading(true);
+
+    const controller = new AbortController();
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = controller;
+
     try {
-      // 🚀 异步链路治理 — 步骤 1：中止上一次飞行中的请求，注入新 AbortController
-      // 确保同一时刻只有最新一条请求的 signal 处于激活状态
-      abortControllerRef.current?.abort();
-      abortControllerRef.current = new AbortController();
-      const res = await api.chat(text, abortControllerRef.current.signal);
-      // 执行权由后端 BackgroundTasks 统一管理，前端仅负责渲染回复文本
+      const res = await api.chat(text, controller.signal);
+      if (controller.signal.aborted) return;
       setMessages(p => [...p, { 
         role: 'assistant', 
         content: res.response,
         candidates: res.candidates && res.candidates.length > 0 ? res.candidates : undefined,
-        engine_tag: res.engine_tag,  // v1.0.0 血缘溯源标签
+        engine_tag: res.engine_tag,
       }]);
-      // 授权决策层：DOWNLOAD 意图携带 pending_action 时弹出全屏确认界面
       if (res.action === 'DOWNLOAD' && res.pending_action) {
         setDownloadPending(res.pending_action);
       }
     } catch (e) {
-      // 🚀 异步链路治理 — 步骤 2：物理掐断后的前端静默处理
-      // AbortError 说明这是主动中止（用户连续发送新消息 或 组件卸载），
-      // 属于正常的用户行为而非异常，不应向对话框追加错误气泡，直接 return 静默退出。
       if (e instanceof Error && e.name === 'AbortError') return;
       const msg = e instanceof Error ? e.message : 'NEURAL LINK ERROR';
       setMessages(p => [...p, { role: 'assistant', content: msg }]);
     } finally {
-      setLoading(false);
+      if (abortControllerRef.current === controller) {
+        setLoading(false);
+      }
     }
   };
 

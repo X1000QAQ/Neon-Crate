@@ -1,3 +1,18 @@
+"""
+重构工具函数 - 路径计算、字幕探测、目录清理和视频定位。
+
+职责：
+- 为 `NuclearEngine` 和 `AssetPatchEngine` 提供可复用的文件系统辅助能力。
+- 计算 TV 单集标准目标路径。
+- 查询同剧 / 同季任务记录，支持批量重构。
+- 以物理目录为准扫描兄弟集，减少数据库错乱对核级重构的影响。
+- 在安全边界内清理元数据文件和空目录。
+
+安全边界：
+- 核级清理必须校验 `metadata_dir` 位于 `library_root` 内。
+- `library_root` 过浅时拒绝操作，防止误删根目录或挂载根。
+- 删除文件前会二次解析路径，防止软链接穿越。
+"""
 import glob
 import logging
 import os
@@ -11,7 +26,19 @@ logger = logging.getLogger(__name__)
 
 
 def _check_local_subtitles(video_path: str, sub_exts: frozenset = None) -> bool:
-    """检查视频同级目录下是否存在字幕文件（支持极致模糊匹配）"""
+    """
+    检查视频同级目录下是否存在可复用字幕。
+
+    匹配顺序：
+    1. 严格匹配：`视频名 + 字幕扩展名`。
+    2. 通配匹配：`视频名.*.字幕扩展名`，兼容多语言后缀。
+    3. 模糊匹配：
+       - 剧集：字幕名包含同一 `SxxExx`。
+       - 电影：字幕名与视频名存在包含关系。
+
+    Returns:
+        bool: True 表示已有字幕，可跳过下载。
+    """
     if not video_path or not os.path.exists(video_path):
         return False
     dir_name = os.path.dirname(video_path)
@@ -27,7 +54,7 @@ def _check_local_subtitles(video_path: str, sub_exts: frozenset = None) -> bool:
 
     # 2. 终极模糊匹配（只要有字幕文件就算过）
     try:
-        episode_match = re.search(r"(S\\d+E\\d+)", base_name, re.IGNORECASE)
+        episode_match = re.search(r"(S\d+E\d+)", base_name, re.IGNORECASE)
         for file in os.listdir(dir_name):
             if os.path.splitext(file)[1].lower() in valid_exts:
                 if episode_match:
@@ -186,6 +213,12 @@ def _cleanup_empty_dirs(start: Path, stop_at: Path) -> None:
 def _locate_video_for_task(task_record: dict, db_video_exts: frozenset, search_dir: Optional[str] = None) -> Optional[str]:
     """
     四级精准定位当前任务对应的视频文件。
+    
+    职责边界：
+    - 本函数只负责"定位文件"，不判断文件来源（下载源 vs 媒体库）
+    - 调用方（如 Nuclear 引擎）需通过 is_in_library 判断来决定后续处理方式
+    - Level A 可能返回下载源路径，这是预期行为
+    
     Level A: target_path / path 直接存在
     Level B: inode 追踪（硬链接场景，在 search_dir 内匹配）
     Level C: file_name 精确匹配（在 search_dir 内查找）
@@ -226,7 +259,16 @@ def _locate_video_for_task(task_record: dict, db_video_exts: frozenset, search_d
 
 
 def _get_physical_siblings(show_root: str, season: Optional[int], video_exts: frozenset) -> list:
-    """物理层直接扫描剧集目录提取 S/E，完全无视错乱的 DB"""
+    """
+    从物理目录直接扫描剧集文件并提取季集坐标。
+
+    用途：
+    - 核级重构时以磁盘现状为准，降低数据库记录错乱的影响。
+    - `season=None` 表示扫描整剧；指定 season 时只返回该季。
+
+    Returns:
+        list[dict]: 每项包含 `path`、`season`、`episode`。
+    """
     results = []
     s_root = Path(show_root)
     if not s_root.exists():

@@ -1,18 +1,19 @@
 """
-核心刮削清洗引擎 (Scraper Cleaner)
+结构化文件名工具 - 确定性坐标提取与归档路径安全化。
 
-架构说明：
-- MediaCleaner 是无状态的「苦力」，本身不硬编码任何正则
-- 所有正则规则来自数据库 filename_clean_regex 字段（config.json）
-- 首次启动由 db_manager._inject_ai_defaults() 注入 15 条工业默认规则
-- 用户可通过前端 RegexLab 自由增删，保存后立即生效
-- 一键重置可从 db_manager.reset_settings_to_defaults('regex') 恢复默认
+架构边界：
+- 语义识别由 AI Agent 负责，包括片名、类型、年份、季集语义和噪声判断。
+- 本模块不连接数据库，不读取 RegexLab，不执行用户自定义文件名物理正则清洗。
+- 本模块只做确定性、可解释的结构化操作：扩展名剥离、括号清理、季集坐标提取、路径非法字符处理。
 
-核心方法：
-- clean_name(filename)            → 过滤噪声，返回纯净片名
-- extract_year(filename)          → 提取年份
-- extract_season_episode(filename) → 提取季/集
-- clean_and_extract(filename)     → 一站式处理
+公共 API：
+- `sanitize_filename(name)`：生成可落盘的安全目录名 / 文件名。
+- `clean_name(filename)`：轻量结构化片名，供兼容和兜底展示使用。
+- `extract_year()` / `extract_season_episode()`：从原始文件名提取显式坐标。
+- `clean_and_extract(filename)`：一次性返回结构化字段和广告片段判断。
+
+注意：
+- “正则”在这里仅用于固定格式提取和路径安全处理，不用于替代 AI 做影视名称语义清洗。
 """
 import re
 from typing import Optional, Tuple, List
@@ -20,150 +21,66 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-
-# ============================================================
-# 年份 / 季集提取正则（结构化提取，固定不变，不参与过滤）
-# ============================================================
+# ── 结构化提取（固定契约，不参与 RegexLab 式噪声删除）────────────────
 _YEAR_PATTERN = re.compile(
     r'[\(\[\.\s]+(19\d{2}|20\d{2})[\)\]\.\s]+|'
     r'\b(19\d{2}|20\d{2})\b'
 )
 
 _SEASON_EPISODE_PATTERNS: List[re.Pattern] = [
-    re.compile(r'[Ss](\d{1,2})[\s\._-]*[Ee](\d{1,3})'),   # S01E01 / S01 E01 / S01.E01
-    re.compile(r'[Ss]eason[\s\._-]*(\d{1,2})[\s\._-]*[Ee](?:pisode)?[\s\._-]*(\d{1,3})', re.IGNORECASE),  # Season 1 Episode 1
-    re.compile(r'(\d{1,2})x(\d{1,3})'),                    # 1x01
-    re.compile(r'[Ee][Pp]?[\s\._-]*(\d{1,3})'),            # EP01 / E01
-    re.compile(r'第[\s\._-]*(\d{1,3})[\s\._-]*[集话話]'),   # 第01集
+    re.compile(r'[Ss](\d{1,2})[\s\._-]*[Ee](\d{1,3})'),
+    re.compile(r'[Ss]eason[\s\._-]*(\d{1,2})[\s\._-]*[Ee](?:pisode)?[\s\._-]*(\d{1,3})', re.IGNORECASE),
+    re.compile(r'(\d{1,2})x(\d{1,3})'),
+    re.compile(r'[Ee][Pp]?[\s\._-]*(\d{1,3})'),
+    re.compile(r'第[\s\._-]*(\d{1,3})[\s\._-]*[集话話]'),
 ]
 
-_ANIME_EPISODE_PATTERN = re.compile(r'[-\s](\d{2,4})(?=\s*\[)')  # - 28 [Baha]
-
+_ANIME_EPISODE_PATTERN = re.compile(r'[-\s](\d{2,4})(?=\s*\[)')
 _EXTENSION_PATTERN = re.compile(
     r'\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|mpg|mpeg|ts|m2ts|iso|rmvb|rm)$',
-    re.IGNORECASE
+    re.IGNORECASE,
 )
-
 _SYMBOL_CLEANUP = re.compile(r'[_\.\-\+]+')
 _COLON_PATTERN = re.compile(r'[\uff1a]')
+_SE_TRUNCATE = re.compile(r'\b(?:[Ss]\d{1,2}[Ee]\d{1,3}|\d{1,2}x\d{1,3})\b')
 
-# 广告关键词（用于 is_advertisement 的快速判断）
 _AD_KEYWORDS = [
     '澳门首家', '最新地址', '更多资源', '高清下载',
     '在线观看', '免费下载', 'BT下载', '磁力链接',
-    '精彩推荐', '更多精彩', 'Sample', 'Trailer'
+    '精彩推荐', '更多精彩', 'Sample', 'Trailer',
 ]
 
 
 class MediaCleaner:
-    """媒体文件名清洗器 —— 纯苦力，正则全部来自数据库"""
+    """
+    无状态结构化文件名工具。
 
-    def __init__(self, db_manager=None):
-        """
-        初始化清洗器
+    设计原则：
+    - 可重复：同一输入始终返回同一输出。
+    - 无副作用：不访问数据库，不读取配置，不写文件。
+    - 非语义：不尝试判断真实影视名称，只提取显式结构和处理落盘安全字符。
+    """
 
-        Args:
-            db_manager: DatabaseManager 实例，用于读取 filename_clean_regex。
-                        为 None 时 clean_name() 仍可工作，但只执行符号清理。
-        """
-        self._db = db_manager
-        self._filter_patterns: List[re.Pattern] = []
-        self._loaded = False
-        if db_manager is not None:
-            self._load_patterns()
-
-    # ------------------------------------------------------------------
-    # 内部：从数据库加载过滤正则
-    # ------------------------------------------------------------------
-    def _load_patterns(self):
-        """
-        从 db_manager 读取 filename_clean_regex，编译为 pattern 列表。
-
-        规则分两类：
-        - CLEAN_RULES（默认）：用于 clean_name() 删除噪声
-        - EXTRACTION_RULES（注释行含 [EXTRACT]）：仅用于结构化提取，
-          不参与 clean_name() 删除，防止集数信息（E14）被误删。
-        """
-        self._filter_patterns = []
-        try:
-            raw = self._db.get_config('filename_clean_regex', '').strip()
-            count = 0
-            is_extraction_rule = False
-            for line in raw.splitlines():
-                stripped = line.strip()
-                if not stripped:
-                    is_extraction_rule = False
-                    continue
-                if stripped.startswith('#'):
-                    # 若注释含 [EXTRACT]，下一条规则为提取专用，跳过删除
-                    is_extraction_rule = '[EXTRACT]' in stripped
-                    continue
-                if is_extraction_rule:
-                    # 提取专用规则：不加入 _filter_patterns（clean_name 不删除）
-                    logger.debug(f'[CLEAN] 跳过提取专用规则（不删除）: {stripped[:60]}')
-                    is_extraction_rule = False
-                    continue
-                try:
-                    self._filter_patterns.append(re.compile(stripped, re.IGNORECASE))
-                    count += 1
-                except re.error as e:
-                    logger.warning(f'[CLEAN] 正则编译失败，已跳过: {stripped[:60]} | {e}')
-                is_extraction_rule = False
-            logger.debug(f'[CLEAN] 已加载 {count} 条过滤规则（EXTRACTION_RULES 已隔离）')
-            self._loaded = True
-        except Exception as e:
-            logger.warning(f'[CLEAN] 读取正则规则失败: {e}')
-
-    # ------------------------------------------------------------------
-    # 公共 API
-    # ------------------------------------------------------------------
     def clean_name(self, filename: str) -> str:
         """
-        剥离所有噪声标签，返回最纯净的片名
-
-        流程：
-        1. 去除文件扩展名
-        2. 去除首部方括号组名（[HbT]、[SubsPlease] 等）
-        3. 依次执行数据库中的过滤正则
-        4. 符号清理（_.— → 空格）、首尾修整
+        轻量结构化片名：去扩展名、剥离方括号标签、季集前截断、符号归一化。
+        噪声标签（分辨率/压制组等）交由 AI 语义层处理，此处不做删除。
         """
         if not filename:
             return ''
 
-        cleaned = filename
-
-        # 1. 去扩展名
-        cleaned = _EXTENSION_PATTERN.sub('', cleaned)
-
-        # 2. 去首部任意方括号组名（20字以内，如 [HbT]、[DBD-Raws]）
+        cleaned = _EXTENSION_PATTERN.sub('', filename)
         cleaned = re.sub(r'^\s*\[[^\]]{1,20}\]\s*', '', cleaned)
-
-        # 3. 去除剩余所有方括号及其内容（兜底）
         cleaned = re.sub(r'\[[^\]]*\]', ' ', cleaned)
 
-        # 4. 执行数据库过滤正则
-        for pat in self._filter_patterns:
-            cleaned = pat.sub(' ', cleaned)
-
-        # 4.5 剧集截断：在 S0xE0x / 1x01 处截断，只保留前面的剧名
-        # 例：'The Boys S03E01 The Payback 2160p' → 'The Boys'
-        # 这样可以避免 AI 把剧集标题当作额外的搜索词产生幻觉
-        se_match = re.search(
-            r'\b(?:[Ss]\d{1,2}[Ee]\d{1,3}|\d{1,2}x\d{1,3})\b',
-            cleaned
-        )
+        se_match = _SE_TRUNCATE.search(cleaned)
         if se_match:
             before = cleaned[:se_match.start()].strip()
-            if before:  # 截断后若仍有内容则保留，否则不截断
+            if before:
                 cleaned = before
 
-        # 5. 中文冒号 → 英文冒号
         cleaned = _COLON_PATTERN.sub(':', cleaned)
-
-        # 6. 下划线/点/横线 → 空格
         cleaned = _SYMBOL_CLEANUP.sub(' ', cleaned)
-
-        # 7. 清理多余空格 & 首尾特殊符号
         cleaned = re.sub(r'\s+', ' ', cleaned).strip()
         cleaned = cleaned.strip('.-_[]{}() ')
 
@@ -171,7 +88,6 @@ class MediaCleaner:
         return cleaned
 
     def extract_year(self, filename: str) -> Optional[int]:
-        """从文件名提取年份"""
         if not filename:
             return None
         match = _YEAR_PATTERN.search(filename)
@@ -187,7 +103,6 @@ class MediaCleaner:
         return None
 
     def extract_season_episode(self, filename: str) -> Tuple[Optional[int], Optional[int]]:
-        """从文件名提取季/集号"""
         if not filename:
             return (None, None)
 
@@ -198,7 +113,7 @@ class MediaCleaner:
                 try:
                     if len(groups) == 2:
                         return (int(groups[0]), int(groups[1]))
-                    elif len(groups) == 1:
+                    if len(groups) == 1:
                         return (1, int(groups[0]))
                 except (ValueError, IndexError):
                     continue
@@ -213,12 +128,10 @@ class MediaCleaner:
         return (None, None)
 
     def is_tv_show(self, filename: str) -> bool:
-        """判断是否为剧集（包含季/集信息即为剧集）"""
         season, episode = self.extract_season_episode(filename)
         return season is not None or episode is not None
 
     def is_advertisement(self, filename: str) -> bool:
-        """判断是否为纯广告/垃圾文件"""
         if not filename:
             return True
         cleaned = self.clean_name(filename)
@@ -234,64 +147,31 @@ class MediaCleaner:
 
     @classmethod
     def sanitize_filename(cls, name: str) -> str:
-        """
-        净化即将用于创建文件夹/文件名的字符串（中英双语智能冒号适配）
-
-        - 含中文：冒号替换为全角冒号 ：
-        - 纯英文：冒号替换为 " - "（Plex/Jellyfin 推荐规范）
-        - Windows 非法字符 < > " / \\ | ? * 替换为空格
-        - 去除多余连续空格，strip
-        """
+        """归档路径安全化：智能冒号 + Windows 非法字符剥离。"""
         if not name:
             return ''
 
-        # 1. 检测是否包含中文字符
         has_chinese = bool(re.search(r'[\u4e00-\u9fff]', name))
-
-        # 2. 智能替换冒号
         if has_chinese:
-            # 中文名：各种冒号 → 全角冒号 ：
             name = re.sub(r'[:\uf03a\ua789\uff1a]', '：', name)
         else:
-            # 英文名：各种冒号（含全角）→ " - "
             name = re.sub(r'[:\uf03a\ua789\uff1a]', ' - ', name)
 
-        # 3. 替换 Windows 非法字符为空格
         name = re.sub(r'[<>"/\\|?*]', ' ', name)
-
-        # 4. 压缩连续空格并去除首尾空格
         name = re.sub(r' +', ' ', name).strip()
-
         return name
 
     def clean_and_extract(self, filename: str) -> dict:
-        """
-        一站式处理：清洗 + 提取所有结构化信息
-
-        Returns:
-            {
-                'clean_name': str,
-                'year': int | None,
-                'season': int | None,
-                'episode': int | None,
-                'is_tv': bool,
-                'is_ad': bool
-            }
-        """
         clean_name = self.clean_name(filename)
         year = self.extract_year(filename)
         season, episode = self.extract_season_episode(filename)
-        is_tv = season is not None or episode is not None
-        is_ad = self.is_advertisement(filename)
-
         result = {
             'clean_name': clean_name,
             'year': year,
             'season': season,
             'episode': episode,
-            'is_tv': is_tv,
-            'is_ad': is_ad
+            'is_tv': season is not None or episode is not None,
+            'is_ad': self.is_advertisement(filename),
         }
         logger.debug(f'[EXTRACT] {filename} -> {result}')
         return result
-

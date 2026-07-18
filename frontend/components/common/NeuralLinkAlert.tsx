@@ -1,3 +1,14 @@
+/**
+ * NeuralLinkAlert - 网络链路断开告警层
+ *
+ * 当全局网络状态被标记为断开时，显示一个全屏红色告警遮罩，提醒用户后端链路不可用。
+ * 用户点击“尝试重连”后，会清除本地告警状态并刷新页面，重新触发初始化和接口请求。
+ *
+ * 新手提示：
+ * - 网络状态来自 `NetworkContext`。
+ * - 本组件不主动探测网络，只响应全局状态变化。
+ * - z-index 设置很高，确保故障时覆盖所有业务界面。
+ */
 'use client';
 
 import { useNetwork } from '@/context/NetworkContext';

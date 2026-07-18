@@ -1,28 +1,22 @@
 """
-应用生命周期管理 - 启动/关闭逻辑
+应用生命周期管理 - 启动、巡逻与关闭资源边界
 
-设计模式：上下文管理器（asynccontextmanager）
-- 管理应用的启动和关闭流程
-- 确保资源正确初始化和清理
-- 支持异步任务管理
+职责：
+- 在 FastAPI 启动时初始化日志系统、数据库连接和运行环境检查。
+- 启动后台自动巡逻循环，根据配置定时执行扫描、刮削和字幕补全。
+- 在服务关闭时取消后台任务，并停止异步日志队列监听器。
 
-核心职责：
-1. 日志系统初始化（RotatingFileHandler，10MB 轮转）
-2. 数据库初始化（WAL 模式，原子写入）
-3. 孤儿任务清理（重置上次崩溃遗留的 pending 状态）
-4. 自动扫描循环启动/停止（定时巡逻）
-5. 环境检查（Docker 挂载点、配置文件等）
+启动阶段：
+1. `_setup_logging()` 初始化队列化日志系统和滚动文件日志。
+2. `_check_environment()` 输出运行环境、Docker 挂载点和文档地址。
+3. `get_db_manager()` 初始化 SQLite 数据库和仓储层。
+4. 重置上次异常退出遗留的内存状态和孤儿 `pending` 任务。
+5. 创建 `cron_scanner_loop()` 后台任务。
 
-自动巡逻循环：
-- 以分钟为单位读取 cron_interval_min
-- 受 cron_enabled 开关控制
-- 完整流水线：物理扫描 → 智能入库 → 刮削元数据 → 搜索字幕
-- 支持 auto_scrape 和 auto_subtitles 开关
-
-孤儿任务清理：
-- 问题场景：进程崩溃导致任务卡在 pending 状态
-- 解决方案：启动时重置所有孤儿任务
-- 确保系统重启后任务队列干净
+资源边界：
+- 本模块只编排生命周期，不直接实现扫描、刮削、字幕等业务细节。
+- 自动巡逻通过任务模块的同步函数执行磁盘 I/O，并放入线程池，避免阻塞事件循环。
+- 关闭阶段必须取消 `cron_task`，否则进程退出时可能残留后台协程。
 """
 import asyncio
 import logging
@@ -38,27 +32,17 @@ from app.infra.database import get_db_manager
 
 def _setup_logging() -> Path:
     """
-    初始化日志系统（异步优化版）
-    
-    日志配置：
-    - 文件日志：RotatingFileHandler（10MB 轮转，最多 5 个备份文件）
-    - 控制台日志：StreamHandler（同步输出到终端）
-    - 日志路径：data/logs/app.log（相对于项目根目录）
-    - 日志级别：INFO（DEBUG 级别不记录到文件）
-    - 日志格式：时间戳 - 模块名 - 级别 - 消息
-    
-    异步优化（新增）：
-    - QueueHandler：主线程写入队列（非阻塞）
-    - QueueListener：后台线程批量写入文件（异步）
-    - 适合高频日志场景（压力测试：5000 条/10秒）
-    
-    为什么用 RotatingFileHandler？
-    - 防止日志文件无限增长耗尽磁盘
-    - 10MB 轮转：适合 NAS 等存储受限环境
-    - 5 个备份：保留足够的历史日志
-    
+    初始化队列化日志系统。
+
+    运行模型：
+    - 主线程通过 `QueueHandler` 快速入队，减少高频扫描 / 刮削日志阻塞。
+    - 后台 `QueueListener` 写入滚动文件日志。
+    - 控制台日志保持同步输出，便于容器日志采集。
+
+    关闭边界：`QueueListener` 引用挂在根 logger 上，由 lifespan 关闭阶段显式停止。
+
     Returns:
-        Path: 日志文件路径
+        Path: 日志文件路径。
     """
     from logging.handlers import QueueHandler, QueueListener
     from queue import Queue
@@ -322,10 +306,20 @@ async def cron_scanner_loop():
 @asynccontextmanager
 async def lifespan(app):
     """
-    应用生命周期管理
+    FastAPI 应用生命周期管理器。
+
+    启动阶段：
+    - 初始化日志系统和环境检查。
+    - 初始化数据库门面和仓储层。
+    - 重置上次异常退出遗留的内存运行状态和孤儿 pending 任务。
+    - 创建自动巡逻后台任务。
+
+    关闭阶段：
+    - 取消自动巡逻任务并等待退出。
+    - 停止日志队列监听器，确保文件日志 flush 完成。
 
     Args:
-        app: FastAPI 应用实例
+        app: FastAPI 应用实例。
     """
     # ── 启动时执行 ──────────────────────────────────────────────
     log_file = _setup_logging()

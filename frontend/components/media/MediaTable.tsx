@@ -1,62 +1,35 @@
 /**
- * MediaTable — 等高扁平折叠列表（Flat Hierarchical List, v1.0.0）
- *
- * 业务定位：
- * - 将“电影单体任务 + 电视剧（剧 → 季 → 集）”统一压平到同一种 Row 渲染模型，层级仅由缩进表达。
- * - 为 `/tasks/manual_rebuild` 提供“补录三剑客”入口：📄 NFO / 🖼️ 海报 / ⌨️ 字幕（位于创建时间下方）。
- *
- * v1.0.0 架构语义对齐：
- * - **ignored = VHS 故障态**：当 `status === 'ignored'` 时，UI 叠加 VHS 噪点/扫描线/RGB 分离/印章层，
- *   并依赖后端在重复媒体拦截时继承 `local_poster_path`（否则会出现白板破图）。
- * - **分组状态传播**：TV 组/季状态根据子集聚合（如全 ignored 则父级也为 ignored，以维持语义一致）。
- *
- * 稳定性红线（DO NOT BREAK）：
- * - 复杂派生（分组、计数、聚合）必须由 `useMemo` 输出，避免父组件刷新造成全量重算与 UI 抖动。
- * - 任何与“ignored VHS 叠层”的结构改动，都必须保持 `pointer-events: none`，禁止阻断交互。
+ * MediaTable - 媒体任务列表组件
+ * 
+ * 职责：
+ * - 以三级层次结构展示媒体任务：剧集（Series）→ 季（Season）→ 单集（Episode）
+ * - 支持批量选择、删除、重试和重构操作
+ * - 处理电影（Movie）和剧集（TV）两种媒体类型的不同展示逻辑
+ * 
+ * 层级结构：
+ * - Level 0: 电影单文件 / 剧集根（可展开）
+ * - Level 1: 季（Season，可展开）
+ * - Level 2: 单集（Episode）
+ * 
+ * 状态管理：
+ * - expandedGroups: 已展开的剧集根
+ * - expandedSeasons: 已展开的季
+ * - selectedIds: 批量操作的选中任务 ID
  */
 'use client';
 
-import { useState, memo, useMemo, useCallback, Fragment } from 'react';
-import {
-  Film, Tv, RefreshCw, Trash2, AlertCircle, AlertOctagon,
-  ChevronDown, ChevronRight, FileText, Image, Subtitles,
-} from 'lucide-react';
-import SecureImage from '@/components/common/SecureImage';
-import RebuildDialog, { type RebuildMode } from './RebuildDialog';
+import { useState } from 'react';
+import { CheckSquare, MinusSquare, Square } from 'lucide-react';
 import type { Task } from '@/types';
-import { cn, formatDate } from '@/lib/utils';
-import type { I18nKey } from '@/lib/i18n';
+import { cn } from '@/lib/utils';
 import { useLanguage } from '@/hooks/useLanguage';
+import { MediaRow } from './MediaRow';
+import RebuildDialog, { type RebuildMode } from './RebuildDialog';
+import { useMediaGroups, type MediaGroup } from './hooks/useMediaGroups';
 
-// ── 进度计算 ──────────────────────────────────────────────────────────
-function getProgress(status: string, subStatus?: string | null): number {
-  const s = (status || '').toLowerCase();
-  const ss = (subStatus || '').toLowerCase();
-  if (s === 'pending') return 30;
-  if (s === 'archived' || s === 'scraped') {
-    if (ss === 'scraped' || ss === 'found' || ss === 'success') return 100;
-    return 60;
-  }
-  return 0;
-}
+type Scope = 'series' | 'season' | 'episode';
 
-// ── 分组数据结构 ──────────────────────────────────────────────────────
-interface MediaGroup {
-  key: string;
-  media_type: 'movie' | 'tv';
-  task?: Task;                       // 电影：直接存单条
-  seasons: Map<number, Task[]>;      // 剧集：season → episodes
-  total_count: number;
-  archived_count: number;
-  ignored_count: number;
-  poster_path?: string;
-  tmdb_id?: number;
-  title?: string;
-  clean_name?: string;
-}
-
-// ── Props ─────────────────────────────────────────────────────────────
-export interface MediaTableProps {
+interface MediaTableProps {
   loading: boolean;
   tasks: Task[];
   selectedIds: Set<number>;
@@ -65,9 +38,9 @@ export interface MediaTableProps {
   onInvertSelection: () => void;
   isAllSelected: boolean;
   isSomeSelected: boolean;
-  onRetry: (taskId: number) => void;
-  onDelete: (taskId: number) => void;
-  onDeleteBatch: (ids: number[]) => void;
+  onRetry: (taskId: number) => Promise<void> | void;
+  onDelete: (taskId: number) => Promise<void> | void;
+  onDeleteBatch: (ids: number[]) => Promise<void> | void;
   onRebuild: (params: {
     task_id: number;
     is_archive: boolean;
@@ -75,662 +48,261 @@ export interface MediaTableProps {
     refix_nfo: boolean;
     refix_poster: boolean;
     refix_subtitle: boolean;
-    keyword_hint?: string;
     tmdb_id?: number;
     nuclear_reset?: boolean;
     season?: number;
     episode?: number;
-    scope?: 'series' | 'season' | 'episode';
-  }) => Promise<void>;
+    scope?: Scope;
+  }) => Promise<void> | void;
 }
 
-// ── 状态色 ───────────────────────────────────────────────────────────
-function getStatusColor(status: string) {
-  const s = (status || '').toLowerCase();
-  if (s === 'archived') return 'border-cyber-cyan text-cyber-cyan bg-cyber-cyan/10';
-  if (s === 'failed') return 'border-cyber-red text-cyber-red bg-cyber-red/10';
-  if (s === 'ignored') return 'border-orange-400 text-orange-400 bg-orange-400/10 font-mono';
-  return 'border-cyber-cyan/30 text-cyber-cyan/70 bg-cyber-cyan/5';
-}
-function getSubStatusColor(sub?: string | null) {
-  const s = (sub ?? '').toLowerCase();
-  if (s === 'scraped' || s === 'success' || s === 'found') return 'border-cyber-cyan text-cyber-cyan bg-cyber-cyan/10';
-  if (s === 'failed' || s === 'missing') return 'border-cyber-red text-cyber-red bg-cyber-red/10';
-  return 'border-cyber-cyan/20 text-cyber-cyan/50 bg-cyber-cyan/5';
+/**
+ * 提取任务标题（优先级：title > clean_name > file_name > id）
+ */
+function titleOf(task: Task) {
+  return task.title || task.clean_name || task.file_name || `#${task.id}`;
 }
 
-function getStatusLabel(status: string | null | undefined, t: (k: I18nKey) => string): string {
-  const raw = (status || 'pending').toLowerCase();
-  const key = (`status_${raw}`) as I18nKey;
-  const translated = (t as (k: string) => string)(key);
-  if (translated !== key) return translated;
-  return (t as (k: string) => string)('status_unknown');
+/**
+ * 解析季集坐标（Season/Episode）
+ * 
+ * 策略：
+ * 1. 优先使用结构化字段（task.season / task.episode）
+ * 2. 降级从路径中正则提取 SxxExx 格式
+ * 3. 兼容 S1E1 到 S99E999 的范围
+ */
+function parseSeasonEpisode(task: Task) {
+  const source = [task.target_path, task.file_path, task.file_name].filter(Boolean).join(' ');
+  const match = source.match(/S(\d{1,2})E(\d{1,3})/i);
+  return {
+    season: task.season ?? (match ? Number(match[1]) : null),
+    episode: task.episode ?? (match ? Number(match[2]) : null),
+  };
 }
 
-// ── sub_status 复合字符串解析器 ──────────────────────────────────────
-// 后端 rebuild 操作写入复合结构：rebuild_complete:nfo:ok;subtitle:triggered
-// 此函数拦截该格式，转换为本地化标签；普通枚举值走原有 sub_status_ 路径
-function formatSubStatus(raw: string | null | undefined, t: (k: I18nKey) => string): string {
-  if (!raw) return t('sub_status_pending');
-  // 1. 复合重构状态：rebuild_complete:nfo:ok;subtitle:triggered
-  if (raw.startsWith('rebuild_complete:')) {
-    const payload = raw.slice('rebuild_complete:'.length);
-    const labels: string[] = [];
-    for (const part of payload.split(';')) {
-      if (part.startsWith('nfo:')) {
-        const st = part.slice(4);
-        labels.push(t('msg_nfo_rebuild').replace('{status}', st === 'ok' ? '✅' : '❌'));
-      } else if (part.startsWith('poster:')) {
-        const st = part.slice(7);
-        labels.push(t('msg_poster_rebuild').replace('{status}', st === 'ok' ? '✅' : '❌'));
-      } else if (part.startsWith('subtitle:')) {
-        const st = part.slice(9);
-        labels.push(st === 'triggered' ? t('msg_subtitle_triggered') : t('msg_nfo_rebuild').replace('{status}', st));
-      }
-    }
-    return labels.length
-      ? t('msg_rebuild_complete') + labels.join(' | ')
-      : t('msg_rebuild_complete');
-  }
-  // 2. 标准枚举映射：直接查 sub_status_{raw}
-  //    找不到时回退 sub_status_unknown（严禁把 key 名直接暴露给用户）
-  const key = ('sub_status_' + raw.toLowerCase()) as I18nKey;
-  const trans = (t as (k: string) => string)(key);
-  if (trans !== key) return trans;
-  return (t as (k: string) => string)('sub_status_unknown');
+/**
+ * 剧集集数显示的位数宽度（补零到两位，如 S01E05）
+ */
+const EPISODE_NUMBER_WIDTH = 2;
+
+/**
+ * 格式化数字为两位补零格式，缺失时显示 `?`
+ * 
+ * @example
+ * formatNumberOrUnknown(5)  // "05"
+ * formatNumberOrUnknown(null)  // "?"
+ */
+function formatNumberOrUnknown(value: number | null | undefined) {
+  return typeof value === 'number' && Number.isFinite(value) ? String(value).padStart(EPISODE_NUMBER_WIDTH, '0') : '?';
 }
 
-// ── 补录按钮是否可用 ─────────────────────────────────────────────────
-function canRebuild(status: string) {
-  const s = (status || '').toLowerCase();
-  return s === 'archived' || s === 'failed';
+/**
+ * 生成任务副标题
+ * - 电影：显示年份或文件名
+ * - 剧集：显示 SxxExx 格式的季集坐标
+ */
+function subtitleOf(task: Task) {
+  if (task.media_type !== 'tv') return task.year || task.file_name || task.file_path;
+  const { season, episode } = parseSeasonEpisode(task);
+  return `S${formatNumberOrUnknown(season ?? 1)}E${formatNumberOrUnknown(episode)}`;
 }
 
-// ── UniversalMediaRow Props ─────────────────────────────────────────
-interface UniversalMediaRowProps {
-  level: 0 | 1 | 2;
-  isExpandable?: boolean;
-  isExpanded?: boolean;
-  onToggle?: () => void;
-  posterSrc?: string;
-  title: string;
-  subtitle: string;
-  status?: string;
-  progress?: number;
-  onDelete: () => void;
-  task?: Task;
-  onRebuildClick?: (task: Task, mode: RebuildMode, scope?: 'series' | 'season' | 'episode') => void;
-  rebuildingId?: number | null;
-  processingId?: number | null;
-  setProcessingId?: (id: number | null) => void;
-  onRetry?: (id: number) => void;
-  hidePoster?: boolean;
-  scopeOverride?: 'series' | 'season' | 'episode';
+/**
+ * 提取媒体组内的所有任务
+ * - 电影组：返回单个任务
+ * - 剧集组：返回所有季的所有集
+ */
+function tasksOf(group: MediaGroup) {
+  return group.task ? [group.task] : Array.from(group.seasons.values()).flat();
 }
 
-// ── UniversalMediaRow — 等高行组件（所有层级共用）────────────────────
-const UniversalMediaRow = memo(function UniversalMediaRow({
-  level, isExpandable, isExpanded, onToggle,
-  posterSrc, title, subtitle, status = 'pending', progress,
-  onDelete, task, onRebuildClick, rebuildingId, processingId,
-  setProcessingId, onRetry, hidePoster = false, scopeOverride,
-}: UniversalMediaRowProps) {
+/**
+ * 聚合状态（优先显示失败 > 忽略 > 已归档 > 待处理）
+ */
+function statusOf(tasks: Task[]): Task['status'] {
+  if (tasks.some((task) => task.status === 'failed')) return 'failed';
+  if (tasks.every((task) => task.status === 'ignored')) return 'ignored';
+  if (tasks.every((task) => task.status === 'archived' || task.status === 'scraped')) return 'archived';
+  return 'pending';
+}
+
+export default function MediaTable({
+  loading,
+  tasks,
+  selectedIds,
+  onToggleSelect,
+  onSelectAll,
+  onInvertSelection,
+  isAllSelected,
+  isSomeSelected,
+  onRetry,
+  onDelete,
+  onDeleteBatch,
+  onRebuild,
+}: MediaTableProps) {
   const { t } = useLanguage();
-  const resolvedScope: 'series' | 'season' | 'episode' =
-    scopeOverride ?? (level === 1 ? 'season' : level === 2 ? 'episode' : 'series');
+  const groups = useMediaGroups(tasks);
+  
+  // 展开状态：记录哪些剧集根和季已被用户展开
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const [expandedSeasons, setExpandedSeasons] = useState<Set<string>>(new Set());
+  
+  // 处理中状态：标记正在执行异步操作的任务 ID（防止重复点击）
+  const [processingId, setProcessingId] = useState<number | null>(null);
+  
+  // 重构对话框状态
+  const [rebuild, setRebuild] = useState<{ task: Task; mode: RebuildMode; scope: Scope } | null>(null);
 
-  const effectiveStatus = (task?.status ?? status ?? 'pending').toLowerCase();
-  const isIgnored = effectiveStatus === 'ignored';
+  /**
+   * 切换 Set 中某个 key 的存在状态（已存在则删除，不存在则添加）
+   */
+  const flip = (setter: React.Dispatch<React.SetStateAction<Set<string>>>, key: string) => {
+    setter((prev) => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  };
 
-  const resolvedProgress = progress !== undefined
-    ? progress
-    : getProgress(task?.status ?? '', task?.sub_status);
+  /**
+   * 批量删除：单任务走 onDelete，多任务走 onDeleteBatch
+   */
+  const deleteIds = async (ids: number[]) => {
+    if (ids.length === 1) await onDelete(ids[0]);
+    else await onDeleteBatch(ids);
+  };
 
-  const progressColor = resolvedProgress === 100
-    ? 'from-cyber-cyan to-green-400'
-    : 'from-cyber-cyan to-[rgba(0,230,246,0.5)]';
+  /**
+   * 批量选中：逐个调用 onToggleSelect
+   */
+  const selectIds = (ids: number[]) => ids.forEach((id) => onToggleSelect(id));
+
+  /**
+   * 打开重构对话框
+   */
+  const openRebuild = (task: Task, mode: RebuildMode, scope: Scope = 'episode') => setRebuild({ task, mode, scope });
+
+  // 加载状态
+  if (loading) {
+    return <div className="border border-cyber-cyan/30 bg-black/30 p-8 text-center text-cyber-cyan/70">{t('loading_settings')}</div>;
+  }
+
+  // 空状态
+  if (tasks.length === 0) {
+    return <div className="border border-cyber-cyan/30 bg-black/30 p-8 text-center text-cyber-cyan/60">{t('task_no_data_hint')}</div>;
+  }
+
+  /**
+   * 渲染复选框（单个或批量）
+   */
+  const renderSelect = (ids: number[]) => {
+    const checked = ids.length > 0 && ids.every((id) => selectedIds.has(id));
+    return (
+      <button
+        onClick={() => selectIds(ids)}
+        className={cn(
+          'w-8 border border-cyber-cyan/20 text-cyber-cyan/60 hover:text-cyber-cyan hover:border-cyber-cyan transition-colors flex items-center justify-center',
+          checked && 'border-cyber-cyan text-cyber-cyan bg-cyber-cyan/10',
+        )}
+      >
+        {checked ? <CheckSquare size={15} /> : <Square size={15} />}
+      </button>
+    );
+  };
 
   return (
-    <div
-      className={cn(
-        "relative border border-cyber-cyan/30 p-3 hover:border-cyber-cyan hover:bg-cyber-cyan/5 transition-all",
-        isIgnored && "border-orange-400/70 bg-orange-400/5 hover:border-orange-400 hover:bg-orange-400/10"
-      )}
-      style={{
-        marginLeft: level * 32,
-        backdropFilter: 'blur(25px)',
-        boxShadow: '0 0 30px rgba(6,182,212,0.15)',
-      }}
-    >
-      <div className="flex items-center gap-3">
-        {/* 折叠箭头占位 */}
-        <div className="flex-shrink-0 w-5 flex items-center justify-center">
-          {isExpandable ? (
-            <button onClick={onToggle} className="text-cyber-cyan/60 hover:text-cyber-cyan transition-colors">
-              {isExpanded ? <ChevronDown size={16}/> : <ChevronRight size={16}/>}
-            </button>
-          ) : null}
+    <div className="space-y-3">
+      <div className="flex items-center justify-between border border-cyber-cyan/30 bg-black/30 px-3 py-2 text-xs text-cyber-cyan/70">
+        <div className="flex items-center gap-3">
+          <button onClick={onSelectAll} className="flex items-center gap-1 hover:text-cyber-cyan transition-colors">
+            {isAllSelected ? <CheckSquare size={14} /> : isSomeSelected ? <MinusSquare size={14} /> : <Square size={14} />}
+            <span>{t('select_all_page')}</span>
+          </button>
+          <button onClick={onInvertSelection} className="hover:text-cyber-cyan transition-colors">{t('invert_page')}</button>
         </div>
-
-        {/* 海报：严格 w-14 h-20，全层级一致 */}
-        <div
-          className={cn(
-            "relative w-14 h-20 flex-shrink-0 overflow-hidden border border-cyber-cyan/40",
-            isIgnored && "border-orange-400/70"
-          )}
-        >
-          <SecureImage
-            src={posterSrc || task?.local_poster_path || task?.poster_path || '/placeholder-poster.jpg'}
-            alt={title}
-            width={56} height={80}
-            className={cn(
-              "object-cover w-full h-full opacity-80",
-              isIgnored && "vhs-filter"
-            )}
-            fallback={
-              <div className="w-full h-full flex items-center justify-center bg-black/40">
-                {task?.media_type === 'tv'
-                  ? <Tv className="text-cyber-cyan/30" size={18}/>
-                  : <Film className="text-cyber-cyan/30" size={18}/>}
-              </div>
-            }
-          />
-
-          {/* VHS Glitch — 仅 ignored 状态激活 */}
-          {isIgnored && (
-            <div className="absolute inset-0 pointer-events-none vhs-ignored">
-              {/* VHS 叠层 · 噪点纹理（视觉语义层 / SVG turbulence） */}
-              <div className="absolute inset-0 z-10 opacity-30 vhs-noise" />
-
-              {/* VHS 叠层 · 扫描线（视觉语义层 / 5px 栅格） */}
-              <div className="absolute inset-0 z-20 opacity-40 vhs-scanlines" />
-
-              {/* VHS 叠层 · 磁带拉伸条（视觉语义层 / tracking bar） */}
-              <div className="absolute left-0 right-0 h-6 z-20 opacity-60 vhs-tracking-bar" style={{ top: '30%' }} />
-              <div
-                className="absolute left-0 right-0 h-5 z-20 opacity-40"
-                style={{
-                  top: '60%',
-                  background:
-                    'linear-gradient(90deg, transparent 0%, rgba(0,0,0,0.3) 30%, rgba(0,0,0,0.5) 50%, rgba(0,0,0,0.3) 70%, transparent 100%)',
-                }}
-              />
-
-              {/* VHS 叠层 · 色彩分离（视觉语义层 / RGB 通道偏移） */}
-              <div className="absolute inset-0 z-25 mix-blend-screen opacity-20 vhs-rgb-red" />
-              <div className="absolute inset-0 z-25 mix-blend-screen opacity-20 vhs-rgb-blue" />
-
-              {/* VHS 叠层 · 顶部时间码条（视觉语义层 / REC bar） */}
-              <div className="absolute top-0.5 left-0.5 right-0.5 z-30">
-                <div className="px-1 py-[1px] bg-black/70 backdrop-blur-sm text-orange-400 text-[7px] font-mono leading-none">
-                  ▶ REC 00:00:00:00 [CORRUPTED]
-                </div>
-              </div>
-
-              {/* VHS 叠层 · 故障印章（视觉语义层 / TAPE ERROR） */}
-              <div className="absolute inset-0 flex items-center justify-center z-30">
-                <div
-                  className="px-1.5 py-1 bg-orange-600/80 border border-orange-400 text-white font-mono text-[8px] backdrop-blur-sm"
-                  style={{
-                    textShadow: '0 0 8px rgba(251, 146, 60, 0.8)',
-                    boxShadow: '0 0 12px rgba(251, 146, 60, 0.55)',
-                    transform: 'rotate(-8deg)',
-                  }}
-                >
-                  <div className="flex flex-col items-center gap-0.5">
-                    <AlertOctagon size={10} />
-                    <span className="leading-none">TAPE ERROR</span>
-                    <span className="text-[7px] opacity-70 leading-none">00:00:00:00</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* 信息区 */}
-        <div className="flex-1 min-w-0 flex items-center gap-3">
-          <div className="flex-1 min-w-0">
-            <h4 className="font-semibold text-sm truncate text-cyber-yellow"
-              style={{ textShadow: '0 0 8px rgba(249,240,2,0.4)' }} title={title}>
-              {title}
-            </h4>
-            <p className="text-xs truncate mt-0.5 text-cyber-cyan/50" title={subtitle}>{subtitle}</p>
-            {task?.target_path && (
-              <p className="text-cyber-cyan/30 text-xs truncate mt-1" title={task.target_path}>
-                <span className="text-cyber-cyan/50 font-mono mr-1">{t('path_dst')}:</span>{task.target_path}
-              </p>
-            )}
-            {task?.file_path && (
-              <p className="text-cyber-cyan/40 text-xs truncate mt-0.5" title={task.file_path}>
-                <span className="text-cyber-cyan/60 font-mono mr-1">{t('path_src')}:</span>{task.file_path}
-              </p>
-            )}
-          </div>
-
-          {/* 状态标签 */}
-          {task ? (
-            <div className="flex items-center gap-1.5 flex-shrink-0">
-              <span className={cn('px-2 py-0.5 text-xs font-semibold border', getStatusColor(task.status))}>
-                {getStatusLabel(task.status, t)}
-              </span>
-              <span className={cn('px-2 py-0.5 text-xs font-semibold border', getSubStatusColor(task.sub_status))}>
-                {formatSubStatus(task.sub_status, t)}
-              </span>
-            </div>
-          ) : (
-            <span className={cn('px-2 py-0.5 text-xs font-semibold border flex-shrink-0', getStatusColor(status))}>
-              {getStatusLabel(status, t)}
-            </span>
-          )}
-
-          {/* 外链 */}
-          {task && (
-            <div className="flex items-center gap-1 flex-shrink-0">
-              {task.tmdb_id && (
-                <a href={`https://www.themoviedb.org/${task.media_type === 'tv' ? 'tv' : 'movie'}/${task.tmdb_id}`}
-                  target="_blank" rel="noopener noreferrer"
-                  className="px-2 py-0.5 text-xs border border-cyber-cyan/60 text-cyber-cyan/70 hover:bg-cyber-cyan hover:text-black transition-all">TMDB</a>
-              )}
-              {task.imdb_id && (
-                <a href={`https://www.imdb.com/title/${task.imdb_id}`}
-                  target="_blank" rel="noopener noreferrer"
-                  className="px-2 py-0.5 text-xs border border-yellow-400/60 text-yellow-400/70 hover:bg-yellow-400 hover:text-black transition-all">IMDb</a>
-              )}
-            </div>
-          )}
-
-          {/* 时间戳 + 补录三剑客（仅 task 节点）*/}
-          {task && onRebuildClick && (
-            <div className="flex-shrink-0 flex flex-col items-end gap-1">
-              <span className="text-cyber-cyan/50 text-xs whitespace-nowrap">
-                {task.created_at ? formatDate(task.created_at) : t('task_just_now')}
-              </span>
-              {canRebuild(task.status) && (
-                <div className="flex items-center gap-1">
-                  <button onClick={(e) => { e.stopPropagation(); onRebuildClick(task, 'nfo', resolvedScope); }} disabled={rebuildingId === task.id}
-                    title={t('tooltip_rebuild_nfo')}
-                    className={cn('p-1 border text-xs transition-all',
-                      rebuildingId === task.id ? 'border-cyber-cyan/20 text-cyber-cyan/20 cursor-wait'
-                        : 'border-cyber-cyan/50 text-cyber-cyan/70 hover:border-cyber-cyan hover:bg-cyber-cyan/10')}>
-                    <FileText size={12}/>
-                  </button>
-                  {!hidePoster && (
-                    <button onClick={(e) => { e.stopPropagation(); onRebuildClick(task, 'poster', resolvedScope); }} disabled={rebuildingId === task.id}
-                      title={t('tooltip_rebuild_poster')}
-                      className={cn('p-1 border text-xs transition-all',
-                        rebuildingId === task.id ? 'border-purple-400/20 text-purple-400/20 cursor-wait'
-                          : 'border-purple-400/50 text-purple-400/70 hover:border-purple-400 hover:bg-purple-400/10')}>
-                      <Image size={12}/>
-                    </button>
-                  )}
-                  <button onClick={(e) => { e.stopPropagation(); onRebuildClick(task, 'subtitle', resolvedScope); }} disabled={rebuildingId === task.id}
-                    title={t('tooltip_trigger_subtitle')}
-                    className={cn('p-1 border text-xs transition-all',
-                      rebuildingId === task.id ? 'border-green-400/20 text-green-400/20 cursor-wait'
-                        : 'border-green-400/50 text-green-400/70 hover:border-green-400 hover:bg-green-400/10')}>
-                    <Subtitles size={12}/>
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* 操作按钮：重试（仅 failed task）+ 常驻红色删除 */}
-          <div className="flex items-center gap-1 flex-shrink-0">
-            {task?.status === 'failed' && onRetry && (
-              <button
-                onClick={async (e) => {
-                  e.stopPropagation();
-                  if (processingId !== null) return;
-                  setProcessingId?.(task.id);
-                  try { await Promise.resolve(onRetry(task.id)); }
-                  finally { setProcessingId?.(null); }
-                }}
-                disabled={processingId === task.id}
-                className={cn('p-1.5 border border-cyber-cyan text-cyber-cyan hover:bg-cyber-cyan hover:text-black transition-all',
-                  processingId === task.id && 'opacity-50 cursor-not-allowed')}
-                title={t('btn_retry')}
-              >
-                <RefreshCw size={14} className={cn(processingId === task.id && 'animate-spin')}/>
-              </button>
-            )}
-            {/* ★ 常驻红色删除按钮 — 所有层级必显示 */}
-            <button
-              onClick={async (e) => {
-                e.stopPropagation();
-                if (task && processingId !== null) return;
-                if (task) setProcessingId?.(task.id);
-                try { await Promise.resolve(onDelete()); }
-                finally { if (task) setProcessingId?.(null); }
-              }}
-              disabled={task ? processingId === task.id : false}
-              className={cn('p-1.5 border border-cyber-red text-cyber-red hover:bg-cyber-red hover:text-white transition-all',
-                task && processingId === task.id && 'opacity-50 cursor-not-allowed')}
-              title={t('task_delete_record')}
-            >
-              <Trash2 size={14}/>
-            </button>
-          </div>
-        </div>
+        <div>{selectedIds.size > 0 ? `${selectedIds.size} / ${tasks.length}` : tasks.length}</div>
       </div>
 
-      {/* 进度条 */}
-      {resolvedProgress > 0 && (
-        <div className="relative h-1 bg-cyber-cyan/10 border-t border-cyber-cyan/20 mt-2 overflow-hidden">
-          <div
-            className={`absolute inset-y-0 left-0 bg-gradient-to-r ${progressColor} transition-all duration-700`}
-            style={{ width: `${resolvedProgress}%`, boxShadow: '0 0 8px rgba(0,230,246,0.8)' }}
-          />
-        </div>
+      {groups.map((group) => {
+        const groupTasks = tasksOf(group);
+        const groupIds = groupTasks.map((task) => task.id);
+        const rep = group.task ?? groupTasks[0];
+        if (!rep) return null;
+
+        if (group.media_type !== 'tv') {
+          return (
+            <div key={group.key} className="flex items-stretch gap-2">
+              {renderSelect([rep.id])}
+              <div className="flex-1 min-w-0">
+                <MediaRow level={0} title={titleOf(rep)} subtitle={subtitleOf(rep)} status={rep.status} task={rep} onDelete={() => deleteIds([rep.id])} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} />
+              </div>
+            </div>
+          );
+        }
+
+        const groupExpanded = expandedGroups.has(group.key);
+        return (
+          <div key={group.key} className="space-y-2">
+            <div className="flex items-stretch gap-2">
+              {renderSelect(groupIds)}
+              <div className="flex-1 min-w-0">
+                <MediaRow level={0} isExpandable isExpanded={groupExpanded} onToggle={() => flip(setExpandedGroups, group.key)} posterSrc={group.poster_path} title={group.title || group.clean_name || titleOf(rep)} subtitle={t('media_table_tv_summary').replace('{seasons}', String(group.seasons.size)).replace('{episodes}', String(group.total_count))} status={statusOf(groupTasks)} task={rep} onDelete={() => deleteIds(groupIds)} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} scopeOverride="series" />
+              </div>
+            </div>
+
+            {groupExpanded && Array.from(group.seasons.entries()).sort(([a], [b]) => a - b).map(([season, seasonTasks]) => {
+              const sorted = [...seasonTasks].sort((a, b) => (a.episode ?? 0) - (b.episode ?? 0));
+              const seasonIds = sorted.map((task) => task.id);
+              const seasonKey = `${group.key}:${season}`;
+              const seasonExpanded = expandedSeasons.has(seasonKey);
+              const seasonRep = sorted[0];
+              return (
+                <div key={seasonKey} className="space-y-2">
+                  <div className="flex items-stretch gap-2">
+                    {renderSelect(seasonIds)}
+                    <div className="flex-1 min-w-0">
+                      <MediaRow level={1} isExpandable isExpanded={seasonExpanded} onToggle={() => flip(setExpandedSeasons, seasonKey)} posterSrc={group.poster_path} title={t('media_table_season_label').replace('{season}', String(season))} subtitle={t('media_table_tv_season_episodes').replace('{count}', String(sorted.length))} status={statusOf(sorted)} task={seasonRep} onDelete={() => deleteIds(seasonIds)} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} hidePoster scopeOverride="season" />
+                    </div>
+                  </div>
+                  {seasonExpanded && sorted.map((task) => (
+                    <div key={task.id} className="flex items-stretch gap-2">
+                      {renderSelect([task.id])}
+                      <div className="flex-1 min-w-0">
+                        <MediaRow level={2} title={titleOf(task)} subtitle={subtitleOf(task)} status={task.status} task={task} onDelete={() => deleteIds([task.id])} onRetry={onRetry} onRebuildClick={openRebuild} processingId={processingId} setProcessingId={setProcessingId} hidePoster scopeOverride="episode" />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+
+      {rebuild && (
+        <RebuildDialog
+          open
+          task={rebuild.task}
+          mode={rebuild.mode}
+          scope={rebuild.scope}
+          onClose={() => setRebuild(null)}
+          onConfirm={async (params) => {
+            await onRebuild({
+              task_id: rebuild.task.id,
+              is_archive: Boolean(rebuild.task.is_archive),
+              media_type: params.media_type,
+              refix_nfo: rebuild.mode === 'nfo',
+              refix_poster: rebuild.mode === 'poster',
+              refix_subtitle: rebuild.mode === 'subtitle',
+              tmdb_id: params.tmdb_id,
+              nuclear_reset: params.nuclear_reset,
+              season: params.season ?? rebuild.task.season ?? undefined,
+              episode: params.episode ?? rebuild.task.episode ?? undefined,
+              scope: params.scope ?? rebuild.scope,
+            });
+          }}
+        />
       )}
     </div>
   );
-});
-// ── 主组件 ───────────────────────────────────────────────────────────
-function MediaTable({
-  loading, tasks, selectedIds,
-  onToggleSelect, onSelectAll, onInvertSelection,
-  isAllSelected, isSomeSelected,
-  onRetry, onDelete, onDeleteBatch, onRebuild,
-}: MediaTableProps) {
-  const { t } = useLanguage();
-  const [processingId, setProcessingId] = useState<number | null>(null);
-  const [rebuildingId, setRebuildingId] = useState<number | null>(null);
-
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [dialogTask, setDialogTask] = useState<Task | null>(null);
-  const [dialogMode, setDialogMode] = useState<RebuildMode>('nfo');
-
-  // 折叠状态机：L1 为作品组 key 集合；L2 为「组 key:季号」二级键集合
-  const [openL1, setOpenL1] = useState<Set<string>>(new Set());
-  const [openL2, setOpenL2] = useState<Set<string>>(new Set());
-
-  // 派生数据：单次线性扫描构建分组映射，禁止在 render 路径做 O(n²) 聚合
-  const groups = useMemo((): MediaGroup[] => {
-    const map = new Map<string, MediaGroup>();
-    for (const task of tasks) {
-      // 分组键加入 media_type 命名空间，防止同名电影与剧集被错误合并
-      const mtype = task.media_type || 'movie';
-      const key = `${mtype}::${(task.title || task.clean_name || task.file_name || String(task.id)).trim()}`;
-      if (!map.has(key)) {
-        map.set(key, {
-          key,
-          media_type: mtype as 'movie' | 'tv',
-          seasons: new Map(),
-          total_count: 0,
-          archived_count: 0,
-          ignored_count: 0,
-          poster_path: task.local_poster_path || task.poster_path,
-          tmdb_id: task.tmdb_id,
-          title: task.title,
-          clean_name: task.clean_name,
-        });
-      }
-      const g = map.get(key)!;
-      g.total_count++;
-      if ((task.status || '').toLowerCase() === 'archived') g.archived_count++;
-      if ((task.status || '').toLowerCase() === 'ignored') g.ignored_count++;
-      if (!g.poster_path) g.poster_path = task.local_poster_path || task.poster_path;
-      if (mtype === 'movie') {
-        g.task = task;
-      } else {
-        const s = task.season ?? 1;
-        if (!g.seasons.has(s)) g.seasons.set(s, []);
-        g.seasons.get(s)!.push(task);
-      }
-    }
-    return Array.from(map.values());
-  }, [tasks]);
-
-  const toggleL1 = useCallback((key: string) => {
-    setOpenL1(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
-  }, []);
-  const toggleL2 = useCallback((key: string) => {
-    setOpenL2(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
-  }, []);
-
-  const [dialogScope, setDialogScope] = useState<'series' | 'season' | 'episode'>('episode');
-
-  const handleRebuildClick = useCallback((
-    task: Task,
-    mode: RebuildMode,
-    scope: 'series' | 'season' | 'episode' = 'episode',
-  ) => {
-    setDialogTask(task);
-    setDialogMode(mode);
-    setDialogScope(scope);
-    setDialogOpen(true);
-  }, []);
-
-  const handleRebuildConfirm = useCallback(async (params: {
-    tmdb_id?: number;
-    media_type: string;
-    nuclear_reset: boolean;
-    season?: number;
-    episode?: number;
-    scope?: 'series' | 'season' | 'episode';
-  }) => {
-    if (!dialogTask) return;
-    setRebuildingId(dialogTask.id);
-    try {
-      await onRebuild({
-        task_id: dialogTask.id,
-        is_archive: (dialogTask.status || '').toLowerCase() === 'archived',
-        media_type: params.media_type,
-        refix_nfo: dialogMode === 'nfo',
-        refix_poster: dialogMode === 'poster',
-        refix_subtitle: dialogMode === 'subtitle',
-        tmdb_id: params.tmdb_id,
-        nuclear_reset: params.nuclear_reset,
-        season: params.season,
-        episode: params.episode,
-        scope: params.scope ?? dialogScope,
-      });
-    } finally {
-      setRebuildingId(null);
-    }
-  }, [dialogTask, dialogMode, dialogScope, onRebuild]);
-
-  if (loading) {
-    return (
-      <div className="space-y-3">
-        {[...Array(5)].map((_, i) => (
-          <div key={i} className="border border-cyber-cyan/30 p-3 animate-pulse" style={{ backdropFilter: 'blur(25px)' }}>
-            <div className="flex gap-3">
-              <div className="w-14 h-20 bg-cyber-cyan/10 border border-cyber-cyan/30" />
-              <div className="flex-1 space-y-2 py-1">
-                <div className="h-4 bg-cyber-cyan/10 rounded w-2/3" />
-                <div className="h-3 bg-cyber-cyan/10 rounded w-1/2" />
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-    );
-  }
-
-  if (tasks.length === 0) {
-    return (
-      <div className="border border-cyber-cyan/50 p-12 text-center" style={{ backdropFilter: 'blur(20px)', boxShadow: '0 0 40px rgba(6,182,212,0.4)' }}>
-        <AlertCircle className="mx-auto mb-4 text-cyber-cyan/60" size={48} />
-        <p className="text-cyber-cyan text-lg font-semibold">{t('no_data')}</p>
-        <p className="text-cyber-cyan/60 text-sm mt-2">{t('task_no_data_hint')}</p>
-      </div>
-    );
-  }
-
-  return (
-    <>
-      {/* 批量选择工具条 */}
-      <div className="border-b border-cyber-cyan/50 p-2 mb-1" style={{ backdropFilter: 'blur(15px)' }}>
-        <div className="flex items-center gap-3">
-          <input type="checkbox" checked={isAllSelected}
-            onChange={() => isAllSelected ? onInvertSelection() : onSelectAll()}
-            ref={el => { if (el) el.indeterminate = isSomeSelected && !isAllSelected; }}
-            className="rounded border-cyber-cyan/40 bg-transparent text-cyber-cyan focus:ring-cyber-cyan"
-          />
-          <button onClick={onSelectAll} className="text-xs text-cyber-cyan/70 hover:text-cyber-cyan font-semibold">{t('select_all_page')}</button>
-          <span className="text-cyber-cyan/30">|</span>
-          <button onClick={onInvertSelection} className="text-xs text-cyber-cyan/70 hover:text-cyber-cyan font-semibold">{t('invert_page')}</button>
-        </div>
-      </div>
-
-      {/* Groups — 扁平化渲染，仅通过 marginLeft 体现层级 */}
-      <div className="space-y-2">
-        {groups.map(group => {
-          const l1Open = openL1.has(group.key);
-
-          // ── 电影：level=0 直接渲染 ──
-          if (group.media_type === 'movie' && group.task) {
-            return (
-              <UniversalMediaRow
-                key={group.key}
-                level={0}
-                task={group.task}
-                title={group.title || group.clean_name || ''}
-                subtitle={group.task.file_name || ''}
-                onDelete={() => onDelete(group.task!.id)}
-                onRetry={onRetry}
-                onRebuildClick={handleRebuildClick}
-                rebuildingId={rebuildingId}
-                processingId={processingId}
-                setProcessingId={setProcessingId}
-              />
-            );
-          }
-
-          // ── 剧集：Fragment 拍扁，消除 wrapper border ──
-          if (group.media_type === 'tv') {
-            const allEpisodeIds = Array.from(group.seasons.values()).flat().map(e => e.id);
-            const tvProgress = group.total_count
-              ? Math.round(group.archived_count / group.total_count * 100)
-              : 0;
-            const tvAllIgnored = group.ignored_count > 0 && group.ignored_count === group.total_count;
-            const tvRootStatus = tvAllIgnored
-              ? 'ignored'
-              : (group.archived_count === group.total_count ? 'archived' : 'pending');
-
-            // ── Series 代理任务（用于 Series 级补录按钮）────────────────
-            const seriesRepTask = Array.from(group.seasons.values())
-              .flat()
-              .find(ep => (ep.status || '').toLowerCase() === 'archived' && ep.imdb_id);
-
-            const tvRoot = (
-              <UniversalMediaRow
-                level={0}
-                isExpandable={true}
-                isExpanded={l1Open}
-                onToggle={() => toggleL1(group.key)}
-                posterSrc={group.poster_path}
-                title={group.title || group.clean_name || ''}
-                subtitle={t('media_table_tv_total_episodes').replace('{count}', String(group.total_count))}
-                status={tvRootStatus}
-                progress={tvProgress}
-                onDelete={() => onDeleteBatch(allEpisodeIds)}
-                task={seriesRepTask}
-                scopeOverride="series"
-                onRebuildClick={handleRebuildClick}
-                rebuildingId={rebuildingId}
-                processingId={processingId}
-                setProcessingId={setProcessingId}
-              />
-            );
-
-            if (!l1Open) return <Fragment key={group.key}>{tvRoot}</Fragment>;
-
-            return (
-              <Fragment key={group.key}>
-                {tvRoot}
-                {Array.from(group.seasons.entries()).sort(([a],[b]) => a - b).map(([season, episodes]) => {
-                  const l2Key = `${group.key}:${season}`;
-                  const l2Open = openL2.has(l2Key);
-                  const seasonIds = episodes.map(e => e.id);
-                  const seasonArchived = episodes.filter(e =>
-                    (e.status || '').toLowerCase() === 'archived'
-                  ).length;
-                  const seasonIgnored = episodes.filter(e =>
-                    (e.status || '').toLowerCase() === 'ignored'
-                  ).length;
-                  const seasonProgress = episodes.length
-                    ? Math.round(seasonArchived / episodes.length * 100)
-                    : 0;
-                  const seasonAllIgnored = seasonIgnored > 0 && seasonIgnored === episodes.length;
-                  const seasonStatus = seasonAllIgnored
-                    ? 'ignored'
-                    : (seasonArchived === episodes.length ? 'archived' : 'pending');
-
-                  // ── Season 代理任务（激活 Season 行右侧补录按钮）────────
-                  const seasonRepTask = episodes
-                    .find(ep => (ep.status || '').toLowerCase() === 'archived' && ep.imdb_id);
-
-                  const seasonRow = (
-                    <UniversalMediaRow
-                      level={1}
-                      isExpandable={true}
-                      isExpanded={l2Open}
-                      onToggle={() => toggleL2(l2Key)}
-                      posterSrc={group.poster_path}
-                      title={t('media_table_season_label').replace('{season}', String(season))}
-                      subtitle={t('media_table_tv_season_episodes').replace('{count}', String(episodes.length))}
-                      status={seasonStatus}
-                      progress={seasonProgress}
-                      onDelete={() => onDeleteBatch(seasonIds)}
-                      task={seasonRepTask}
-                      scopeOverride="season"
-                      onRebuildClick={handleRebuildClick}
-                      rebuildingId={rebuildingId}
-                      processingId={processingId}
-                      setProcessingId={setProcessingId}
-                    />
-                  );
-
-                  if (!l2Open) return <Fragment key={l2Key}>{seasonRow}</Fragment>;
-
-                  return (
-                    <Fragment key={l2Key}>
-                      {seasonRow}
-                      {episodes
-                        .sort((a, b) => (a.episode ?? 0) - (b.episode ?? 0))
-                        .map(ep => (
-                          <UniversalMediaRow
-                            key={ep.id}
-                            level={2}
-                            task={ep}
-                            hidePoster={true}
-                            title={`${group.title || group.clean_name || ''} S${String(season).padStart(2, '0')}E${String(ep.episode ?? 0).padStart(2, '0')}`.trim()}
-                            subtitle={ep.file_name || ''}
-                            onDelete={() => onDelete(ep.id)}
-                            onRetry={onRetry}
-                            onRebuildClick={handleRebuildClick}
-                            rebuildingId={rebuildingId}
-                            processingId={processingId}
-                            setProcessingId={setProcessingId}
-                          />
-                        ))}
-                    </Fragment>
-                  );
-                })}
-              </Fragment>
-            );
-          }
-
-          return null;
-        })}
-      </div>
-      {/* 补录 / 核级确认弹层 */}
-      {dialogTask && (
-        <RebuildDialog
-          open={dialogOpen}
-          task={dialogTask}
-          mode={dialogMode}
-          scope={dialogScope}
-          onConfirm={handleRebuildConfirm}
-          onClose={() => setDialogOpen(false)}
-        />
-      )}
-    </>
-  );
 }
-
-export default memo(MediaTable);

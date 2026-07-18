@@ -1,2 +1,9 @@
-"""Rebuild engines and utilities (manual rebuild decoupling)."""
+"""
+手动重构服务包入口。
+
+说明：
+- 具体执行引擎位于 `engines.py`。
+- 路径计算、视频定位和目录清理工具位于 `rebuild_utils.py`。
+- 保持入口轻量，避免导入包时触发文件系统操作。
+"""
 

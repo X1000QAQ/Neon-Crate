@@ -1,3 +1,14 @@
+/**
+ * SystemMonitor - 系统日志监控面板
+ *
+ * 负责展示全局日志流、标签过滤器、自动滚动开关和日志等级统计。
+ * 日志数据来自 `LogContext`，本组件只做展示和前端过滤，不直接向后端发起轮询请求。
+ *
+ * 新手提示：
+ * - 过滤条件只影响当前面板显示，不会修改全局日志缓存。
+ * - “清空日志”是本地清空视图，不会删除后端日志。
+ * - 自动滚动开启时，新日志会把面板滚动到底部；关闭后方便回看历史日志。
+ */
 'use client';
 
 /**
@@ -77,7 +88,7 @@ export default function SystemMonitor() {
   const { t } = useLanguage();
   // ✅ 从 LogContext 获取全量日志，不再自行轮询
   const { logs: allLogs } = useLogs();
-  const neural = useNeuralLinkStatus({ intervalMs: 2500 });
+  const neural = useNeuralLinkStatus({ intervalMs: 5000 });
   const tr = (key: string, fallback: string) => {
     const out = (t as unknown as (k: string) => string)(key);
     return out === key ? fallback : out;

@@ -1,12 +1,21 @@
 """
-数据库管理器 - SQLite WAL 模式 + 原子写入 + 敏感密钥加密存储
+数据库管理器 - SQLite 连接池、Schema 初始化与仓储门面
 
-核心特性：
-1. WAL 模式：提升并发性能
-2. 原子写入：配置文件采用 .tmp 替换机制
-3. 线程级连接池：使用 threading.local() 实现连接复用，彻底消除高频 connect/close 开销
-4. 敏感密钥加密：自动拦截并加密 6 个敏感键
-5. 首次启动自动将 config.json 中的明文密钥迁移至 secure_keys.json 加密存储
+职责：
+- 初始化 SQLite 基础表结构，并维护 `system_meta.schema_version` 版本号。
+- 为每个线程复用独立 SQLite 连接，配合 `db_lock` 保证写入安全。
+- 创建并持有各 Repository 实例，对外提供兼容旧版 `DatabaseManager` 的统一门面方法。
+- 首次启动时迁移明文敏感密钥，将 API Key 从 `config.json` 移入 `secure_keys.json` 加密存储。
+
+数据边界：
+- `tasks` 是热表，承载待处理、失败、忽略、刚完成等活跃任务。
+- `media_archive` 是冷表，承载已归档的历史媒体记录。
+- `config.json` 保存非敏感配置和路径配置；敏感密钥不应明文停留在该文件中。
+
+维护提示：
+- 本类大量方法只是转发到具体 Repository，外观接口保持稳定是兼容旧调用方的关键。
+- 修改表结构必须走 `_register_migrations()` 版本迁移，不要直接破坏 Baseline 建表语句。
+- 本模块不包含“物理正则清洗”能力；文件名语义识别由 AI 和 scraper 链路负责。
 """
 import os
 import json
@@ -22,7 +31,17 @@ logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
-    """数据库管理器"""
+    """
+    SQLite 数据库管理器与仓储外观。
+
+    核心能力：
+    - 初始化基础 Schema 和版本迁移。
+    - 维护线程级 SQLite 连接池和写入锁。
+    - 构造 Config / Path / Task / Archive / Stats 仓储。
+    - 对外保留旧版 DatabaseManager 方法名，内部委托到具体 Repository。
+
+    兼容边界：大量路由和服务直接依赖本类门面方法，重构时应优先保持方法签名稳定。
+    """
 
     # 敏感密钥清单：这些键的值会被自动加密存储到 secure_keys.json
     # 首次启动时，系统会自动检测 config.json 中的明文密钥并迁移
@@ -270,14 +289,21 @@ class DatabaseManager:
 
     def _migrate_sensitive_keys(self):
         """
-        自动迁移明文密钥到加密存储（首次启动时执行）
-        
-        ── 业务链路 ──
-        1. 读取 config.json 文件 -> 2. 扫描 SENSITIVE_KEYS 列表中的明文密钥 -> 
-        3. 将非空明文密钥加密后写入 secure_keys.json -> 4. 清空 config.json 中的明文密钥 -> 
-        5. 后续读取时，ConfigRepo 会自动从 secure_keys.json 解密
-        
-        幂等性：多次执行不会重复迁移（已加密的密钥会被跳过）
+        将历史明文敏感密钥迁移到加密存储。
+
+        触发时机：
+        - `DatabaseManager` 初始化阶段自动执行。
+        - 主要服务于旧版本升级或手动编辑 `config.json` 后的自愈。
+
+        迁移流程：
+        1. 读取 `config.json.settings` 中的敏感键。
+        2. 将非空明文值使用 `CryptoManager` 加密。
+        3. 写入 `secure_keys.json`。
+        4. 将 `config.json` 中对应字段清空，避免明文继续落盘。
+
+        幂等性：
+        - 没有明文值时直接返回。
+        - 多次执行不会重复加密已经迁移走的密钥。
         """
         # ── Step 1: 校验配置文件存在性 ──
         # 业务链路：1. 检查 config.json 是否存在 -> 2. 若不存在则直接返回
@@ -380,6 +406,9 @@ class DatabaseManager:
     def update_task_is_active(self, task_id: int, is_active: int):
         return self._task_repo.update_task_is_active(task_id, is_active)
 
+    def update_any_task_type(self, task_id: int, is_archive: bool, media_type: str) -> bool:
+        return self._task_repo.update_any_task_type(task_id, is_archive, media_type)
+
     def update_any_task_metadata(self, task_id: int, is_archive: bool, imdb_id=None, tmdb_id=None, sub_status=None, title=None, year=None, local_poster_path=None, target_path=None, clean_name=None, season=None, episode=None):
         return self._task_repo.update_any_task_metadata(task_id, is_archive, imdb_id=imdb_id, tmdb_id=tmdb_id, sub_status=sub_status, title=title, year=year, local_poster_path=local_poster_path, target_path=target_path, clean_name=clean_name, season=season, episode=episode)
 
@@ -406,7 +435,7 @@ class DatabaseManager:
                                           season: int = None, episode: int = None,
                                           tmdb_id: int = None):
         """
-        🚨 架构级原子操作：专为 PT 做种重复文件设计。[DO NOT SPLIT OR INLINE]
+        架构级原子操作：专为 PT 做种重复文件设计，禁止拆分或内联。
 
         为什么这个方法不可拆分？
         当文件被 IMDb 重复检测判定为物理副本时，仅将状态改为 ignored 是不够的：
@@ -451,13 +480,23 @@ class DatabaseManager:
     def get_active_library_path(self, media_type: str) -> str:                             return self._archive_repo.get_active_library_path(media_type)
 
 
-# 全局单例
+# 全局单例（线程安全）
 _db_manager: Optional[DatabaseManager] = None
+_db_manager_lock = threading.Lock()
 
 
 def get_db_manager() -> DatabaseManager:
-    """获取全局数据库管理器实例"""
+    """
+    获取全局数据库管理器实例。
+
+    使用双重检查锁保证：
+    - 首次访问时只初始化一个 DatabaseManager。
+    - 初始化过程包含 Schema 创建、迁移、敏感密钥迁移和仓储构造。
+    - 后续调用复用同一门面实例，避免重复打开配置和数据库资源。
+    """
     global _db_manager
     if _db_manager is None:
-        _db_manager = DatabaseManager()
+        with _db_manager_lock:
+            if _db_manager is None:
+                _db_manager = DatabaseManager()
     return _db_manager

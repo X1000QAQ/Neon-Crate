@@ -1,22 +1,29 @@
 """
-并发扫描引擎 - 多线程文件扫描
+并发扫描引擎 - 视频文件发现、物理过滤与上下文采集。
 
-核心特性：
-1. 并发扫描：ThreadPoolExecutor 多线程
-2. 递归遍历：支持深度目录扫描
-3. 视频过滤：仅扫描视频文件
-4. 去重机制：基于文件路径去重
+职责：
+- 根据配置的视频扩展名和最小体积限制发现候选视频文件。
+- 使用路径集合和 inode 指纹对已入库文件做前置去重。
+- 采集父目录与同级文件名样本，为后续 AI 语义识别提供上下文。
+- 使用线程池并发处理文件，降低大目录扫描耗时。
+
+边界：
+- 扫描阶段不判断真实片名、年份、电影 / 剧集类型或季集语义。
+- `clean_name/year/is_tv/season/episode` 仅作为兼容字段返回空值，实际解析由刮削阶段 AI 链路完成。
+- 正则仅用于样片、隐藏目录和固定路径形态过滤，不恢复用户自定义文件名清洗规则。
+
+安全与稳定性：
+- `followlinks=False` 防止软链接循环。
+- `MAX_SCAN_DEPTH` 限制递归深度，避免恶意或异常目录结构拖垮扫描任务。
 """
 import os
 import re
-import asyncio
 from pathlib import Path
-from typing import List, Dict, Set, Optional, Any
+from typing import List, Dict, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 
 from .filters import MediaFilter
-from .cleaner import MediaCleaner
 from app.infra.constants import VIDEO_EXTS_EXTENDED
 
 logger = logging.getLogger(__name__)
@@ -31,7 +38,22 @@ def _parse_ext_config(raw: str) -> frozenset:
 
 
 class ScanEngine:
-    """并发扫描引擎"""
+    """
+    并发扫描引擎。
+
+    本类只负责文件系统层面的“发现与过滤”：
+    - 视频扩展名过滤。
+    - 最小体积过滤。
+    - 样片 / 隐藏目录剪枝。
+    - 路径和 inode 防重。
+    - 同级文件上下文采集。
+
+    不负责：
+    - 影视名称语义清洗。
+    - TMDB 搜索。
+    - NFO / 海报写入。
+    - 文件移动或硬链接归档。
+    """
 
     # 静态兜底（db 读取失败时使用）
     _VIDEO_EXTS_FALLBACK = VIDEO_EXTS_EXTENDED
@@ -43,14 +65,13 @@ class ScanEngine:
         Args:
             max_workers: 最大并发线程数
             min_size_mb: 最小文件体积限制（MB）
-            db_manager: 数据库管理器（用于加载自定义正则）
+            db_manager: 数据库管理器（用于读取视频扩展名配置）
             known_paths: 已入库文件路径集合（用于前置过滤）
             known_inodes: 已入库文件物理指纹集合（用于硬链接防重）
         """
         self.max_workers = max_workers
         self.min_size_mb = min_size_mb
         self.filter = MediaFilter(min_size_mb=min_size_mb)
-        self.cleaner = MediaCleaner(db_manager=db_manager)
         self.known_paths = known_paths or set()  # 🚀 保存路径白名单
         self.known_inodes = known_inodes or set()  # 🛡️ 保存 inode 白名单
         # 动态读取视频格式（从数据库，失败时兜底静态常量）
@@ -72,7 +93,8 @@ class ScanEngine:
             recursive: 是否递归扫描子目录
         
         Returns:
-            视频文件列表，每个元素包含 path, file_name, size, clean_name, year, is_tv, season, episode
+            视频文件列表，每个元素包含 path, file_name, size, parent_dir_path, sibling_files。
+            clean_name/year/is_tv/season/episode 仅保留为空值兼容字段，解析由刮削 AI 链路负责。
         """
         if not os.path.exists(directory):
             logger.warning(f"目录不存在: {directory}")
@@ -84,7 +106,7 @@ class ScanEngine:
         video_files = self._collect_video_files(directory, recursive)
         logger.info(f"发现 {len(video_files)} 个视频文件")
         
-        # 并发过滤和清洗
+        # 并发过滤和上下文采集
         results = self._process_files_concurrent(video_files)
         
         logger.info(f"扫描完成，符合条件的文件: {len(results)} 个")
@@ -186,7 +208,7 @@ class ScanEngine:
         return ext in self.VIDEO_EXTENSIONS
     
     def _process_files_concurrent(self, file_paths: List[str]) -> List[Dict]:
-        """并发处理文件（过滤 + 清洗）"""
+        """并发处理文件（物理过滤 + 上下文采集）"""
         results = []
         processed_paths: Set[str] = set()  # 去重
         
@@ -212,56 +234,52 @@ class ScanEngine:
     
     def _process_single_file(self, file_path: str) -> Dict | None:
         """
-        处理单个文件：过滤 + MediaCleaner 清洗
-        
+        处理单个文件：只做物理过滤与上下文采集。
+
         Returns:
             符合条件的文件信息，或 None（不符合条件）
         """
         try:
-            # 1. 物理过滤（体积检查）
             if not self.filter.check_file_size(file_path):
                 return None
-            
-            # 2. 获取文件信息
+
             file_name = os.path.basename(file_path)
             file_size = os.path.getsize(file_path)
-            
-            # 3. 使用 MediaCleaner 进行强大的清洗和提取
-            extract_result = self.cleaner.clean_and_extract(file_name)
+            parent_path = str(Path(file_path).parent)
+            sibling_files = self._collect_sibling_files(file_path)
 
-            # 3.1 若文件名未能提取到季号，尝试从父级目录名补充
-            #     匹配：Season 1 / Season 01 / S01 / S1
-            if extract_result.get('season') is None:
-                _season_from_path = None
-                for part in Path(file_path).parts:
-                    m = re.search(r'(?:Season|S)\s*(\d{1,2})\b', part, re.IGNORECASE)
-                    if m:
-                        _season_from_path = int(m.group(1))
-                if _season_from_path is not None:
-                    extract_result['season'] = _season_from_path
-                    # 只要有季号就视为剧集
-                    extract_result['is_tv'] = True
-                    logger.debug(f'[SCAN] 从路径补充季号: {file_path} -> season={_season_from_path}')
-            
-            # 4. 过滤广告文件
-            if extract_result.get('is_ad', False):
-                logger.debug(f"过滤广告文件: {file_name}")
-                return None
-            
             return {
                 'path': file_path,
                 'file_name': file_name,
                 'size': file_size,
-                'clean_name': extract_result['clean_name'],
-                'year': extract_result['year'],
-                'is_tv': extract_result['is_tv'],
-                'season': extract_result['season'],
-                'episode': extract_result['episode']
+                'parent_dir_path': parent_path,
+                'sibling_files': sibling_files,
+                'clean_name': None,
+                'year': None,
+                'is_tv': None,
+                'season': None,
+                'episode': None,
             }
-        
+
         except Exception as e:
             logger.error(f"处理文件失败 {file_path}: {e}")
             return None
+
+    def _collect_sibling_files(self, file_path: str, limit: int = 40) -> List[str]:
+        """采集同级视频文件名样本，供后续 AI 语义解析使用。"""
+        try:
+            current = Path(file_path)
+            parent = current.parent
+            if not parent.exists():
+                return []
+            siblings = [
+                p.name for p in parent.iterdir()
+                if p.is_file() and self._is_video_file(p.name)
+            ]
+            return sorted(siblings)[:limit]
+        except Exception as e:
+            logger.debug(f"[SCAN] 同级文件上下文采集失败: {file_path} | {e}")
+            return []
     
     def scan_multiple_directories(self, directories: List[str]) -> List[Dict]:
         """

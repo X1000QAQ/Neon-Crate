@@ -1,11 +1,15 @@
 """
-_shared.py - tasks 包共享状态与工具函数
+_shared.py - tasks 路由包共享状态与统计工具。
 
-包含：
-1. 全局任务状态字典（scan_status / scrape_all_status / find_subtitles_status）
-2. _update_library_counts() — 物理扫盘统计工具函数
+职责：
+- 保存扫描、刮削、字幕三类后台任务的内存运行态，供状态接口和按钮禁用逻辑读取。
+- 提供 `_update_library_counts()`，在任务完成或路径配置变更后刷新仪表盘媒体库计数缓存。
+- 将跨子模块共享的状态集中放置，避免 `scan_task`、`scrape_task`、`subtitle_task` 之间互相导入形成循环依赖。
 
-所有其他子模块从此处导入共享状态，避免循环依赖。
+状态边界：
+- 这些状态是进程内内存态，服务重启后会重置。
+- 真实任务数据仍以数据库和媒体库文件系统为准。
+- 本模块只做统计缓存更新，不参与文件名语义识别或物理正则清洗。
 """
 import os
 import logging
@@ -46,36 +50,24 @@ find_subtitles_status = {
 
 def _update_library_counts():
     """
-    物理扫盘统计媒体库数量，写入数据库缓存
-    
-    设计目标：
-    - 提供准确的媒体库统计数据
-    - 避免在 /stats 接口实时扫盘（性能问题）
-    - 由扫描/刮削任务完成后调用，异步更新
-    
-    统计策略：
-    
-    电影统计：
-    - 统计媒体库第一层子文件夹数
-    - 每个文件夹 = 一部电影
-    - 例如：/media/movies/The Matrix (1999)/ 算 1 部电影
-    
-    剧集统计：
-    - 递归统计所有视频文件数
-    - 每个文件 = 一集
-    - 例如：/media/tv/Breaking Bad (2008)/Season 1/S01E01.mkv 算 1 集
-    
-    支持的视频格式：
-    - .mkv、.mp4、.avi、.mov、.wmv、.ts、.flv、.m2ts
-    
+    盘点媒体库文件数量并写入配置缓存。
+
     调用时机：
-    - 扫描任务完成后
-    - 刮削任务完成后
-    - 配置保存后（用户修改媒体库路径）
-    
-    缓存位置：
-    - library_movies_count：电影数量
-    - library_tv_count：剧集数量
+    - 扫描任务完成后。
+    - 刮削 / 归档任务完成后。
+    - 设置页保存媒体库路径后。
+
+    统计策略：
+    - 电影库：统计媒体库根目录下一层文件夹数量。
+    - 剧集库：递归统计视频文件数量，每个视频文件视为一集。
+
+    缓存字段：
+    - `library_movies_count`：电影数量。
+    - `library_tv_count`：剧集集数。
+
+    说明：
+    - 这是为了避免 `/system/stats` 每次请求都实时扫盘。
+    - 扩展名白名单来自固定常量 `VIDEO_EXTS`，不是用户自定义文件名清洗正则。
     """
     try:
         db = get_db_manager()

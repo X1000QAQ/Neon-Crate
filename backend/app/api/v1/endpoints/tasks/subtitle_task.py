@@ -1,10 +1,15 @@
 """
-subtitle_task.py - 字幕补完任务
+subtitle_task.py - 字幕补完路由与后台执行入口。
 
-包含：
-1. perform_find_subtitles_task_sync() — 同步字幕执行函数（线程池运行）
-2. trigger_find_subtitles() — POST /find_subtitles 路由
-3. get_find_subtitles_status() — GET /find_subtitles/status 路由
+职责：
+- 暴露 `/find_subtitles` 和 `/find_subtitles/status`，供前端触发字幕补完并轮询状态。
+- 对已归档且缺字幕的媒体执行本地字幕检测、OpenSubtitles 下载和字幕状态写回。
+- 通过固定休眠和全局熔断保护外部字幕 API，避免高频请求导致封号。
+
+执行边界：
+- 本地字幕存在时优先短路，不消耗 OpenSubtitles API 配额。
+- 字幕任务在独立线程中运行，内部用 `asyncio.run()` 驱动异步下载逻辑。
+- `_subtitle_entry_lock` 防止多个字幕补完任务并发运行。
 """
 import asyncio
 import glob
@@ -57,8 +62,8 @@ def perform_find_subtitles_task_sync():
     """
     global find_subtitles_status
 
-    # ── 并发锁释放核安全（DO NOT MODIFY）──────────────────────────────
-    # 🚨 架构师警告 (DO NOT MODIFY): 核安全边界，改动极易引发死锁或路径穿越。
+    # ── 并发锁释放核安全（禁止随意修改）──────────────────────────────
+    # 架构警告：这是核安全边界，改动极易引发死锁或路径穿越。
     # - 本任务在同步线程池中运行；必须使用 `threading.Lock` 做物理并发短路。
     # - 无论发生何种异常，都必须走到 finally，确保：
     #   1) `find_subtitles_status["is_running"] = False`

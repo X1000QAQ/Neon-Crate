@@ -1,3 +1,14 @@
+/**
+ * NeuralWaveform - AI 侧栏神经波形背景动画
+ *
+ * 负责绘制 AI 侧栏中的 SVG 波形装饰。动画通过 `requestAnimationFrame`
+ * 和 `useRef` 直接更新 SVG path，不使用 React state，避免每帧触发组件重渲染。
+ *
+ * 新手提示：
+ * - 这里的动画状态只存在于组件内部，不要提升到父组件。
+ * - 修改动画时优先调整正弦波参数，不要改成 `setState` 驱动。
+ * - 卸载时必须取消动画帧，防止后台持续运行。
+ */
 'use client';
 
 import { useEffect, useRef } from 'react';

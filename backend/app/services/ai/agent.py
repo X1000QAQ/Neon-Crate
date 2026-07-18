@@ -1,12 +1,21 @@
 """
-AI Agent 核心模块 - 智能对话与意图识别引擎
+AI Agent 核心模块 - 对话编排、意图识别与授权决策。
 
-功能：
-1. 自然语言对话处理
-2. 意图识别与指令路由
-3. 系统状态查询与反馈
-4. 双引擎 LLM 支持（云端 API / 本地 Ollama）
-5. 智能媒体名称清洗与搜索优化
+职责：
+- 接收用户自然语言消息，融合人格设定和总控路由规则后调用 LLM。
+- 将 LLM 返回的结构化意图交给 `Dispatcher` 做白名单和参数校验。
+- 对扫描、刮削、字幕等低风险动作返回可直接分发的 action code。
+- 对下载意图执行 TMDB 候选检索、候选状态持久化和下载确认元数据缓存。
+
+控制边界：
+- 本模块只负责“识别与决策”，不直接执行下载，也不直接移动媒体文件。
+- 下载必须经 `/confirm` 授权端点调用 Servarr，避免模型输出绕过人工确认。
+- 媒体文件名语义识别依赖 LLM 结构化输出，不恢复 RegexLab / DB 正则清洗链路。
+
+容错策略：
+- LLM 结构化输出先经 JSON 提取器处理，再经 `Dispatcher` 强校验。
+- LLM 调用失败或总控规则为空时，降级到本地关键词规则引擎。
+- 用户选择候选时，从数据库读取 `_pending_candidates`，适配开发热重载和多请求场景。
 """
 import json
 import re
@@ -21,7 +30,18 @@ logger = logging.getLogger(__name__)
 
 
 class AIAgent:
-    """AI 智能助手 - 负责对话处理和意图识别"""
+    """
+    AI 智能助手。
+
+    主要职责：
+    - 维护对话入口 `process_message()`。
+    - 根据 LLM / 规则引擎结果返回自然语言回复和可选 action code。
+    - 管理下载候选列表和待授权下载元数据。
+
+    重要约束：
+    - action code 只是路由层触发后台任务的信号，不代表任务已经执行完成。
+    - DOWNLOAD 意图必须停留在授权决策层，不能在本类中直接调用下载器执行。
+    """
     
     # 意图常量定义
     ACTION_SCAN = "ACTION_SCAN"
@@ -117,7 +137,7 @@ class AIAgent:
         
         拦截策略：
         1. 检测 JSON 字典格式（以 { 开头，以 } 结尾）
-        2. 尝试解析 JSON，提取所有 value 拼接成换行文本
+        2. 尝试解析 JSON，提取所有非空 value 拼接成换行文本
         3. 移除 Markdown 代码块标记（```json、```）
         
         Args:
@@ -133,9 +153,22 @@ class AIAgent:
             try:
                 data = json.loads(text)
                 # 优雅地将 JSON 的 value 拼接成换行文本，丢弃 key
-                clean_text = "\n".join([str(v) for k, v in data.items() if v])
-                logger.info(f"[Sanitizer] JSON 污染已拦截并净化: {text[:50]}... -> {clean_text[:50]}...")
-                return clean_text
+                # 过滤掉空值和纯结构字段（intent、reply 等可能为空）
+                values = []
+                for k, v in data.items():
+                    # 跳过空值和单纯的意图/指令字段
+                    if v and str(v).strip() and k not in ("intent", "reply", "action"):
+                        values.append(str(v))
+                
+                # 如果拆解出了有意义的内容，使用拆解后的文本
+                if values:
+                    clean_text = "\n".join(values)
+                    logger.info(f"[Sanitizer] JSON 污染已拦截并净化: {text[:50]}... -> {clean_text[:50]}...")
+                    return clean_text
+                else:
+                    # JSON 中没有有意义的内容（都是空值或元数据），直接返回错误提示
+                    logger.warning(f"[Sanitizer] JSON 结构为空或无意义内容，无法净化: {text}")
+                    return ""
             except json.JSONDecodeError:
                 pass
         
@@ -143,7 +176,52 @@ class AIAgent:
         text = text.replace("```json", "").replace("```", "").strip()
         
         return text
-    
+
+    def _match_candidate(self, user_input: str, candidates: list) -> Optional[dict]:
+        """
+        候选匹配辅助方法
+
+        匹配优先级：
+        1. 纯数字序号（如「1」）→ 按下标取候选；越界时不做模糊匹配
+        2. 序号前缀（如「1. 绿巨人浩克」）→ 按前缀数字取候选
+        3. 去年份精确匹配
+        4. 去年份包含匹配（片名长度 ≥ 4 且存在于输入中）
+        """
+        stripped = user_input.strip()
+
+        # 策略 1: 纯数字序号
+        if stripped.isdigit():
+            idx = int(stripped) - 1
+            if 0 <= idx < len(candidates):
+                return candidates[idx]
+            return None  # 越界不降级做模糊匹配，与原逻辑一致
+
+        # 策略 2: 序号前缀（如「1. 片名」「1、片名」）
+        seq_match = re.match(r'^(\d+)[.、。]\s*', stripped)
+        if seq_match:
+            idx = int(seq_match.group(1)) - 1
+            if 0 <= idx < len(candidates):
+                return candidates[idx]
+
+        # 策略 3 & 4: 片名模糊匹配（去年份括号后比较）
+        _rm_year = lambda s: re.sub(r'\s*[\(（]\d{4}[\)）]\s*', '', s).strip()
+        stripped_clean = _rm_year(stripped)
+
+        for c in candidates:
+            if stripped_clean == _rm_year(c["title"]):
+                return c
+
+        for c in candidates:
+            title_clean = _rm_year(c["title"])
+            if (stripped == c["title"]
+                    or stripped_clean == title_clean
+                    or (len(title_clean) >= 4
+                        and title_clean in stripped_clean
+                        and stripped_clean != title_clean)):
+                return c
+
+        return None
+
     async def process_message(self, user_message: str) -> Tuple[str, Optional[str]]:
         """
         用户消息处理核心方法
@@ -186,41 +264,8 @@ class AIAgent:
         logger.info(f"[AIAgent] 候选状态检查: pending={bool(pending)}, agent_id={id(self)}")
         if pending:
             candidates = pending["candidates"]  # List[{title, year, tmdb_id, media_type}]
-            # 尝试解析用户输入的序号（1-9）或直接匹配片名
-            chosen = None
-            stripped = user_message.strip()
-            logger.info(f"[AIAgent] 候选匹配尝试: user_input={repr(stripped)}, candidates={[c['title'] for c in candidates]}")
-            if stripped.isdigit():
-                idx = int(stripped) - 1
-                if 0 <= idx < len(candidates):
-                    chosen = candidates[idx]
-            else:
-                # 模糊匹配：支持「片名 (年份)」、「片名」、「序号. 片名」等格式
-                # 先尝试提取序号（如「1. 绿巨人浩克」）
-                import re as _re_match
-                seq_match = _re_match.match(r'^(\d+)[.、。]\s*', stripped)
-                if seq_match:
-                    idx = int(seq_match.group(1)) - 1
-                    if 0 <= idx < len(candidates):
-                        chosen = candidates[idx]
-                if not chosen:
-                    # 去掉年份括号再匹配
-                    stripped_clean = _re_match.sub(r'\s*[\(（]\d{4}[\)）]\s*', '', stripped).strip()
-                    for c in candidates:
-                        title_clean = _re_match.sub(r'\s*[\(（]\d{4}[\)）]\s*', '', c["title"]).strip()
-                        # 精确匹配优先：去年份后完全相同
-                        if stripped_clean == title_clean:
-                            chosen = c
-                            break
-                    if not chosen:
-                        # 次级匹配：原始输入包含片名（而不是片名包含输入，避免「蜘蛛侠」误匹配「蜘蛛侠：纵横宇宙」）
-                        for c in candidates:
-                            title_clean = _re_match.sub(r'\s*[\(（]\d{4}[\)）]\s*', '', c["title"]).strip()
-                            if (stripped == c["title"] or
-                                    stripped_clean == title_clean or
-                                    (len(title_clean) >= 4 and title_clean in stripped_clean and stripped_clean != title_clean)):
-                                chosen = c
-                                break
+            logger.info(f"[AIAgent] 候选匹配尝试: user_input={repr(user_message.strip())}, candidates={[c['title'] for c in candidates]}")
+            chosen = self._match_candidate(user_message, candidates)
             if chosen:
                 # 清除候选状态（数据库）
                 self.db.set_config("_pending_candidates", "")
@@ -354,7 +399,9 @@ class AIAgent:
                         return response_text, intent
 
                     # ── SYSTEM_STATUS / DOWNLOAD / CHAT：走原有富逻辑生成 ──
-                    result = await self._generate_llm_response(user_message, intent_data)
+                    # 重要：对于这些复杂意图，不能使用第一次 JSON 中的 reply 字段（那是空的），
+                    # 必须重新调用 LM 获取完整答案
+                    result = await self._generate_llm_response(user_message, intent_data, router_rules)
                     # 结构化候选列表：返回三元组 (text, sentinel, candidates)
                     if isinstance(result, tuple) and len(result) == 3:
                         response_text, sentinel, candidates_data = result
@@ -377,7 +424,7 @@ class AIAgent:
         intent = intent_data.get("intent", self.CHAT)
         
         # 🚨 统一出口：降级方案也使用 _generate_llm_response
-        result = await self._generate_llm_response(user_message, intent_data)
+        result = await self._generate_llm_response(user_message, intent_data, router_rules)
         if isinstance(result, tuple) and len(result) == 3:
             response_text, sentinel, candidates_data = result
             if sentinel == "__CANDIDATES_STRUCTURED__":
@@ -393,29 +440,30 @@ class AIAgent:
         
         return response_text, action_code
     
-    async def _generate_llm_response(self, message: str, intent_data: Dict) -> str:
+    async def _generate_llm_response(self, message: str, intent_data: Dict, router_rules: str = "") -> str:
         """
         使用 LLM 生成智能响应（总控中枢神经接通版）
         
         总控契约：
-        1. 各意图分支统一注入 ai_persona，约束生成风格与用户配置一致
+        1. 日常对话管线只注入 ai_persona 与 master_router_rules，保持 Prompt 物理隔离
         2. 非模板类意图走 LLM 动态生成，替代静态应答
         3. 系统状态类意图附带运行快报上下文，约束输出与观测数据对齐
         
         Args:
             message: 用户消息
             intent_data: 意图数据
+            router_rules: 总控中枢规则，仅来自 master_router_rules
             
         Returns:
             str: AI 响应文本
         """
         intent = intent_data.get("intent")
         
-        # 🚀 第一步：动态获取 AI 名称 + 人格设定（复用 property，避免重复读取配置）
+        # 🚀 第一步：动态获取 AI 名称 + 人格设定，拼装日常对话基础 System Prompt
         ai_name = self.ai_name
         ai_persona_raw = self.ai_persona
-        # 将名字显式注入人格，确保 LLM 知道自己叫什么
         ai_persona = f"你的名字是「{ai_name}」。{ai_persona_raw}" if ai_persona_raw else f"你的名字是「{ai_name}」。"
+        base_system_prompt = f"{ai_persona}\n\n{router_rules}".strip()
         
         # 🚀 第二步：全时态感知 - 为所有对话注入系统运行快报
         stats = self._get_system_stats()
@@ -518,7 +566,7 @@ class AIAgent:
 """
             
             # 第四步：融合 AI 人格 + 真理宣言 + 实时快报
-            full_system_prompt = f"""{ai_persona}
+            full_system_prompt = f"""{base_system_prompt}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【🚨 真理宣言：数据真实性铁律 🚨】
@@ -553,8 +601,15 @@ class AIAgent:
 请严格遵守【真理宣言】，根据上面的【实时系统快报】生成状态汇报。"""
             
             # 调用 LLM 生成响应，传入完整的 system_prompt
-            ai_response = await self.llm_client.call_llm(full_system_prompt, message)
-            return ai_response
+            # 关键：不能再使用 force_json=True，必须获取自然语言响应
+            ai_response = await self.llm_client.call_llm(full_system_prompt, message, force_json=False)
+            # 防御式净化：拦截可能的 JSON 污染（如果LM仍然返回了JSON格式）
+            cleaned = self._sanitize_reply(ai_response)
+            # 如果净化后仍为空，返回系统快报摘要
+            if not cleaned or not cleaned.strip():
+                logger.warning("[SYSTEM_STATUS] LM 响应为空，返回系统快报摘要")
+                return f"【系统快速汇报】\n总任务数: {stats['total']}\n已完成: {stats['archived']}\n待处理: {stats['pending']}\n失败: {stats['failed']}"
+            return cleaned
         
         elif intent == self.DOWNLOAD:
             # ==========================================
@@ -738,8 +793,8 @@ class AIAgent:
             return f"正在本地媒体库中搜索，{status_summary}，请稍候。"
         
         else:  # CHAT
-            # 🚀 全时态感知：为普通聊天也注入系统现状
-            prompt = f"{ai_persona}\n\n当前系统状态：{status_summary}\n\n执行专业闲聊回复。"
+            # 🚀 全时态感知：普通聊天只注入人格、总控规则与系统现状
+            prompt = f"{base_system_prompt}\n\n当前系统状态：{status_summary}\n\n执行专业闲聊回复。"
             response = await self.llm_client.call_llm(prompt, message)
             # 防御式净化：拦截可能的 JSON 污染
             return self._sanitize_reply(response)
@@ -981,45 +1036,41 @@ class AIAgent:
         return ""
 
     async def ai_identify_media(
-        self, cleaned_name: str, full_path: str, type_hint: str,
+        self, cleaned_name: str = "", full_path: str = "", type_hint: str = "movie",
         keyword_hint: Optional[str] = None,
         locked_season: Optional[int] = None,
         locked_episode: Optional[int] = None,
+        raw_filename: str = "",
+        parent_dir: str = "",
+        sibling_files: Optional[list[str]] = None,
     ) -> Optional[Dict]:
         """
-        🧠 AI 归档专家 - 智能影视文件识别引擎
-        
+        AI 归档专家：影视文件语义识别引擎。
+
         设计目标：
-        - 将杂乱的影视文件路径清洗为标准的结构化数据
-        - 提取片名、年份、类型等关键信息
-        - 为 TMDB 搜索提供精准的查询词
-        
-        核心优势：
-        1. 动态规则：从数据库读取 expert_archive_rules，用户可自定义
-        2. 路径智能：利用父目录名作为强信号（通常即为作品名）
-        3. 幻觉纠偏：自动修正 LLM 返回的非标准类型值
-        4. 降级保护：解析失败时使用正则清洗名保底
-        
+        - 根据原始文件名、完整路径、父目录和同级文件样本提取 TMDB 搜索所需字段。
+        - 输出片名查询词、媒体类型、季集坐标、文件名年份、知识库年份和证据对象。
+        - 为后续 TMDB 搜索、防重和归档链路提供结构化输入。
+
         识别策略：
-        1. 优先使用父目录名（如 /tv/Breaking Bad/Season 1/S01E01.mkv → Breaking Bad）
-        2. 剧集识别：query 只输出剧名，不含单集标题
-        3. 年份提取：只使用文件名中明确出现的年份，不推断
-        4. 类型映射：film/films/movies → movie；series/show/anime → tv
-        
+        1. `keyword_hint` 拥有最高优先级，代表用户显式人工判断。
+        2. 父目录和同级文件样本作为上下文信号，帮助区分电影、剧集和绝对集号。
+        3. 年份拆分为 `filename_year` 与 `knowledge_year`，由调用方执行证据镜像校验。
+        4. LLM 输出必须符合强 Schema；调用方不再依赖旧版 RegexLab / DB 正则作为语义清洗兜底。
+
         Args:
-            cleaned_name: 正则清洗后的文件名
-            full_path: 完整文件路径
-            type_hint: 类型提示（movie/tv）
-            keyword_hint: 用户手动输入的正确片名（最高优先级，直接覆盖 AI 推断）
-            
+            cleaned_name: 兼容字段。调用方传入的轻量结构化名称，不代表语义真理。
+            full_path: 完整文件路径。
+            type_hint: 路径或任务侧提供的类型提示（movie/tv）。
+            keyword_hint: 用户手动输入的正确片名（最高优先级，直接覆盖 AI 推断）。
+            locked_season: 外部已锁定的季号（可选）。
+            locked_episode: 外部已锁定的集号（可选）。
+            raw_filename: 原始文件名。
+            parent_dir: 父目录名称。
+            sibling_files: 同级视频文件名样本。
+
         Returns:
-            Optional[Dict]: {
-                "query": str,           # TMDB 搜索词（纯净片名）
-                "year": str,            # 年份（4位数字或空）
-                "type": str,            # 类型（movie/tv/IGNORE）
-                "season": int | None,   # 季数（仅剧集）
-                "episode": int | None,  # 集数（仅剧集）
-            }
+            Optional[Dict]: 成功时返回结构化识别结果；模型不可用或输出不合约时返回 None / 抛出上游异常，由刮削链路 Fail-Fast 处理。
         """
         # 🚀 第一步：动态获取用户的归档专家规则（DEFAULT_CONFIG 提供钢铁兜底，绝不为空）
         expert_rules = self.db.get_agent_config("expert_archive_rules", "")
@@ -1037,42 +1088,60 @@ class AIAgent:
                 "episode":        None,
                 "filename_year":  "",
                 "knowledge_year": "",
+                "confidence": 1.0,
+                "evidence": {"query_source": "keyword_hint"},
+                "episode_numbering_mode": "unknown",
+                "needs_review": False,
             }
         # ══════════════════════════════════════════════════════════════
         
         # 🚀 第二步：从完整路径提取父目录名作为额外线索
         # 例：'/download/tv/The Boys/Season 03/The.Boys.S03E01.mkv' → 'The Boys'
-        parent_dir_hint = ""
+        parent_dir_hint = parent_dir or ""
         try:
             import os as _os
-            parts = full_path.replace("\\", "/").split("/")
-            # 取文件名的上级目录，过滤掉 Season xx 这类无意义目录
-            for part in reversed(parts[:-1]):
-                part = part.strip()
-                if part and not re.match(r'^[Ss]eason\s*\d+$', part, re.IGNORECASE):
-                    parent_dir_hint = part
-                    break
+            path_parts = full_path.replace("\\", "/").split("/") if full_path else []
+            if not raw_filename and path_parts:
+                raw_filename = path_parts[-1]
+            if not parent_dir_hint:
+                for part in reversed(path_parts[:-1]):
+                    part = part.strip()
+                    if part and not re.match(r'^[Ss]eason\s*\d+$', part, re.IGNORECASE):
+                        parent_dir_hint = part
+                        break
         except Exception:
             pass
+
+        raw_filename = raw_filename or cleaned_name or ""
+        sibling_files = sibling_files or []
+        sibling_sample = sibling_files[:20]
+        schema_contract = (
+            "\n\n【强 Schema 输出契约补丁 - 调用方强制】\n"
+            "你必须且只能输出一个 JSON 对象，必须包含以下字段："
+            "query,type,season,episode,filename_year,knowledge_year,confidence,evidence,episode_numbering_mode,needs_review。\n"
+            "confidence 必须是 0 到 1 的数字；evidence 必须是对象；"
+            "episode_numbering_mode 只能是 absolute、season_episode、unknown 之一。\n"
+            "若 type=tv，season 与 episode 必须为整数或 null。"
+            "没有明确 Season 2/S02/2x 证据时，纯数字后缀 01/02/10 必须解释为绝对集号：season=1, episode=该数字。\n"
+            "严禁把纯数字 02 单独解释为第二季。"
+        )
 
         # 🚀 第三步：调用底层 LLM 客户端（确保 JSON 强制输出）
         # prefer_local=True：将文件清洗任务卸载给本地边缘模型（高并发无情解析，不占用云端配额）
         # 本地未配置时自动回退云端，高可用保证
         raw = await self.llm_client.call_llm(
-            system_prompt=expert_rules,
+            system_prompt=f"{expert_rules}{schema_contract}",
             prefer_local=True,
             user_prompt=(
-                f"请分析以下影视文件，严格按照 System Prompt 的 JSON 契约输出：\n"
+                f"请分析以下影视文件，并严格按照 System Prompt 中定义的规则与 JSON 契约输出。\n\n"
+                f"【待分析事实】\n"
+                f"原始文件名: {raw_filename}\n"
                 f"文件路径: {full_path}\n"
-                f"父目录名（强信号，通常即为作品名）: {parent_dir_hint}\n"
-                f"清洗后文件名: {cleaned_name}\n"
-                f"类型提示: {type_hint or 'movie'}\n\n"
-                f"⚠️ 关键提示：\n"
-                f"1. 优先以【父目录名】作为作品名的参考依据\n"
-                f"2. 对于剧集，query 只输出剧名本身，不含单集标题\n"
-                f"3. year 只能填写文件名或路径中明确出现的年份，无年份信息填空字符串\n"
-                f"4. 华语优先铁律已在 System Prompt 中定义，必须遵守\n"
-                f"5. 必须输出 query、year、type 三个字段，剧集还需 season 和 episode"
+                f"父目录名: {parent_dir_hint}\n"
+                f"同级文件列表样本: {sibling_sample}\n"
+                f"同级文件总数: {len(sibling_files)}\n"
+                f"旧清洗名(仅兼容参考，禁止作为唯一真相): {cleaned_name}\n"
+                f"类型提示: {type_hint or 'movie'}"
             )
         )
         
@@ -1112,6 +1181,21 @@ class AIAgent:
         # Fail-Fast：JSON 解析失败时不允许用 cleaned_name 兜底继续执行 TMDB 搜索
         if not data:
             raise RuntimeError("ai_json_parse_failed")
+
+        required_schema_fields = ("confidence", "evidence", "episode_numbering_mode")
+        missing_schema_fields = [field for field in required_schema_fields if field not in data]
+        if missing_schema_fields:
+            raise RuntimeError(f"ai_schema_missing_fields: {','.join(missing_schema_fields)}")
+        try:
+            schema_confidence = float(data.get("confidence"))
+        except (TypeError, ValueError):
+            raise RuntimeError("ai_schema_invalid_confidence")
+        if not 0 <= schema_confidence <= 1:
+            raise RuntimeError("ai_schema_confidence_out_of_range")
+        if not isinstance(data.get("evidence"), dict):
+            raise RuntimeError("ai_schema_invalid_evidence")
+        if data.get("episode_numbering_mode") not in {"absolute", "season_episode", "unknown"}:
+            raise RuntimeError("ai_schema_invalid_episode_numbering_mode")
 
         # ── v1.0.0 弹性审计分流 ─────────────────────────────────────
         _confidence = _classify_result(data)
@@ -1162,8 +1246,12 @@ class AIAgent:
         elif raw_type == "ignore":
             media_type = "IGNORE"
         else:
-            # 完全无法识别时，使用调用方传入的 type_hint 兜底
+            # 1. mixed 瞬态类型不得使用默认 movie 兜底 -> 2. 交由编排器断路失败 -> 3. 阻断非法 AI 类型污染 TMDB 管线
             fallback = (type_hint or "movie").strip().lower()
+            if fallback == "mixed":
+                logger.error(f"[AI][MIXED] type='{raw_type}' 无法裁决为 movie/tv，触发瞬态断路")
+                raise RuntimeError(f"ai_mixed_type_invalid: {raw_type}")
+            # 完全无法识别时，使用调用方传入的 type_hint 兜底
             media_type = fallback if fallback in {"movie", "tv"} else "movie"
             logger.warning(
                 f"[AI][FALLBACK] type='{raw_type}' 无法识别，降级为 type_hint='{media_type}'"
@@ -1176,10 +1264,14 @@ class AIAgent:
         )
 
         return {
-            "query":          query or (cleaned_name or "").strip(),
+            "query":          query or (raw_filename or cleaned_name or "").strip(),
             "type":           media_type,
-            "season":         locked_season if locked_season is not None else data.get("season"),
-            "episode":        locked_episode if locked_episode is not None else data.get("episode"),
+            "season":         data.get("season"),
+            "episode":        data.get("episode"),
             "filename_year":  (data.get("filename_year") or "").strip()[:4],
             "knowledge_year": (data.get("knowledge_year") or "").strip()[:4],
+            "confidence": schema_confidence,
+            "evidence": data.get("evidence"),
+            "episode_numbering_mode": data.get("episode_numbering_mode"),
+            "needs_review": bool(data.get("needs_review", False)),
         }

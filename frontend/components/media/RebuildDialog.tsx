@@ -1,3 +1,39 @@
+/**
+ * RebuildDialog - 补录/重构弹窗组件
+ * 
+ * 核心职责：
+ * 1. TMDB 搜索：用户输入片名 → 搜索候选列表
+ * 2. 目标选择：用户选择正确的 TMDB ID
+ * 3. 参数配置：指定重构范围（电影/全剧/单季/单集）和操作类型
+ * 4. 执行重构：调用后端 API 执行 NFO/海报/字幕重建
+ * 
+ * 工作流程：
+ * 1. 弹窗打开时重置所有状态（防止跨任务泄漏）
+ * 2. 用户输入搜索关键词 → 防抖 500ms 后调用 TMDB 搜索 API
+ * 3. 展示搜索结果列表（标题 + 年份 + 海报缩略图）
+ * 4. 用户点击候选项 → 记录选中的 TMDB ID
+ * 5. 用户点击"执行"按钮 → 调用 api.rebuildTask() 执行重构
+ * 6. 执行完成后 → 显示结果反馈并关闭弹窗
+ * 
+ * 重构模式（RebuildMode）：
+ * - 'nfo'：NFO 深度纠偏 - 清理目录杂质、重写 NFO 元数据
+ * - 'poster'：海报强制覆盖 - 从 TMDB 重新下载海报和背景图
+ * - 'subtitle'：字幕即时触发 - 立即启动字幕搜索任务
+ * 
+ * 操作范围（scope）：
+ * - 'series'：全剧范围（仅 TV 类型）
+ * - 'season'：单季范围（仅 TV 类型）
+ * - 'episode'：单集范围（仅 TV 类型）
+ * 
+ * 设计特点：
+ * - 会话状态重置：监听 open + task.id，确保弹窗每次打开都彻底重置
+ * - 防抖搜索：500ms 防抖避免频繁调用搜索 API
+ * - 生命周期清理：卸载时清理防抖定时器
+ * - 错误处理：搜索和执行失败时显示错误提示
+ * 
+ * @component
+ */
+
 'use client';
 
 import { useState, useCallback, useRef, useEffect } from 'react';
@@ -7,6 +43,12 @@ import type { Task } from '@/types';
 import { cn } from '@/lib/utils';
 import { useLanguage } from '@/hooks/useLanguage';
 
+/**
+ * 重构模式类型
+ * - 'nfo'：NFO 文件深度纠偏
+ * - 'poster'：海报强制覆盖
+ * - 'subtitle'：字幕即时触发
+ */
 export type RebuildMode = 'nfo' | 'poster' | 'subtitle';
 
 interface TmdbResult {

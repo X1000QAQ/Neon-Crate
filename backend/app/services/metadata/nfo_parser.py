@@ -1,18 +1,18 @@
 """
-nfo_parser.py — NFO 本地真理解析器
+NFO 本地真理解析器。
 
-双轨隔离架构中「自动刮削轨」的核心组件。
+职责：
+- 在自动刮削轨中优先读取本地 NFO，减少不必要的 AI / TMDB 调用。
+- 兼容 Neon Crate 自研格式、TMM 3.1.x `uniqueid` 格式、movie.nfo、tvshow.nfo 和单集同名 NFO。
+- 在 XML 解析失败时使用正则兜底抢救关键字段（tmdb_id、imdb_id、title、year）。
 
-全兼容：
-  - Neon Crate 自研格式（<tmdbid> + <imdbid> 直接节点）
-  - TMM 3.1.x 格式（movie.nfo 的 <uniqueid type="tmdb"> / <uniqueid type="imdb"> / <id>）
-  - tvshow.nfo（<tmdbid> + <imdbid> 直接节点）
+双轨隔离：
+- 自动刮削轨：允许调用 `find_nfo()`、`parse_nfo()` 和 `get_tvshow_gold_standard()`。
+- 手动核武轨：禁止依赖本模块，避免旧 NFO 污染用户显式补录 / 重构决策。
 
-支持根节点：<movie> 和 <tvshow>（兜底：任意根节点）
-
-严格遵守双轨隔离原则：
-  - 本模块只供「自动刮削轨」（perform_scrape_all_task_sync）调用
-  - 「手动核武轨」（manual_rebuild）禁止调用本模块
+容错原则：
+- 解析失败不抛异常，返回空字段字典，让调用方决定是否继续 AI / TMDB 链路。
+- 正则只用于解析第三方脏 NFO 的 XML 字段，不用于文件名语义清洗。
 """
 import re
 import logging
@@ -35,7 +35,7 @@ _SEASON_DIR_RE = re.compile(
 # 第二层：生化清洗（BOM/HTML 实体/裸 &/控制字符归一化与剔除）
 # 第三层：正则兜底（ET 彻底失败时抢救 tmdb/imdb/title/year 关键字段）
 #
-# 🚨 架构师警告（DO NOT MODIFY）：
+# 架构警告（禁止随意修改）：
 # - 此模块属于「自动刮削轨」的本地真理解析器；任何改动都可能影响 NFO 短路与防重熔断链路。
 # - 「手动核武轨 manual_rebuild」禁止调用本模块（双轨隔离）。
 # -------------------------------------------------------------------

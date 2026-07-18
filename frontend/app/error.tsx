@@ -1,3 +1,14 @@
+/**
+ * GlobalError - Next.js 全局错误页面
+ *
+ * 当前端页面渲染过程中出现未捕获异常时，Next.js 会渲染此组件。
+ * 它提供错误提示、重试按钮和返回首页入口，避免用户看到空白页。
+ *
+ * 新手提示：
+ * - `reset()` 会尝试重新渲染当前路由。
+ * - 错误对象会在 `useEffect` 中输出到控制台，便于开发排查。
+ * - 该文件必须是 Client Component，才能使用交互按钮和 Hook。
+ */
 'use client';
 
 import { useEffect } from 'react';

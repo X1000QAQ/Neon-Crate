@@ -1,9 +1,19 @@
 """
-scrape_task.py - 全量刮削任务
+scrape_task.py - 全量刮削路由与元数据归档后台任务。
 
-包含：
-1. perform_scrape_all_task_sync() — 同步刮削执行函数（线程池运行）
-2. trigger_scrape_all() — POST /scrape_all 路由
+职责：
+- 暴露 `/scrape_all` 和 `/scrape_all/status`，供前端触发并轮询全量刮削。
+- 对待处理任务执行 NFO 短路、AI 语义提炼、TMDB 搜索、防重拦截、归档和元数据写入。
+- 将复杂业务拆分为多个 `_step_*` 原子步骤，便于定位失败点和维护链路边界。
+
+语义边界：
+- 文件名解析由 AI Agent 和提示词负责；正则仅用于固定结构清理、后缀处理和路径模式判断。
+- 路径配置拥有类型权威，`movie/tv` 明确路径不会被 AI 返回值覆盖。
+- 年份使用 AI 返回的 `filename_year` 与 `knowledge_year` 证据镜像校验，不做盲目猜测。
+
+并发边界：
+- `_scrape_entry_lock` 防止并发刮削任务互相覆盖状态或重复归档。
+- 后台任务必须在 `finally` 中复位状态和释放锁。
 """
 import os
 import re
@@ -288,53 +298,42 @@ def _step_ai_extraction(
     media_type: str,
 ) -> tuple:
     """
-    原子步骤 2: AI 提炼（文件名清理 + AI 识别 + 路径权威判断）
+    原子步骤 2: AI 提炼（文件名语义识别 + 类型裁决 + 年份证据校验）
 
-    业务链路：1. 调用 AI Agent 分析文件名 -> 2. 提取查询词、年份、类型 ->
-    3. 若 AI 失败则降级使用正则清洗名 -> 4. 路径权威优先（不被 AI 覆盖）->
-    5. 年份物理验证（防止 AI 推断错误年份）
+    业务链路：1. 调用 AI Agent 分析文件名、父目录和同级文件上下文 -> 2. 提取查询词、年份、类型、季集信息 ->
+    3. 若 AI 不可用或返回结构不合约则 Fail-Fast 中断 -> 4. 路径权威优先（不被 AI 覆盖）->
+    5. 年份证据镜像校验（防止 AI 推断错误年份）
 
     Returns:
         (refined_query, refined_year, refined_type)
     """
     raw_filename = file_name or file_path.split('\\')[-1].split('/')[-1]
-    from app.services.scraper.cleaner import MediaCleaner as _MC
-    _cleaner = _MC(db_manager=db)
-
-    # ── 保护性提取：在任何正则删除之前，先物理提取 Season/Episode ──
-    # 目的：防止 clean_name() 把集数信息（如 E14）误删，
-    # 导致 AI 无法获得准确 Episode，进而触发 IMDb 查重熔断。
-    _pre_season, _pre_episode = _cleaner.extract_season_episode(raw_filename)
-    if _pre_season is not None or _pre_episode is not None:
-        logger.info(
-            f"[RegexLab] 保护性提取命中: S={_pre_season} E={_pre_episode} "
-            f"(来自原始文件名: '{raw_filename}')"
-        )
-        # 将提取结果回写到 task dict，后续所有步骤优先使用这个值
-        if _pre_season is not None and task.get("season") is None:
-            task["season"] = _pre_season
-        if _pre_episode is not None and task.get("episode") is None:
-            task["episode"] = _pre_episode
-
-    cleaned_filename = _cleaner.clean_name(raw_filename)
-    if not cleaned_filename:
-        cleaned_filename = raw_filename
-    logger.info(f"[RegexLab] 物理正则去噪完成: '{raw_filename}' -> '{cleaned_filename}'")
-
-    # ── 构建 AI 提示锚点：若已确定 S/E，注入到 AI 提示中强制锁定 ──
-    _locked_season  = task.get("season")
-    _locked_episode = task.get("episode")
-
-    # 业务链路：1. 调用 AI Agent 分析文件名 -> 2. 提取查询词、年份、类型
-    logger.info(f"[AI] 调用 AI Agent 分析文件名: {cleaned_filename}")
+    parent_dir = ""
+    sibling_files: list[str] = []
     try:
-        # 1. 异步调用 AI Agent 进行媒体识别（传入锁定的季集号防止 AI 丢弃）
+        file_path_obj = Path(file_path)
+        parent_dir = file_path_obj.parent.name if file_path else ""
+        if file_path_obj.parent.exists():
+            sibling_files = sorted(
+                p.name for p in file_path_obj.parent.iterdir()
+                if p.is_file() and p.suffix.lower() in VIDEO_EXTS_EXTENDED
+            )[:40]
+    except Exception as sibling_err:
+        logger.debug(f"[AI] 同级文件上下文收集失败，降级为空列表: {sibling_err}")
+        sibling_files = []
+
+    logger.info(
+        f"[AI] 调用 AI Agent 语义分析: raw='{raw_filename}', "
+        f"parent='{parent_dir}', siblings={len(sibling_files)}"
+    )
+    try:
         ai_result = asyncio.run(ai_agent.ai_identify_media(
-            cleaned_name=cleaned_filename,
+            raw_filename=raw_filename,
+            cleaned_name=clean_name or raw_filename,
             full_path=file_path,
+            parent_dir=parent_dir,
+            sibling_files=sibling_files,
             type_hint=media_type,
-            locked_season=_locked_season,
-            locked_episode=_locked_episode,
         ))
     except Exception as ai_err:
         logger.error(f"[AI] 引擎不可用或识别异常，触发 Fail-Fast: {ai_err}")
@@ -348,24 +347,35 @@ def _step_ai_extraction(
         )
         raise RuntimeError("ai_engine_unavailable: invalid_ai_result")
 
-    # ── 季集锁定护盾：正则预提取结果强制覆盖 AI 输出 ──
-    # 若正则已明确提取到 S/E，AI 无权修改或丢弃这两个值
-    if _locked_season is not None:
-        if ai_result.get("season") != _locked_season:
-            logger.info(
-                f"[AI][LOCK] 季号锁定：AI 返回 season={ai_result.get('season')}，"
-                f"强制覆盖为正则提取值 season={_locked_season}"
-            )
-        ai_result["season"] = _locked_season
-    if _locked_episode is not None:
-        if ai_result.get("episode") != _locked_episode:
-            logger.info(
-                f"[AI][LOCK] 集号锁定：AI 返回 episode={ai_result.get('episode')}，"
-                f"强制覆盖为正则提取值 episode={_locked_episode}"
-            )
-        ai_result["episode"] = _locked_episode
+    required_schema_fields = ("confidence", "evidence", "episode_numbering_mode")
+    missing_schema_fields = [field for field in required_schema_fields if field not in ai_result]
+    if missing_schema_fields:
+        raise RuntimeError(f"ai_schema_missing_fields: {','.join(missing_schema_fields)}")
+    if not isinstance(ai_result.get("evidence"), dict):
+        raise RuntimeError("ai_schema_invalid_evidence")
+    try:
+        ai_confidence = float(ai_result.get("confidence"))
+    except (TypeError, ValueError):
+        raise RuntimeError("ai_schema_invalid_confidence")
+    if not 0 <= ai_confidence <= 1:
+        raise RuntimeError("ai_schema_confidence_out_of_range")
+    if ai_result.get("episode_numbering_mode") not in {"absolute", "season_episode", "unknown"}:
+        raise RuntimeError("ai_schema_invalid_episode_numbering_mode")
+    
+    # 用户决策（2026-06-11）：放宽置信度阈值，让 AI 尽力识别
+    # 
+    # 业务逻辑：
+    # - 搜不到才算真失败，不应在 AI 层提前拦截
+    # - 原阈值 0.7 过于严格，导致 confidence=0.85 的结果也被拒绝
+    # - needs_review 标记也不再阻断，交给 TMDB 验证
+    # 
+    # 当前策略：
+    # - confidence < 0.3: 仅记录警告，继续搜索
+    # - TMDB 搜索失败才标记为 failed
+    if ai_confidence < 0.3:
+        logger.warning(f"[AI] 置信度极低（{ai_confidence}），仍尝试 TMDB 搜索")
 
-    # 将锁定后的季集号同步回 task dict（供后续步骤使用）
+
     if ai_result.get("season") is not None:
         task["season"] = ai_result["season"]
     if ai_result.get("episode") is not None:
@@ -448,9 +458,22 @@ def _step_ai_extraction(
     logger.info(
         f"[AI] 识别完成: query='{refined_query}' | final_year='{refined_year}' | "
         f"type='{refined_type}' | filename_year='{filename_year}' | "
-        f"knowledge_year='{knowledge_year}' (db_type='{media_type}')"
+        f"knowledge_year='{knowledge_year}' | confidence={ai_confidence} | "
+        f"episode_mode={ai_result.get('episode_numbering_mode')} (db_type='{media_type}')"
     )
-    return refined_query, refined_year, refined_type
+    return {
+        "query": refined_query,
+        "year": refined_year,
+        "type": refined_type,
+        "season": ai_result.get("season"),
+        "episode": ai_result.get("episode"),
+        "filename_year": filename_year,
+        "knowledge_year": knowledge_year,
+        "confidence": ai_confidence,
+        "evidence": ai_result.get("evidence"),
+        "episode_numbering_mode": ai_result.get("episode_numbering_mode"),
+        "needs_review": bool(ai_result.get("needs_review", False)),
+    }
 
 
 def _step_tmdb_search_and_dup_check(
@@ -497,18 +520,13 @@ def _step_tmdb_search_and_dup_check(
     # 2. 搜索结果处理与精确匹配
     best_match = results[0]
     query_lower = refined_query.lower().strip()
-    query_base = re.sub(r'[\s\-]+\d+$', '', query_lower).strip()
-    # 3. 遍历候选结果，寻找精确匹配或宽松匹配
+    # 3. 遍历候选结果，寻找精确匹配
     for candidate in results:
         orig = (candidate.get("original_title") or candidate.get("original_name") or "").lower().strip()
         name = (candidate.get("title") or candidate.get("name") or "").lower().strip()
         if orig == query_lower or name == query_lower:
             best_match = candidate
             logger.info(f"[TMDB] 精确匹配: '{candidate.get('title') or candidate.get('name')}'")
-            break
-        if query_base and (orig == query_base or name == query_base):
-            best_match = candidate
-            logger.info(f"[TMDB] 宽松匹配(去集号): '{candidate.get('title') or candidate.get('name')}'")
             break
 
     # 4. 提取 TMDB ID 和标题
@@ -576,7 +594,7 @@ def _step_tmdb_search_and_dup_check(
         )
         # 兜底：更新干净标题，防止前端显示丑陋的原始乱码
         db.update_task_title_year(task_id, title, year)
-        # 🚨 架构师警告 (DO NOT MODIFY): 核安全边界，改动极易引发死锁或路径穿越。
+        # 架构警告：这是核安全边界，改动极易引发死锁或路径穿越。
         # 当文件被判定为“物理重复”时，绝对不允许直接 return 或仅调用 `update_task_status`。
         # 必须调用 `mark_task_as_ignored_and_inherit`，该调用具有“原子语义”：
         #   1) 跨表查找同源已归档任务的 `local_poster_path`
@@ -590,7 +608,7 @@ def _step_tmdb_search_and_dup_check(
             episode=episode_num,
             tmdb_id=int(tmdb_id) if tmdb_id else None,
         )
-        # 🚨 架构师警告结束（保持原子调用，不要拆分） 
+        # 架构警告结束：保持原子调用，不要拆分。
         return None
 
     return {
@@ -704,20 +722,19 @@ def _step_archive_and_metadata(
             metadata_dir    = target_dir
         else:
             # ── Step 2: 剧集归档 ──
-            # 业务链路：1. 构建剧集根目录（标题 + 年份）-> 2. 从路径补充季号 ->
+            # 业务链路：1. 构建剧集根目录（标题 + 年份）-> 2. AI 语义 season/episode 校验 ->
             # 3. 构建 Season 子目录 -> 4. 生成目标文件名（S##E##格式）->
             # 5. 计算元数据目录（剧集根目录）
             folder_name = f"{safe_title} ({year})" if year else safe_title
-            episode_num = episode_num or 1
-            if season_num == 1 and file_path:
-                for _part in Path(file_path).parts:
-                    _m = re.search(r'(?:Season|S)\s*(\d{1,2})\b', _part, re.IGNORECASE)
-                    if _m:
-                        _path_season = int(_m.group(1))
-                        if _path_season != 1:
-                            season_num = _path_season
-                            logger.info(f"[ORG] 从路径补充季号: {file_path} -> season={season_num}")
-                        break
+            
+            if season_num is None or episode_num is None:
+                logger.error(
+                    f"[AI] TV 类型但季集号缺失: season={season_num}, episode={episode_num}, "
+                    f"task_id={task_id}, file={file_path}"
+                )
+                db.update_task_status(task_id=task_id, status="failed")
+                return None
+            
             season_folder   = f"Season {int(season_num)}"
             show_root_dir   = os.path.join(library_root, folder_name)
             target_dir      = os.path.join(show_root_dir, season_folder)
@@ -920,21 +937,75 @@ def _step_archive_and_metadata(
             local_poster_path = None
     # ── 就地补录/归档全链路 结束 ──
 
-    db.update_task_title_year(
-        task_id=task_id, title=title, year=year,
-        season=season_num if refined_type == "tv" else None
-    )
-    db.update_task_status(
-        task_id=task_id, status="archived",
-        tmdb_id=int(tmdb_id), 
-
+    from app.services.task_finalization import TaskFinalizationMetadata, finalize_task
+    
+    metadata = TaskFinalizationMetadata(
+        title=title,
+        year=year,
+        season=season_num if refined_type == "tv" else None,
+        tmdb_id=int(tmdb_id),
         imdb_id=imdb_id if imdb_id else "",
         target_path=target_path,
         local_poster_path=local_poster_path,
-        task_type=refined_type
+        task_type=refined_type,
     )
+    finalize_task(db, task_id=task_id, status="archived", metadata=metadata)
     logger.info(f"[TMDB] 已校准任务 {task_id} 的媒体类型为: {refined_type}")
     return target_path
+
+
+def _resolve_mixed_task_type(db, ai_agent, task: dict, task_id, file_name: str, file_path: str, clean_name: str) -> str:
+    """
+    瞬态 Mixed 任务 AI 裁决层
+
+    业务链路：
+    1. 在数据库事务之外调用 AI Agent 解密 mixed 真实类型 ->
+    2. 校验 AI 裁决结果必须为 movie/tv，任何异常或非法类型立即断路 ->
+    3. 原子回写真实类型到热表 tasks，并返回洗白后的媒体类型供后续管线并网
+    """
+    raw_filename = file_name or file_path.split('\\')[-1].split('/')[-1]
+    parent_dir = ""
+    sibling_files: list[str] = []
+    try:
+        file_path_obj = Path(file_path)
+        parent_dir = file_path_obj.parent.name if file_path else ""
+        if file_path_obj.parent.exists():
+            sibling_files = sorted(
+                p.name for p in file_path_obj.parent.iterdir()
+                if p.is_file() and p.suffix.lower() in VIDEO_EXTS_EXTENDED
+            )[:40]
+    except Exception as sibling_err:
+        logger.debug(f"[MIXED] 同级文件上下文收集失败，降级为空列表: {sibling_err}")
+        sibling_files = []
+
+    logger.info(f"[MIXED] 任务 {task_id} 进入瞬态裁决层: {raw_filename}")
+    ai_result = asyncio.run(ai_agent.ai_identify_media(
+        raw_filename=raw_filename,
+        cleaned_name=clean_name or raw_filename,
+        full_path=file_path,
+        parent_dir=parent_dir,
+        sibling_files=sibling_files,
+        type_hint="mixed",
+    ))
+
+    if not ai_result or not isinstance(ai_result, dict):
+        raise RuntimeError("mixed_ai_invalid_result")
+
+    resolved_type = (ai_result.get("type") or ai_result.get("media_type") or "").strip().lower()
+    if resolved_type not in {"movie", "tv"}:
+        raise RuntimeError(f"mixed_ai_invalid_type: {resolved_type}")
+
+    if ai_result.get("season") is not None:
+        task["season"] = ai_result["season"]
+    if ai_result.get("episode") is not None:
+        task["episode"] = ai_result["episode"]
+
+    if not db.update_any_task_type(task_id=task_id, is_archive=False, media_type=resolved_type):
+        raise RuntimeError("mixed_type_persist_failed")
+
+    task["type"] = resolved_type
+    logger.info(f"[MIXED] 任务 {task_id} AI 裁决完成并已并网: mixed -> {resolved_type}")
+    return resolved_type
 
 
 def _process_single_task(
@@ -964,7 +1035,34 @@ def _process_single_task(
         media_type = task.get("type", "movie")
         logger.info(f"[TMDB] 正在处理: {clean_name or file_name} (ID: {task_id})")
 
-        # 1. NFO 短路拦截
+        # 1. Mixed 瞬态拦截：AI 裁决真实类型 -> 原子回写热表 -> 洗白后并入标准管线
+        if media_type == "mixed":
+            try:
+                media_type = _resolve_mixed_task_type(
+                    db=db,
+                    ai_agent=ai_agent,
+                    task=task,
+                    task_id=task_id,
+                    file_name=file_name,
+                    file_path=file_path,
+                    clean_name=clean_name,
+                )
+            except Exception as mixed_fail:
+                logger.error(f"[MIXED] 任务 {task_id} AI 裁决失败，已阻断 TMDB 管线: {mixed_fail}")
+                try:
+                    db.update_task_status(task_id=task_id, status="failed")
+                except Exception:
+                    pass
+                try:
+                    db.update_any_task_metadata(task_id, False, sub_status="failed")
+                except Exception:
+                    try:
+                        db.update_task_sub_status(task_id, "failed")
+                    except Exception:
+                        pass
+                return False, True
+
+        # 2. NFO 短路拦截
         if _step_nfo_shortcut(db, task, file_path, task_id, clean_name):
             return True, False
 
@@ -980,9 +1078,12 @@ def _process_single_task(
 
         # 3. AI 提炼（Fail-Fast：AI 不可用时直接失败落库，不进入 TMDB）
         try:
-            refined_query, refined_year, refined_type = _step_ai_extraction(
+            semantic_result = _step_ai_extraction(
                 db, ai_agent, task, task_id, file_name, file_path, clean_name, media_type
             )
+            refined_query = semantic_result["query"]
+            refined_year = semantic_result["year"]
+            refined_type = semantic_result["type"]
         except Exception as ai_fail:
             logger.error(f"[AI] 引擎不可用或识别彻底失败，触发 Fail-Fast: {ai_fail}")
             try:
@@ -999,6 +1100,11 @@ def _process_single_task(
             return False, True
 
         # 4. TMDB 搜索与防重拦截
+        # 1. 校验进入 TMDB 的类型已完成 movie/tv 洗白 -> 2. 拒绝 mixed 瞬态泄漏 -> 3. 调用标准搜索与防重步骤
+        if refined_type not in {"movie", "tv"}:
+            logger.error(f"[MIXED] 任务 {task_id} 非法类型泄漏至 TMDB 前置层: {refined_type}")
+            db.update_task_status(task_id=task_id, status="failed")
+            return False, True
         tmdb_data = _step_tmdb_search_and_dup_check(
             db, scraper, task, task_id,
             refined_query, refined_year, refined_type, rename_lang
@@ -1006,7 +1112,81 @@ def _process_single_task(
         if not tmdb_data:
             return False, True
 
-        # 5. 物理归档 + 元数据写入
+        # 5. TMDB 防火墙：归档前校验 AI/TMDB 生成的剧集坐标真实存在
+        try:
+            from app.services.metadata.validator import validate_tmdb_metadata
+
+            validation = validate_tmdb_metadata(
+                tmdb_api_key=tmdb_api_key,
+                tmdb_id=tmdb_data.get("tmdb_id"),
+                media_type=refined_type,
+                season=tmdb_data.get("season_num"),
+                episode=tmdb_data.get("episode_num"),
+                language="zh-CN" if poster_lang == "zh" else "en-US",
+            )
+        except Exception as validation_err:
+            logger.error(f"[TMDB][FIREWALL] 校验器异常，阻断归档: task={task_id}, err={validation_err}")
+            db.update_task_status(task_id=task_id, status="failed")
+            try:
+                db.update_any_task_metadata(task_id, task.get("is_archive", False), sub_status="failed")
+            except Exception:
+                try:
+                    db.update_task_sub_status(task_id, "failed")
+                except Exception:
+                    pass
+            return False, True
+
+        if not validation.get("ok"):
+            can_semantic_rollback = (
+                refined_type == "tv"
+                and validation.get("suggested_season") == 1
+                and tmdb_data.get("season_num") not in (None, 1)
+                and semantic_result.get("episode_numbering_mode") == "absolute"
+            )
+            if can_semantic_rollback:
+                logger.info(
+                    f"[TMDB][FIREWALL] 触发语义回滚重试: task={task_id}, "
+                    f"S{tmdb_data.get('season_num')}E{tmdb_data.get('episode_num')} -> "
+                    f"S01E{tmdb_data.get('episode_num')}"
+                )
+                tmdb_data["season_num"] = 1
+                task["season"] = 1
+                retry_validation = validate_tmdb_metadata(
+                    tmdb_api_key=tmdb_api_key,
+                    tmdb_id=tmdb_data.get("tmdb_id"),
+                    media_type=refined_type,
+                    season=tmdb_data.get("season_num"),
+                    episode=tmdb_data.get("episode_num"),
+                    language="zh-CN" if poster_lang == "zh" else "en-US",
+                )
+                if retry_validation.get("ok"):
+                    validation = retry_validation
+                    logger.info(
+                        f"[TMDB][FIREWALL] 语义回滚成功: task={task_id}, "
+                        f"tmdb_id={tmdb_data.get('tmdb_id')} S01E{tmdb_data.get('episode_num')}"
+                    )
+                else:
+                    validation = retry_validation
+
+        if not validation.get("ok"):
+            logger.warning(
+                f"[TMDB][FIREWALL] 归档前校验失败，任务终止: task={task_id}, "
+                f"reason={validation.get('reason')}, "
+                f"tmdb_id={validation.get('tmdb_id')}, "
+                f"S{validation.get('season')}E{validation.get('episode')}, "
+                f"suggested_season={validation.get('suggested_season')}"
+            )
+            db.update_task_status(task_id=task_id, status="failed")
+            try:
+                db.update_any_task_metadata(task_id, task.get("is_archive", False), sub_status="failed")
+            except Exception:
+                try:
+                    db.update_task_sub_status(task_id, "failed")
+                except Exception:
+                    pass
+            return False, True
+
+        # 6. 物理归档 + 元数据写入
         target_path = _step_archive_and_metadata(
             db, task, task_id, file_path,
             tmdb_api_key, poster_lang, refined_type, tmdb_data
@@ -1053,7 +1233,8 @@ def _process_single_task(
                 pass
         return False, True
 
-    time.sleep(0.3)
+    # 🚦 限流防护：每次 AI 调用后主动等待，避免触发 Together.ai 限流（约 3-4 req/min）
+    time.sleep(3.0)
     return False, False  # 保底返回
 
 

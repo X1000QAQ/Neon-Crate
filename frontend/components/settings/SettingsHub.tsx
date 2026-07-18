@@ -1,7 +1,44 @@
+/**
+ * SettingsHub - 系统设置中心容器
+ * 
+ * 核心职责：
+ * 1. 组织五个设置 Tab（基础、路径、API、推理、人格）
+ * 2. 统一管理配置的读取、修改和保存
+ * 3. 提供全局"保存配置"按钮
+ * 4. 显示加载和保存状态
+ * 5. 提供 Toast 反馈
+ * 
+ * 设置 Tab 说明：
+ * - 基础设置：UI 语言、定时巡逻、文件大小过滤、文件格式
+ * - 路径管理：配置下载源和媒体库路径
+ * - API 密钥：TMDB、OpenSubtitles、Radarr、Sonarr 的 API 密钥
+ * - 推理引擎：配置云端和本地 LLM
+ * - AI 人格：设定 AI 名称、人格、规则等
+ * 
+ * 状态管理：
+ * - activeTab：当前选中的 Tab
+ * - toast：临时提示信息
+ * - toastTimerRef：Toast 自动消除计时器
+ * 
+ * 设计特点：
+ * - 标签化导航：通过 Tab 按钮在不同设置页面间切换
+ * - 集中保存：所有 Tab 共享一个"保存配置"按钮
+ * - 响应式设计：使用 Tailwind 的响应式类处理不同屏幕尺寸
+ * - Toast 通知：操作反馈采用临时提示而非 alert()
+ * 
+ * 数据流：
+ * 1. 加载时 → SettingsProvider 从后端拉取配置
+ * 2. 用户在各 Tab 中修改配置 → 只更新前端内存
+ * 3. 用户点击"保存配置"→ 调用 saveSettings() 持久化到后端
+ * 4. 显示成功/失败提示 → 3 秒后自动消除
+ * 
+ * @component
+ */
+
 'use client';
 
 import { useState, useRef, useCallback } from 'react';
-import { Settings, Save, FolderOpen, Key, Code, Brain, FlaskConical } from 'lucide-react';
+import { Settings, Save, FolderOpen, Key, Code, Brain } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useSettings } from '@/hooks/useSettings';
 import { useLanguage } from '@/hooks/useLanguage';
@@ -10,12 +47,11 @@ import PathsSettings from './PathsSettings';
 import APISettings from './APISettings';
 import InferenceSettings from './InferenceSettings';
 import PersonaSettings from './PersonaSettings';
-import RegexLab from './RegexLab';
 
 export default function SettingsHub() {
   const { t, setLang } = useLanguage();
   const { isLoading, isSaving, saveSettings } = useSettings();
-  const [activeTab, setActiveTab] = useState<'basic' | 'paths' | 'api' | 'regex' | 'inference' | 'persona'>('basic');
+  const [activeTab, setActiveTab] = useState<'basic' | 'paths' | 'api' | 'inference' | 'persona'>('basic');
 
   // 反馈契约：配置类操作用页内 Toast，避免 alert 与整页 reload 打断 SPA 状态
   const [toast, setToast] = useState<string | null>(null);
@@ -41,7 +77,6 @@ export default function SettingsHub() {
     { id: 'api', label: t('nav_api'), icon: Key },
     { id: 'inference', label: t('nav_inference'), icon: Brain },
     { id: 'persona', label: t('nav_persona'), icon: Code },
-    { id: 'regex', label: t('nav_regex'), icon: FlaskConical },
   ];
 
   if (isLoading) {
@@ -125,7 +160,6 @@ export default function SettingsHub() {
             {activeTab === 'api' && <APISettings t={t} />}
             {activeTab === 'inference' && <InferenceSettings t={t} />}
             {activeTab === 'persona' && <PersonaSettings t={t} />}
-            {activeTab === 'regex' && <RegexLab t={t} />}
           </div>
         </div>
       </div>

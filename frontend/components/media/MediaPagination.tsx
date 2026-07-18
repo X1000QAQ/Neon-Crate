@@ -1,5 +1,35 @@
+/**
+ * MediaPagination - 媒体列表分页组件
+ * 
+ * 核心职责：
+ * - 显示分页控制（上一页、页码按钮、下一页）
+ * - 支持快速跳转到指定页码
+ * - 显示总条数和当前页面信息
+ * 
+ * Props 说明：
+ * - currentPage：当前页码（从 1 开始）
+ * - totalPages：总页数
+ * - totalItems：总条目数
+ * - onPageChange：页码变更回调
+ * 
+ * 分页逻辑：
+ * - 最多显示 5 个页码按钮
+ * - 当前页在前 3 页时：显示 1-5
+ * - 当前页在后 3 页时：显示 (totalPages-4) 到 totalPages
+ * - 其他情况：显示 (currentPage-2) 到 (currentPage+2)
+ * - 无数据或仅 1 页时隐藏分页组件
+ * 
+ * 视觉效果：
+ * - 青色边框和发光效果
+ * - 当前页高亮显示
+ * - 禁用状态的上一页/下一页按钮（在第一/最后一页时）
+ * 
+ * @component
+ */
+
 'use client';
 
+import { useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { useLanguage } from '@/hooks/useLanguage';
 import { cn } from '@/lib/utils';
@@ -18,10 +48,44 @@ export default function MediaPagination({
   onPageChange,
 }: MediaPaginationProps) {
   const { t } = useLanguage();
+  const [jumpPage, setJumpPage] = useState('');
+  const [inputError, setInputError] = useState(false);
 
   if (totalItems === 0 || totalPages <= 1) {
     return null;
   }
+
+  const handleJumpPageChange = (value: string) => {
+    const numericValue = value.replace(/\D/g, '').slice(0, 5);
+    setJumpPage(numericValue);
+    setInputError(false);
+  };
+
+  const handleJumpPageSubmit = () => {
+    const pageNum = parseInt(jumpPage, 10);
+    
+    if (!jumpPage.trim()) {
+      setInputError(true);
+      setTimeout(() => setInputError(false), 300);
+      return;
+    }
+    
+    if (pageNum < 1) {
+      setInputError(true);
+      setTimeout(() => setInputError(false), 300);
+      return;
+    }
+    
+    const targetPage = Math.min(pageNum, totalPages);
+    onPageChange(targetPage);
+    setJumpPage('');
+  };
+
+  const handleJumpPageKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      handleJumpPageSubmit();
+    }
+  };
 
   // 生成页码数组（最多显示5个页码）
   const getPageNumbers = () => {
@@ -99,6 +163,41 @@ export default function MediaPagination({
         >
           <ChevronRight className="w-5 h-5" />
         </button>
+        
+        <div className="flex items-center gap-2 ml-6">
+          <span className="text-cyber-cyan/70 text-sm whitespace-nowrap">
+            {t('pagination_jump_to')}
+          </span>
+          <input
+            type="text"
+            value={jumpPage}
+            onChange={(e) => handleJumpPageChange(e.target.value)}
+            onKeyPress={handleJumpPageKeyPress}
+            placeholder={String(currentPage)}
+            className={cn(
+              "w-20 px-3 py-3 text-sm font-semibold text-center",
+              "bg-transparent border text-cyber-cyan",
+              "focus:outline-none transition-all placeholder-cyber-cyan/30",
+              inputError 
+                ? "border-cyber-red shadow-[0_0_20px_rgba(239,68,68,0.6)] animate-shake"
+                : "border-cyber-cyan/50 focus:border-cyber-cyan focus:shadow-[0_0_20px_rgba(6,182,212,0.6)] focus:bg-cyber-cyan/5"
+            )}
+            style={{ backdropFilter: 'blur(10px)' }}
+          />
+          <span className="text-cyber-cyan/70 text-sm">
+            {t('pagination_page_unit')}
+          </span>
+          <button
+            onClick={handleJumpPageSubmit}
+            className="bg-transparent border border-cyber-cyan text-cyber-cyan px-4 py-3 font-semibold text-sm hover:bg-cyber-cyan hover:text-black transition-all hover:scale-110"
+            style={{ 
+              backdropFilter: 'blur(10px)',
+              boxShadow: '0 0 20px rgba(6, 182, 212, 0.3)',
+            }}
+          >
+            {t('pagination_jump_btn')}
+          </button>
+        </div>
       </div>
     </div>
   );

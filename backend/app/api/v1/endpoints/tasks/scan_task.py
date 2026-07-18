@@ -1,10 +1,19 @@
 """
-scan_task.py - 物理扫描任务
+scan_task.py - 物理扫描任务路由与后台执行入口。
 
-包含：
-1. perform_scan_task_sync() — 同步扫描执行函数（由 BackgroundTasks 丢入线程池，不阻塞事件循环）
-2. trigger_scan() — POST /scan 路由
-3. get_scan_status() — GET /scan/status 路由
+职责：
+- 暴露 `/scan` 和 `/scan/status`，供前端触发扫描并轮询运行状态。
+- 在线程池中执行同步磁盘扫描，避免阻塞 FastAPI 主事件循环。
+- 根据路径配置发现下载目录和媒体库目录中的视频文件，并写入任务表。
+
+扫描边界：
+- ScanEngine 只负责发现文件和采集上下文，不负责影视语义判断。
+- 媒体类型优先来自路径配置；`mixed` 或未知类型交给后续 AI 刮削链路裁决。
+- 本模块使用固定扩展名、路径白名单和 inode 指纹防重，不恢复用户自定义文件名物理正则清洗。
+
+并发边界：
+- `_scan_entry_lock` 是物理级防重锁，防止多次点击触发并发扫盘。
+- `finally` 必须复位 `scan_status` 并释放锁，否则前端按钮会永久卡在运行态。
 """
 import os
 import time
@@ -42,8 +51,8 @@ def perform_scan_task_sync():
     使用普通同步函数而非 async def，FastAPI 的 BackgroundTasks 会自动将其
     投入外部线程池执行，避免大量同步磁盘 I/O 阻塞主事件循环。
     """
-    # ── 并发锁释放核安全（DO NOT MODIFY）──────────────────────────────
-    # 🚨 架构师警告 (DO NOT MODIFY): 核安全边界，改动极易引发死锁或路径穿越。
+    # ── 并发锁释放核安全（禁止随意修改）──────────────────────────────
+    # 架构警告：这是核安全边界，改动极易引发死锁或路径穿越。
     # - 本任务在同步线程池中运行；必须使用 `threading.Lock` 做物理并发短路。
     # - 任何异常（含磁盘写满/网络异常/未捕获错误）都必须走到 finally，确保：
     #   1) `scan_status["is_running"] = False`
@@ -263,29 +272,13 @@ def perform_scan_task_sync():
                     continue
 
                 # ==========================================
-                # 🏛️ 路径配置霸权机制（带混合目录防御）
+                # 🏛️ 路径配置霸权机制（语义解耦版）
                 # ==========================================
-                # 设计目标：解决正则引擎误判问题
-                # 
-                # 问题场景：
-                # - 文件名：Avengers.S01E01.mkv（包含 S01E01，正则判定为剧集）
-                # - 实际情况：这是电影《复仇者联盟》，文件名是误导性的
-                # - 用户已将其放入 /media/movies 目录
-                # 
-                # 解决方案：路径配置优先级 > 正则引擎猜测
-                # - 若文件位于明确配置为 "movie" 的路径，强制类型为 movie
-                # - 若文件位于明确配置为 "tv" 的路径，强制类型为 tv
-                # - 若路径配置为 "library"/"mixed"/"download"，维持正则猜测
-                # 
-                # 混合目录防御：
-                # - 用户可能将电影和剧集混放在同一目录
-                # - 此时不应强制覆盖，而是信任正则引擎的判断
+                # ScanEngine 只负责发现文件，不再理解文件。
+                # 类型只来自路径配置：movie/tv 为硬约束，mixed/未知均进入 AI 裁决。
                 # ==========================================
-                # 1. 获取正则引擎（MediaCleaner）给出的初步猜测
-                is_tv_guess = file_info.get("is_tv", False)
-                task_type = "tv" if is_tv_guess else "movie"
+                task_type = "mixed"
 
-                # 2. 查找当前文件所属的路径配置
                 file_path_normalized = os.path.normpath(file_path).lower()
                 matched_path_config = None
 
@@ -297,29 +290,29 @@ def perform_scan_task_sync():
                         matched_path_config = path_cfg
                         break
 
-                # 3. 路径霸权与混合防御逻辑
                 if matched_path_config:
                     folder_category = str(matched_path_config.get("category") or "").strip().lower()
-
-                    # 只有当路径被明确配置为纯粹的 "movie" 或 "tv" 时，才强制覆盖正则结果
-                    # 如果是 'library', 'mixed', 'download' 等，则维持正则猜测不变
                     if folder_category in ["movie", "tv"]:
-                        original_type = task_type
                         task_type = folder_category
-                        if original_type != task_type:
-                            logger.info(f"[SCAN] [路径霸权] 文件 {file_info.get('file_name')} 原类型={original_type}, 路径强制={task_type}")
+                        logger.info(f"[SCAN] [路径权威] 文件 {file_info.get('file_name')} 类型锁定为 {task_type}")
+                    elif folder_category == "mixed":
+                        task_type = "mixed"
+                        logger.info(
+                            f"[SCAN] [Mixed隔离] 文件 {file_info.get('file_name')} 已标记为 mixed，等待 AI 裁决"
+                        )
+                else:
+                    logger.info(f"[SCAN] [语义待定] 文件 {file_info.get('file_name')} 未命中明确路径配置，标记为 mixed")
 
-                # 4. 如果因路径霸权被强制认定为 movie，必须清空剧集信息
-                season_val = file_info.get("season") if task_type == "tv" else None
-                episode_val = file_info.get("episode") if task_type == "tv" else None
+                season_val = None
+                episode_val = None
 
                 # 新文件，执行数据库插入
                 task_data = {
                     "path": file_path,
                     "file_name": file_info.get("file_name"),
                     "size": file_info.get("size"),
-                    "clean_name": file_info.get("clean_name"),
-                    "year": file_info.get("year"),
+                    "clean_name": None,
+                    "year": None,
                     "type": task_type,
                     "season": season_val,
                     "episode": episode_val,
@@ -343,7 +336,7 @@ def perform_scan_task_sync():
                     if _nfo_path_scan:
                         _nfo_scan = _parse_nfo_scan(_nfo_path_scan)
                         if _nfo_scan.get("tmdb_id"):
-                            _cname = file_info.get("clean_name", "")
+                            _cname = Path(file_path).stem
                             # TV 类型：尝试金标准（tvshow.nfo）覆盖单集 episode ID
                             _gold = _get_gold(file_path) if task_type == "tv" else None
                             if _gold:
@@ -379,22 +372,7 @@ def perform_scan_task_sync():
 
                 # ── [兜底层] 失忆救援降级（仅在无 NFO 时触发）────────────
                 if not has_nfo and default_status == "archived":
-                    import re as _re_scan
-                    _fb_parent_dir = os.path.dirname(file_path)
-                    _fb_parent_name = os.path.basename(_fb_parent_dir)
-                    # 季目录层级修正
-                    if _re_scan.match(r'^(Season|S)\s*\d+$|^Specials$', _fb_parent_name, _re_scan.IGNORECASE):
-                        _fb_parent_dir = os.path.dirname(_fb_parent_dir)
-                        _fb_parent_name = os.path.basename(_fb_parent_dir)
-                    # 白嫖逻辑1：从目录名提取 clean_name / year（兜底防白板）
-                    _dir_match = _re_scan.match(r'^(.+?)\s*\((\d{4})\)\s*$', _fb_parent_name)
-                    if _dir_match:
-                        task_data["clean_name"] = _dir_match.group(1).strip()
-                        task_data["year"] = _dir_match.group(2).strip()
-                        logger.info(
-                            f"[SCAN] [失忆兜底] 从目录名提取: "
-                            f"clean_name='{task_data['clean_name']}', year={task_data['year']}"
-                        )
+                    # 仅标记存量库文件路径，片名/年份/季集不在扫描阶段解析。
                     task_data["target_path"] = file_path
 
                 # ── [通用层] 白嫖逻辑2：本地海报绑定（archived 均适用）────
@@ -430,7 +408,7 @@ def perform_scan_task_sync():
                         except Exception as archive_err:
                             logger.warning(f"[SCAN] [生命周期] archive_task 失败（不影响入库）: {archive_err}")
                     new_count += 1
-                    logger.info(f"[SCAN] 新文件入库 (status={default_status}): {file_info.get('clean_name')} (类型: {task_type})")
+                    logger.info(f"[SCAN] 新文件入库 (status={default_status}): {task_data.get('clean_name') or file_info.get('file_name')} (类型: {task_type})")
                 except Exception as insert_err:
                     logger.error(f"[SCAN] 单条记录插入失败，跳过: {file_info.get('path')} - {insert_err}")
                     continue

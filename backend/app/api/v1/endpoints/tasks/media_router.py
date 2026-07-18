@@ -1,45 +1,19 @@
 """
-media_router.py - 媒体库 CRUD 路由
+media_router.py - 媒体任务 CRUD 与列表 DTO 适配路由。
 
-功能说明：
-- 提供媒体任务的增删改查接口
-- 支持批量操作和单条操作
-- 支持搜索、过滤、分页
+职责：
+- 提供任务列表、批量删除、单条删除、全量清空和失败任务重试接口。
+- 将仓储层热表 `tasks` 与冷表 `media_archive` 数据合并为前端统一任务列表。
+- 在路由层完成 DTO 对齐，例如 `type -> media_type`、`path -> file_path`、路径分隔符规范化。
 
-核心接口：
-1. GET /tasks - 获取所有任务列表（支持搜索、过滤、分页）
-2. POST /tasks/delete_batch - 批量删除任务记录
-3. DELETE /tasks/{task_id} - 单条删除任务记录
-4. POST /tasks/purge - 全量清空任务表（核弹按钮）
-5. POST /tasks/{task_id}/retry - 重试单个失败的任务
+安全边界：
+- 删除和清空接口只删除数据库记录，不删除磁盘上的媒体文件。
+- `purge` 必须校验确认口令，避免误触发全量清空。
+- 搜索和过滤委托仓储层处理，路由层只做响应结构和前端兼容兜底。
 
-关键特性：
-
-1. 双表合并查询
-   - tasks 表：待处理任务（pending、failed 等）
-   - media_archive 表：已归档任务（archived）
-   - 自动去重：基于 path 字段去重
-
-2. 路径格式统一
-   - Windows 反斜杠 → 正斜杠
-   - 在线 URL 原样透传（http://、https://）
-   - 使用 Path.as_posix() 标准化
-
-3. 媒体类型对齐
-   - 数据库字段：type
-   - 前端期待：media_type
-   - 自动映射：type → media_type
-
-4. 状态过滤
-   - all：合并 tasks + media_archive
-   - archived：仅查 media_archive
-   - ignored：仅查 ignored 记录
-   - 其他：按状态过滤 tasks 表
-
-5. 安全删除
-   - 仅删除数据库记录
-   - 不删除物理文件
-   - 支持双表删除（tasks + media_archive）
+维护提示：
+- 前端依赖 `tasks/total/page/page_size` 响应结构，修改需同步前端。
+- 不要把持久层字段 `type`、`path` 重新暴露给前端，统一使用 `media_type` 和 `file_path`。
 """
 import logging
 from pathlib import Path
@@ -172,8 +146,13 @@ async def get_all_tasks(
             #    (前端 types/index.ts 将 created_at 定义为必填 string，后端 Optional[str] 需在此层兜底)
             if not normalized_task.get("created_at"):
                 normalized_task["created_at"] = ""
+            
+            # 5) year 字段规范化：统一转为字符串，避免前端联合类型混乱
+            if "year" in normalized_task:
+                raw_year = normalized_task.get("year")
+                normalized_task["year"] = str(raw_year).strip() if raw_year else ""
 
-            # 5) 阻断底层字段外泄：对外 DTO 不透出持久层字段名（type/path）
+            # 6) 阻断底层字段外泄：对外 DTO 不透出持久层字段名（type/path）
             #    仅保留映射后的 media_type/file_path
             normalized_task.pop("type", None)
             normalized_task.pop("path", None)

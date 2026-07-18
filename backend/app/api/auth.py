@@ -1,33 +1,19 @@
 """
-神盾计划 (Project Aegis) - 鉴权路由
+鉴权路由 - 初始化、登录、Token 校验与全局守卫。
 
-设计目标：
-- 提供完整的认证授权流程
-- 保护 API 端点免受未授权访问
-- 支持首次初始化和密码重置
-
-核心接口：
-1. GET /status - 检查系统是否已初始化
-2. POST /init - 首次初始化管理员账号（仅允许执行一次）
-3. POST /login - 登录验证并返回 JWT Token
-4. GET /verify - 验证 Token 有效性
+职责：
+- 暴露系统初始化状态、首次管理员创建、登录和 Token 校验接口。
+- 提供 `get_current_user` 全局依赖，供应用工厂保护所有业务路由。
+- 将密码哈希、JWT 签发和 Token 验证委托给 `CryptoManager`。
 
 安全机制：
-- Bcrypt 密码哈希：防止密码泄露
-- JWT Token：无状态会话管理，7 天有效期
-- 单次初始化：防止重复创建管理员账号
-- 全局依赖注入：get_current_user 保护所有业务路由
+- 首次初始化只允许执行一次，防止重复创建管理员账号。
+- 登录成功后签发 Bearer JWT，前端通过 Authorization 头访问业务接口。
+- `HTTPBearer(auto_error=False)` 让缺失凭据统一走 401，避免把未认证误报为 403。
 
-认证流程：
-1. 首次访问：检查 /status，若未初始化则调用 /init
-2. 登录：调用 /login 获取 JWT Token
-3. 访问 API：在 Authorization 头中携带 Bearer Token
-4. Token 验证：每次请求自动验证 Token 有效性
-
-依赖注入：
-- get_current_user：全局 JWT 验证依赖
-- 所有业务路由自动继承此依赖
-- 无需在每个路由手动添加认证逻辑
+路由边界：
+- 本模块不直接读写业务任务、媒体库或配置仓储。
+- 修改状态码、响应结构或守卫依赖会影响前端登录态和全局 API 访问。
 """
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends
@@ -96,8 +82,14 @@ async def login(request: LoginRequest):
 
 
 @router.get("/verify")
-async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def verify_token(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
     """验证 Token 有效性"""
+    if credentials is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing authorization token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     crypto = get_crypto_manager()
     username = crypto.verify_token(credentials.credentials)
     

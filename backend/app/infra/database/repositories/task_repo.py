@@ -1,35 +1,21 @@
 """
-task_repo.py - 任务仓储
+task_repo.py - 任务热表仓储与状态流转中心
 
-职责：管理 tasks 表的全生命周期 CRUD，包含任务创建、状态流转、查询、删除。
+职责：
+- 管理 `tasks` 热表的创建、查询、状态更新、删除和批量清空。
+- 为扫描、刮削、字幕、媒体墙和系统启动清理提供任务数据读写能力。
+- 当任务状态更新为 `archived` 时，委托 `ArchiveRepo.archive_task()` 将记录移入冷表。
 
-迁入方法（原 db_manager.py）：
-  - add_task                        (原行 440)
-  - insert_task                     (原行 485)
-  - is_processed                    (原行 450)
-  - get_task_id_by_path             (原行 457)
-  - get_task_status_by_path         (原行 465)
-  - check_task_exists_by_path       (原行 473)
-  - update_task_status              (原行 504)
-  - update_task_title_year          (原行 544)
-  - get_tasks_needing_scrape        (原行 640)
-  - get_tasks_needing_subtitles     (原行 650)
-  - reset_orphan_pending_tasks      (原行 976)
-  - delete_tasks_by_ids             (原行 921)
-  - delete_task                     (原行 940)
-  - clear_all_tasks                 (原行 959)
-  - delete_tasks_and_archive_by_ids (原行 829)
-  - delete_task_and_archive_by_id   (原行 877)
+关键状态：
+- `pending`：扫描入库后等待刮削。
+- `scraped`：已获取元数据但尚未完成最终归档。
+- `archived`：归档完成，会触发冷热表流转。
+- `failed`：处理失败，可重试或重构。
+- `ignored`：重复文件或用户忽略，前端会以 VHS 故障视觉层展示。
 
-Impact 分析（2026-03-12）：
-  update_task_status        → CRITICAL (2 direct: perform_scrape_all_task_sync + retry_task)
-  get_tasks_needing_scrape  → HIGH     (1 direct: perform_scrape_all_task_sync)
-  insert_task               → LOW      (1 direct: perform_scan_task → cron_scanner_loop)
-  迁移安全：外观层接口不变，所有调用方零感知。
-
-跨域依赖：
-  update_task_status 在 status='archived' 时调用 archive_task（ArchiveRepo）。
-  采用方案A：构造注入 archive_repo，避免循环依赖。
+维护提示：
+- 这里是任务生命周期核心，任何 SQL 字段、状态值或主键语义变化都会影响多条业务链路。
+- 本文件不负责文件名语义清洗；入库时 `clean_name` 只是上游传入的兼容字段。
 """
 import logging
 from datetime import datetime, timedelta
@@ -41,7 +27,17 @@ logger = logging.getLogger(__name__)
 
 
 class TaskRepo(BaseRepository):
-    """任务仓储：管理 tasks 表的全生命周期 CRUD"""
+    """
+    任务热表仓储。
+
+    管理 `tasks` 表中的活跃任务生命周期：
+    - 扫描入库。
+    - 刮削和字幕状态更新。
+    - 忽略、失败、归档和删除。
+    - 与 `ArchiveRepo` 协作完成冷热表流转。
+
+    本仓储不访问文件系统，只维护数据库状态。
+    """
 
     def __init__(self, get_conn_fn, db_lock, config_path: str = "data/config.json",
                  secure_keys_path: str = "data/secure_keys.json", archive_repo=None):
@@ -436,6 +432,43 @@ class TaskRepo(BaseRepository):
             conn.execute("UPDATE tasks SET is_active = ? WHERE id = ?", (int(is_active), task_id))
             conn.commit()
 
+    def update_any_task_type(self, task_id: int, is_archive: bool, media_type: str) -> bool:
+        """
+        通用双表媒体类型原子更新（根据 is_archive 决定写热表还是冷表）
+
+        业务链路：
+        1. 校验 media_type 白名单，阻断非法枚举与 SQL 注入 ->
+        2. 根据 is_archive 选择固定目标表（tasks 或 media_archive）和主键字段 ->
+        3. 使用参数化 SQL 原子回写 type 并提交，返回是否命中记录
+        """
+        normalized_type = (media_type or "").strip().lower()
+        if normalized_type not in {"movie", "tv", "mixed"}:
+            raise ValueError(f"invalid media_type: {media_type}")
+
+        with self.db_lock:
+            conn = self._get_conn()
+            table = "media_archive" if is_archive else "tasks"
+            pk_field = "original_task_id" if is_archive else "id"
+            try:
+                cursor = conn.execute(
+                    f"UPDATE {table} SET type = ? WHERE {pk_field} = ?",
+                    (normalized_type, task_id),
+                )
+                conn.commit()
+                if cursor.rowcount == 0:
+                    logger.warning(
+                        f"[TaskRepo] ⚠️ update_any_task_type 零更新: table={table}, {pk_field}={task_id}"
+                    )
+                else:
+                    logger.info(
+                        f"[TaskRepo] update_any_task_type: table={table}, {pk_field}={task_id}, type={normalized_type}"
+                    )
+                return cursor.rowcount > 0
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"[TaskRepo] update_any_task_type 失败: {e}", exc_info=True)
+                raise
+
     def update_any_task_metadata(
         self,
         task_id: int,
@@ -460,8 +493,8 @@ class TaskRepo(BaseRepository):
         3. 执行原子级 UPDATE 并提交事务 -> 
         4. 记录更新结果或异常
         
-        ⚠️ ARCHITECT WARNING: 当前采用 is not None 过滤，意味着传入 None 会被跳过，
-        无法实现 DB 字段的 NULL 清空。未来若需擦除数据，必须重构为字典传入模式。
+        架构警告：当前采用 `is not None` 过滤，意味着传入 None 会被跳过，
+        无法实现数据库字段的 NULL 清空。未来若需擦除数据，必须重构为字典传入模式。
         """
         with self.db_lock:
             conn = self._get_conn()

@@ -1,3 +1,38 @@
+/**
+ * MediaWall - 媒体任务列表容器
+ * 
+ * 核心职责：
+ * 1. 加载并展示所有媒体文件任务列表
+ * 2. 支持多维度过滤和搜索
+ * 3. 分页显示任务（每页 20 条）
+ * 4. 提供扫描、刮削、字幕等批量操作
+ * 5. 支持删除和批量删除任务
+ * 
+ * 数据流：
+ * 1. 组件初始化 → 立即加载任务列表
+ * 2. 用户切换过滤条件 → 触发新的任务加载
+ * 3. 用户搜索 → 防抖 500ms 后重新加载
+ * 4. 显示任务表格 → 支持展开/折叠树形结构
+ * 
+ * 关键特性：
+ * - 前端分页：一次性加载全量任务，本地分页显示
+ * - 防抖搜索：避免频繁 API 调用
+ * - AbortController：新请求时自动取消旧请求
+ * - useCallback 优化：所有回调都包裹，防止子组件不必要重渲染
+ * - Toast 通知：操作成功/失败时显示临时提示
+ * 
+ * 状态管理：
+ * - tasks：所有任务数组
+ * - page：当前页码
+ * - statusFilter/typeFilter：过滤条件
+ * - searchKeyword/debouncedKeyword：搜索关键词
+ * - scanning/scraping/findingSubs：后台任务运行状态
+ * - selectedIds：批量删除时选中的任务 ID
+ * - purgeModalOpen：清空所有任务的确认弹窗
+ * 
+ * @component
+ */
+
 'use client';
 
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
@@ -7,6 +42,7 @@ import { useLanguage } from '@/hooks/useLanguage';
 import MediaPagination from './MediaPagination';
 import MediaTable from './MediaTable';
 import MediaToolbar from './MediaToolbar';
+
 const PAGE_SIZE = 20;
 
 export default function MediaWall() {

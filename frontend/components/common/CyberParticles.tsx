@@ -1,3 +1,14 @@
+/**
+ * CyberParticles - 全局赛博粒子背景
+ *
+ * 负责在页面底层绘制轻量 Canvas 背景动画，包括字符雨和方块粒子。
+ * 它只提供视觉氛围，不参与任何业务状态，也不读取配置、日志或网络数据。
+ *
+ * 新手提示：
+ * - 该组件应保持“纯绘制”职责，不要在这里加入业务逻辑。
+ * - 动画使用 `requestAnimationFrame`，卸载时必须清理。
+ * - 避免使用 React state 驱动动画，否则会造成高频重渲染。
+ */
 'use client';
 import { useEffect, useRef } from 'react';
 

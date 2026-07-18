@@ -1,3 +1,43 @@
+/**
+ * NeuralConfirmModal - 通用确认弹窗组件
+ * 
+ * 核心职责：
+ * 1. 显示重要操作的确认弹窗
+ * 2. 支持"默认"和"警告"两种视觉风格
+ * 3. 使用 createPortal 挂载到 document.body（避免层叠上下文问题）
+ * 4. 支持 Escape 键快速关闭
+ * 5. 管理页面滚动锁定（防止弹窗后面的页面滚动）
+ * 
+ * Props 说明：
+ * - isOpen：弹窗是否打开
+ * - title：弹窗标题
+ * - message：确认提示文本
+ * - confirmLabel：确认按钮文本（默认："Confirm"）
+ * - cancelLabel：取消按钮文本（默认："Cancel"）
+ * - variant：视觉风格（'default' 青色 | 'warning' 橙色）
+ * - onConfirm：确认按钮回调
+ * - onCancel：取消按钮回调
+ * 
+ * 视觉效果：
+ * - variant='default'：青色边框 + 青色发光 + 青色确认按钮
+ * - variant='warning'：橙色边框 + 橙色发光 + 橙色确认按钮
+ * - 全屏半透明黑色背景 + 毛玻璃效果
+ * - 中央居中显示的弹窗面板
+ * 
+ * 交互特性：
+ * - 点击背景区域可关闭弹窗
+ * - 按 Escape 键可快速关闭
+ * - 两个按钮提供明确的选择
+ * 
+ * 使用场景：
+ * - 格式重置确认
+ * - 数据库清空确认
+ * - 批量删除确认
+ * - 其他重要操作确认
+ * 
+ * @component
+ */
+
 'use client';
 
 import { useEffect, useRef } from 'react';

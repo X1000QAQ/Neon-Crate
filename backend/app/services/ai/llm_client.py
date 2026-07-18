@@ -1,12 +1,21 @@
 """
-LLM 客户端 - 双引擎支持（云端 API + 本地 Ollama）
-功能：
-1. 云端 API 支持（OpenAI/DeepSeek 兼容接口）
-2. 本地 Ollama 支持
-3. 自动重试机制
-4. 统一的调用接口
-5. 协议校验层：force_json 参数强制结构化输出
-6. v1.0.0 三阶自愈调度：asyncio 非阻塞超时 + 状态感知级联退避 + 血缘溯源
+LLM 客户端 - 云端 / 本地双引擎统一调用层。
+
+职责：
+- 屏蔽云端 OpenAI 兼容接口与本地 Ollama 接口差异，向上提供统一 `call_llm()`。
+- 根据配置开关和 `prefer_local` 决定首选引擎，并在失败时执行状态感知降级。
+- 为结构化任务提供 `force_json` 支持，帮助上层获得可校验的 JSON 输出。
+- 记录最近一次调用的引擎、模型、降级情况和耗时，便于日志追踪。
+
+超时与重试边界：
+- 外层 `asyncio.wait_for` 负责协程级熔断，避免请求无限挂起。
+- 内层 httpx timeout 负责传输层保护，略大于外层超时时间。
+- 云端请求支持重试和 429 指数退避；本地模型固定单次尝试，失败后优先让云端补位。
+
+返回语义：
+- 成功时返回模型文本内容。
+- 配置缺失且无法补位时返回 `error:` 文本，由调用方决定如何降级。
+- 所有引擎均不可用时抛出 `RuntimeError`，由 Agent 层兜底。
 """
 import time
 import httpx
@@ -15,13 +24,22 @@ import logging
 
 logger = logging.getLogger(__name__)
 # ── v1.0.0 参数对齐表 ──────────────────────────────────────────────
-_LOCAL_ASYNCIO_TIMEOUT = 30.0   # asyncio.wait_for 外层熔断（本地）
-_CLOUD_ASYNCIO_TIMEOUT = 20.0   # asyncio.wait_for 外层熔断（云端）
-_LOCAL_HTTPX_TIMEOUT   = 45.0   # httpx 传输层超时（1.5x asyncio，确保不先于外层断开）
-_CLOUD_HTTPX_TIMEOUT   = 30.0   # httpx 传输层超时（1.5x asyncio）
+_LOCAL_ASYNCIO_TIMEOUT = 60.0   # asyncio.wait_for 外层熔断（本地）
+_CLOUD_ASYNCIO_TIMEOUT = 45.0   # asyncio.wait_for 外层熔断（云端）—— Qwen3-235B 正常响应 12-18s，留足余量
+_LOCAL_HTTPX_TIMEOUT   = 75.0   # httpx 传输层超时（1.25x asyncio，确保不先于外层断开）
+_CLOUD_HTTPX_TIMEOUT   = 60.0   # httpx 传输层超时（1.25x asyncio）
 
 class LLMClient:
-    """LLM 客户端 - 统一的 LLM 调用接口（v1.0.0 三阶自愈版）"""
+    """
+    LLM 客户端。
+
+    本类是所有大模型请求的唯一出口，负责：
+    - 读取云端 / 本地模型配置。
+    - 构造 OpenAI 兼容请求 payload。
+    - 执行超时、重试、429 退避和引擎降级。
+
+    注意：本类不理解业务意图，也不校验模型输出字段；结构化输出的业务校验由 `Dispatcher` 完成。
+    """
     def __init__(self, db_manager):
         """
         初始化 LLM 客户端

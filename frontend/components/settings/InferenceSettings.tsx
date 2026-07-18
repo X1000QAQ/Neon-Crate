@@ -1,3 +1,14 @@
+/**
+ * InferenceSettings - AI 推理引擎配置页
+ *
+ * 负责配置云端 LLM 与本地 Ollama 两套推理引擎，包括启用状态、接口地址、模型名和 API Key。
+ * 该页面输入项较多且可能粘贴长文本，因此采用本地缓冲 + onBlur 同步，减少全局 Context 重绘。
+ *
+ * 新手提示：
+ * - 云端引擎适合高质量对话和复杂推理。
+ * - 本地引擎适合离线环境或承担部分文件分析任务。
+ * - 输入框内容先写入本地 state，失焦后才通过 `updateSetting()` 写入全局配置。
+ */
 'use client';
 
 import { useState, useEffect, useRef } from 'react';

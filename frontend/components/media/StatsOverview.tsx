@@ -82,7 +82,7 @@ export default function StatsOverview() {
       const data = await api.getStats();
       setStats(data);
     } catch {
-      showToast('加载统计数据失败，请刷新重试');
+      showToast(t('error_load_tasks').replace('{detail}', 'stats'));
     } finally {
       setLoading(false);
     }
@@ -119,7 +119,7 @@ export default function StatsOverview() {
 
       void pollStats(Date.now());
     } catch (error) {
-      showToast('扫描触发失败，请重试');
+      showToast(t('scan_trigger_failed'));
     } finally {
       setScanning(false);
     }
@@ -131,7 +131,7 @@ export default function StatsOverview() {
       await api.triggerScrapeAll();
       setTimeout(() => { loadStats().catch(() => showToast('刮削后刷新统计失败')); }, 1000);
     } catch (error) {
-      showToast('刮削触发失败，请重试');
+      showToast(t('msg_scrape_trigger_failed'));
     } finally {
       setScraping(false);
     }
@@ -143,7 +143,7 @@ export default function StatsOverview() {
       await api.triggerFindSubtitles();
       setTimeout(() => { loadStats().catch(() => showToast('字幕任务后刷新统计失败')); }, 1000);
     } catch (error) {
-      showToast('字幕任务触发失败，请重试');
+      showToast(t('msg_subtitle_task_trigger_failed'));
     } finally {
       setFindingSubs(false);
     }

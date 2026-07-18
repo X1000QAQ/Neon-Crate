@@ -1,20 +1,20 @@
 """
-AI 对话端点 - Agent API
+AI Agent 路由 - 对话、意图分流与授权执行。
 
-提供 AI 助手的对话能力，支持：
-1. 自然语言交互
-2. 意图识别与指令下发
-3. 系统状态查询
+职责：
+- 接收用户自然语言消息，调用 AI Agent 完成意图识别和回复生成。
+- 对 SCAN / SCRAPE / SUBTITLE 等低风险口令执行后台任务分发。
+- 对 DOWNLOAD 等高风险意图返回 `PendingActionPayload`，等待前端确认后再执行。
 
-AI 控制链路架构：
-- 协议约束层：llm_client.py force_json + AIIntentModel Pydantic 校验
-- 意图审计层：AIActionEnum 白名单 + Dispatcher 频率管控
-- 口令即执行：SCAN/SCRAPE/SUBTITLE 意图在 /chat 端点直接分发后台任务
-- 授权决策层：DOWNLOAD 意图返回 PendingActionPayload，前端渲染全屏确认界面
+控制链路：
+- 协议约束层：LLM 输出经过 JSON 约束和 Pydantic 校验。
+- 意图审计层：`AIActionEnum` 白名单过滤非法 action。
+- 频率管控层：`Dispatcher.check_cooldown()` 只读预检，`record_execution()` 成功分发后写入冷却时间。
+- 授权决策层：下载请求先返回确认载荷，`/confirm` 收到用户授权后才调用 Servarr。
 
-执行状态管控原则：
-- check_cooldown() 为只读预检，不写入时间戳
-- record_execution() 为唯一的冷却时间戳写入入口，在任务成功分发后调用
+维护提示：
+- `/chat` 中的 `pending_action` 不代表下载已执行，只代表等待用户确认。
+- 不要绕过 `AIActionEnum` 白名单直接执行模型输出的动作。
 """
 import asyncio
 import logging

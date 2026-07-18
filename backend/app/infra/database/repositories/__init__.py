@@ -1,21 +1,17 @@
 """
-repositories 包 - DatabaseManager 的 Repository 模式拆分层
+数据库仓储包入口。
 
-架构说明：
-- BaseRepository: 所有 Repository 的基类，共享连接池和锁
-- 各 Repository 通过构造注入获得 _get_conn 和 db_lock
-- DatabaseManager 作为外观类（Facade），内部委托给各 Repository
-- 对外接口完全不变，所有调用方无需修改任何 import
+Repository 拆分：
+- `BaseRepository`：共享连接获取函数、数据库锁和配置路径。
+- `PathRepo`：管理下载目录和媒体库路径配置。
+- `ConfigRepo`：管理普通配置、敏感密钥和提示词文件化。
+- `StatsRepo`：提供仪表盘、媒体墙和重复检测只读查询。
+- `ArchiveRepo`：管理冷表和冷热表归档流转。
+- `TaskRepo`：管理热表任务生命周期。
 
-拆分阶段：
-  Step 1 (当前): 建立目录和 BaseRepository 基类
-  Step 2: path_repo.py   — 路径管理仓储
-  Step 3: config_repo.py — 配置仓储
-  Step 4: stats_repo.py  — 统计仓储
-  Step 5: archive_repo.py — 归档仓储
-  Step 6: task_repo.py   — 任务仓储
-  Step 7: db_manager.py 改造为外观层
-  Step 8: npx gitnexus analyze --force 重建索引
+架构边界：
+- `DatabaseManager` 是外观层，负责对旧调用方保持兼容。
+- 各 Repository 不自行创建 SQLite 连接，只使用注入的线程级连接和锁。
 """
 
 from .base import BaseRepository

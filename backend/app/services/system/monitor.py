@@ -1,16 +1,16 @@
 """
-系统监控服务 - Monitor Service
+系统监控服务 - 磁盘、CPU 和外部服务心跳快照。
 
-功能说明：
-1. 磁盘空间监控：实时获取磁盘使用情况
-2. CPU 使用率监控：获取系统 CPU 占用
-3. 服务心跳检测：检查 Radarr/Sonarr 服务可用性
+职责：
+- 读取宿主运行环境的磁盘容量和 CPU 使用率。
+- 检查 Radarr / Sonarr 的 `/api/v3/system/status` 心跳。
+- 为 AI 系统状态汇报提供真实物理世界数据，避免模型编造运行状态。
+- 使用 30 秒 TTL 缓存降低磁盘 I/O 和外部网络请求频率。
 
-设计目标：
-- 为 AI 提供物理世界的"触觉"
-- 支持预警阈值判断（磁盘 < 50GB 标记 CRITICAL）
-- 异步心跳检测，不阻塞主流程
-- 30 秒 TTL 缓存，避免频繁 I/O 和网络请求
+返回边界：
+- 服务未配置时返回 `NOT_CONFIGURED`。
+- 心跳超时或异常时返回 `OFFLINE`，不向上抛出网络异常。
+- 磁盘监控失败时返回 `UNKNOWN`，保证状态接口可继续响应。
 """
 import shutil
 import psutil
@@ -23,7 +23,15 @@ logger = logging.getLogger(__name__)
 
 
 class MonitorService:
-    """系统监控服务（带 30 秒 TTL 缓存）"""
+    """
+    系统监控服务。
+
+    对外提供：
+    - `get_system_status()`：异步完整快照，含缓存。
+    - `get_disk_summary()`：同步磁盘摘要，适合快速展示。
+
+    本类不写数据库，只读取配置并执行只读系统 / 网络探测。
+    """
     
     def __init__(self, db_manager):
         """

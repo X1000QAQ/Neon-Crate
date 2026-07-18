@@ -1,3 +1,29 @@
+/**
+ * LanguageSelector - 语言双按钮切换组件
+ * 
+ * 核心职责：
+ * - 显示中文/英文两个切换按钮
+ * - 实时反馈当前选中的语言
+ * - 通过 onChange 回调通知父组件
+ * 
+ * Props 说明：
+ * - label：显示在上方的标签文本
+ * - description：标签下方的描述文字
+ * - value：当前选中的语言（'zh' 或 'en'）
+ * - onChange：语言切换时的回调函数
+ * - t：翻译函数（用于获取本地化的语言名称）
+ * 
+ * 视觉效果：
+ * - 已选中：青色发光边框 + 背景填充 + 阴影
+ * - 未选中：灰色边框 + 透明背景 + hover 效果
+ * 
+ * 使用场景：
+ * - BasicSettings Tab 中的 UI 语言切换
+ * - 多语言偏好设置（字幕语言、海报语言等）
+ * 
+ * @component
+ */
+
 'use client';
 import { cn } from '@/lib/utils';
 

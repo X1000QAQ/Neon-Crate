@@ -1,3 +1,35 @@
+/**
+ * BasicSettings - 基础设置 Tab
+ * 
+ * 核心职责：
+ * 1. 显示 UI 语言切换（中文/英文）
+ * 2. 配置定时巡逻（自动扫描间隔）
+ * 3. 设置文件大小过滤
+ * 4. 管理支持的文件格式（视频、字幕）
+ * 5. 处理 AI 规则和格式的重置
+ * 
+ * 关键功能：
+ * - 语言双按钮切换：使用 NeuralCoreSwitch 组件
+ * - 多语言偏好设置：字幕语言、海报语言、重命名语言
+ * - 文件格式重置：恢复为系统默认值（需要二次确认）
+ * - 登出功能：清除 Token 并返回首页
+ * 
+ * Props：
+ * - t：翻译函数（用于获取本地化文本）
+ * 
+ * 状态管理：
+ * - formatResetModal：格式重置确认弹窗状态
+ * - resetting：是否正在执行重置操作
+ * 
+ * 组件依赖：
+ * - NeuralCoreSwitch：神经核心开关组件（用于语言切换）
+ * - NeuralInput/NeuralSection/NeuralSelect：神经原子 UI 组件
+ * - NeuralConfirmModal：通用确认弹窗
+ * - useSettings Hook：访问全局配置
+ * 
+ * @component
+ */
+
 'use client';
 
 import { useState } from 'react';

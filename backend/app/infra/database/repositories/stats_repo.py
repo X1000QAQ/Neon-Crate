@@ -1,20 +1,19 @@
 """
-stats_repo.py - 统计仓储
+stats_repo.py - 媒体墙与仪表盘只读统计仓储
 
-职责：提供仪表盘和媒体库的统计数据查询，全部为只读操作，零副作用。
+职责：
+- 提供仪表盘统计、媒体墙列表、同源海报查找和媒体重复检测能力。
+- 通过热表 `tasks` 与冷表 `media_archive` 的联合查询，向前端提供统一任务视图。
+- 为 AI 状态汇报、本地搜索和扫描防重提供只读数据来源。
 
-迁入方法（原 db_manager.py）：
-  - get_dashboard_stats   (原行 625)
-  - get_all_data          (原行 561)
-  - check_imdb_id_exists  (原行 613)
+数据契约：
+- 冷表记录对外使用 `original_task_id` 映射为 `id`，与热表任务 ID 保持同一语义。
+- 默认隐藏 `ignored` 记录，只有显式传入 `include_ignored=True` 时才返回。
+- 剧集重复检测必须精确到 `season` + `episode`，避免同一 IMDb ID 的不同集被误判为重复。
 
-Impact 分析（2026-03-12）：
-  get_dashboard_stats  → HIGH  (1 direct: get_stats, 4 processes)
-  get_all_data         → CRITICAL (3 direct: _generate_llm_response/_get_system_stats/get_all_tasks, 10 processes)
-  check_imdb_id_exists → LOW  (0 direct callers)
-  迁移安全：外观层接口不变，所有调用方零感知。
-
-依赖：_get_conn()、db_lock（均通过 BaseRepository 注入）
+维护提示：
+- 本仓储理论上应保持只读，除查询外不要加入写操作。
+- 搜索条件必须使用 `_like()` 转义，防止 `%` 和 `_` 被当作通配符扩大匹配范围。
 """
 from typing import Any, Dict, List, Optional
 
@@ -22,7 +21,17 @@ from .base import BaseRepository
 
 
 class StatsRepo(BaseRepository):
-    """统计仓储：提供仪表盘和媒体库统计数据，只读操作"""
+    """
+    只读统计仓储。
+
+    提供面向前端和 AI 状态汇报的统一数据视图：
+    - 仪表盘计数。
+    - 热表 + 冷表媒体墙列表。
+    - 同源海报继承查询。
+    - IMDb / 季 / 集维度的重复检测。
+
+    除查询外不应加入写操作，避免统计层承担状态流转职责。
+    """
 
     def get_dashboard_stats(self) -> Dict[str, int]:
         """获取仪表盘统计数据（movies/tv_shows/pending/completed）"""
@@ -77,10 +86,12 @@ class StatsRepo(BaseRepository):
             # ── Step 3: 应用搜索过滤（可选）──
             # 业务链路：1. 若有搜索关键词，则在 file_name / clean_name / title 中模糊匹配 -> 
             # 2. 使用 WITH 子句包装 UNION ALL 查询 -> 3. 在 WHERE 中应用搜索条件
+            # 🛡️ SQL 注入防护：使用 _like() 转义通配符，防止 % 和 _ 被解释为 SQL 通配符
             if search_keyword:
+                safe_pattern = self._like(search_keyword)
                 cursor = conn.execute(
                     f"WITH combined AS ({base_query}) SELECT * FROM combined WHERE file_name LIKE ? OR clean_name LIKE ? OR title LIKE ? ORDER BY created_at DESC",
-                    (f"%{search_keyword}%", f"%{search_keyword}%", f"%{search_keyword}%")
+                    (safe_pattern, safe_pattern, safe_pattern)
                 )
             else:
                 # ── Step 4: 无搜索条件时直接返回所有记录 ──

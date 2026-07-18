@@ -1,15 +1,15 @@
 """
-default_config.py - 代码即配置（Code as Config）
+default_config.py - 代码即配置的出厂默认值
 
-架构说明：
-  - 这是系统唯一的出厂设置种子，彻底取代 data/defaults.json
-  - 优势：不会被误删、随代码版本管理、IDE 可追踪引用
-  - 用途：ConfigRepo._load_defaults() 直接返回此常量
-         冷启动注入、一键重置、get_config 兜底均依赖此处
+职责：
+- 提供系统冷启动、一键重置和配置兜底所需的默认配置。
+- 集中保存 AI 人格、归档专家规则、意图路由规则和默认格式扩展名。
+- 作为 `ConfigRepo._load_defaults()` 的唯一数据来源，取代容易丢失的外部 defaults 文件。
 
-维护规则：
-  - 修改 AI 规则 / 正则规则时，同步更新此文件
-  - 敏感密钥（API Key 等）禁止写入此文件
+维护边界：
+- 禁止写入真实 API Key、Token、密码等敏感信息。
+- AI 提示词中的“物理看到的年份”是自然语言证据要求，不是“物理正则功能”。
+- 当前系统不再支持用户配置文件名清洗正则；语义清洗由 AI 规则和后续刮削链路完成。
 """
 
 DEFAULT_CONFIG: dict = {
@@ -33,7 +33,7 @@ DEFAULT_CONFIG: dict = {
         "剧集：强制对齐首播年。即使是《庆余年 S02 (2024)》，year 必须填写第一季的首播年份 2019，以适配 TMDB first_air_date_year 索引。\n"
         "翻译去幻觉 (No Literal Translation)：禁止单词直译。将 5 Centimeters Per Second 映射为官方译名 秒速5厘米，严禁输出 5厘米-per-秒。\n"
         "【强制输出契约 - 必须严格遵守】\n"
-        "你必须且只能输出包含以下 6 个键的 JSON 对象，禁止增减字段：\n\n"
+        "你必须且只能输出包含以下 10 个键的 JSON 对象，禁止增减字段：\n\n"
         "1. query (字符串，必填)：\n"
         "   - 华语优先：华语片必须输出官方中文全称，严禁拼音或中英混合。\n"
         "   - 英文权重：对于非华语片，若文件名含标准英文名，优先使用英文名（如 V for Vendetta），其在 TMDB 中的权重最高。\n"
@@ -48,11 +48,22 @@ DEFAULT_CONFIG: dict = {
         "2. type (字符串，必填)：\n"
         "   - 解决'什么物种'的问题，是数据库索引的必填项\n"
         '   - 取值："movie"（电影）/ "tv"（剧集）/ "IGNORE"（纯广告/废片）\n\n'
-        "3. season (整数，可选)：\n"
-        "   - 仅剧集需要，是剧集定位的必要索引\n"
-        "   - 如果是剧集但无法确定季数，默认为 1\n\n"
-        "4. episode (整数，可选)：\n"
-        "   - 仅剧集需要，是剧集定位的必要索引\n\n"
+        "3. season (整数，TV 必填)：\n"
+        "   - 仅剧集需要，是归档路径和 TMDB 查询的唯一依据\n"
+        "   - 后端不做任何修正；你的输出即最终结果，错了就归错档\n"
+        "   - 判断优先级（按权重由高到低）：\n"
+        "     ① 文件名含明确 S##/Season N/第N季/Nx → season=N\n"
+        "     ② parent_dir 或祖先目录名含 Season N/S0N → season=N\n"
+        "     ③ 文件名仅含纯数字后缀（01/02/15），或 sibling_files 呈连号序列 → episode_numbering_mode=absolute，season=1\n"
+        "     ④ 确实无任何证据 → season=1，needs_review=true\n"
+        "   - 纯数字（02、10）绝不单独充当季号证据\n\n"
+        "4. episode (整数，TV 必填)：\n"
+        "   - 仅剧集需要，是归档路径和防重校验的唯一依据\n"
+        "   - 后端不做任何修正；你的输出即最终结果\n"
+        "   - 判断优先级：\n"
+        "     ① 文件名含 E##/第N集/NxM → episode=M\n"
+        "     ② episode_numbering_mode=absolute 时，文件名或 sibling_files 中的连号数字即集号\n"
+        "     ③ 无法确定 → needs_review=true；禁止输出 null 或 0\n\n"
         "5. filename_year (字符串，必填，可为空)：\n"
         "   - 你从【原始文件路径字符串】中物理看到的 4 位数字年份。\n"
         "   - 只做机械提取，不做任何判断或纠正。\n"
@@ -68,6 +79,22 @@ DEFAULT_CONFIG: dict = {
         "   - 示例：《V字仇杀队》→ knowledge_year = \"2006\"\n"
         "   - 示例：《庆余年》第二季 → knowledge_year = \"2019\"（第一季首播年）\n"
         "   - 示例：《The Boys》第三季 → knowledge_year = \"2019\"\n\n"
+        "7. confidence (数字，必填)：\n"
+        "   - 0 到 1 之间的小数，表示你对 query/type/season/episode/year 的总体置信度。\n"
+        "   - 低于 0.70 时必须设置 needs_review=true。\n\n"
+        "8. evidence (对象，必填)：\n"
+        "   - 解释每个关键字段的证据来源。建议包含 query_source、type_source、season_source、episode_source、year_source、sibling_pattern。\n"
+        "   - evidence 必须是 JSON 对象，禁止写成字符串。\n\n"
+        "9. episode_numbering_mode (字符串，必填)：\n"
+        "   - 取值只能是 absolute / season_episode / unknown。\n"
+        "   - S02E03、Season 2 Episode 3、2x03 属于 season_episode。\n"
+        "   - Cyberpunk Edgerunners 02、Frieren 15、同级文件 01/02/03 连号属于 absolute。\n\n"
+        "10. needs_review (布尔值，必填)：\n"
+        "   - 当证据不足、集号不确定、置信度低或可能存在多候选时为 true，否则 false。\n\n"
+        "【绝对集号工业契约】\n"
+        "若文件名只有纯数字后缀（如 01、02、10、15），且没有明确 S02/Season 2/2x 证据，则该数字必须解释为 episode，season 必须为 1。\n"
+        "纯数字 02 绝对不能单独作为第二季证据。\n"
+        "同级文件列表出现 01、02、03 连号时，episode_numbering_mode 必须为 absolute。\n\n"
         "【剧集识别关键逻辑】\n"
         "遇到剧集时，query 必须是剧集名而非单集名：\n"
         "- 路径：.../进击的巨人/Season 3/S03E10.mkv\n"
@@ -84,12 +111,11 @@ DEFAULT_CONFIG: dict = {
         "无论文件名多混乱，必须给出最可能的猜测，禁止输出空字符串（IGNORE 除外）。\n"
         "宁可猜错，绝不放弃！\n\n"
         "【强制范例】\n"
-        '{"query": "刺杀小说家", "type": "movie", "filename_year": "2021", "knowledge_year": "2021"}\n'
-        '{"query": "Batman", "type": "movie", "filename_year": "2024", "knowledge_year": "1989"}\n'
-        '{"query": "Dune Part Two", "type": "movie", "filename_year": "", "knowledge_year": "2024"}\n'
-        '{"query": "庆余年", "type": "tv", "season": 2, "episode": 1, "filename_year": "2024", "knowledge_year": "2019"}\n'
-        '{"query": "The Boys", "type": "tv", "season": 3, "episode": 10, "filename_year": "", "knowledge_year": "2019"}\n'
-        '{"query": "", "type": "IGNORE", "filename_year": "", "knowledge_year": ""}'
+        '{"query": "刺杀小说家", "type": "movie", "season": null, "episode": null, "filename_year": "2021", "knowledge_year": "2021", "confidence": 0.95, "evidence": {"query_source": "filename", "type_source": "movie_context", "year_source": "filename_and_knowledge"}, "episode_numbering_mode": "unknown", "needs_review": false}\n'
+        '{"query": "庆余年", "type": "tv", "season": 2, "episode": 1, "filename_year": "2024", "knowledge_year": "2019", "confidence": 0.92, "evidence": {"query_source": "parent_dir", "season_source": "explicit_season", "episode_source": "explicit_episode"}, "episode_numbering_mode": "season_episode", "needs_review": false}\n'
+        '{"query": "The Boys", "type": "tv", "season": 3, "episode": 10, "filename_year": "", "knowledge_year": "2019", "confidence": 0.94, "evidence": {"query_source": "parent_dir", "season_source": "S03", "episode_source": "E10"}, "episode_numbering_mode": "season_episode", "needs_review": false}\n'
+        '{"query": "赛博朋克：边缘行者", "type": "tv", "season": 1, "episode": 2, "filename_year": "", "knowledge_year": "2022", "confidence": 0.96, "evidence": {"query_source": "parent_dir", "season_source": "absolute_episode_default_season_1", "episode_source": "numeric_suffix_02", "sibling_pattern": "01,02"}, "episode_numbering_mode": "absolute", "needs_review": false}\n'
+        '{"query": "", "type": "IGNORE", "season": null, "episode": null, "filename_year": "", "knowledge_year": "", "confidence": 0.99, "evidence": {"type_source": "advertisement_or_junk"}, "episode_numbering_mode": "unknown", "needs_review": false}'
     ),
 
     "master_router_rules": (
@@ -214,43 +240,6 @@ DEFAULT_CONFIG: dict = {
         '用户: 我想看沙丘2 → {"intent": "DOWNLOAD", "reply": "已提取「沙丘2」元数据，正在唤起全屏确认界面...", "clean_name": "沙丘2", "en_name": "Dune Part Two", "media_type": "movie", "year": "2024"}\n'
         '用户: 今天天气真好 → {"intent": "CHAT", "reply": "收到。神经链路待命中。"}\n'
         '用户: 汇报战况 → {"intent": "SYSTEM_STATUS", "reply": ""}'
-    ),
-
-    "filename_clean_regex": (
-        "# 物理级正则去噪规则（Neon-Crate 工业默认，共15条）\n"
-        "# 每行一条规则，支持 Python re 模块语法\n"
-        "# 注意：规则 10-15 仅用于结构化提取，不参与 clean_name 删除\n\n"
-        "# 1. 分辨率标签过滤\n"
-        r"\b(2160p|1080p|720p|480p|4k|8k|UHD|HD|SD|FHD|QHD|BluRay|BDRip|BRRip|WEB-DL|WEBRip|HDRip|DVDRip|REMUX|HDTV|PDTV|DVDScr|CAM|TS|TC)\b" "\n\n"
-        "# 2. 编码格式过滤\n"
-        r"\b(x264|x265|H\.264|H\.265|HEVC|AVC|AV1|VP9|AAC|AC3|DTS|TrueHD|Atmos|FLAC|MP3|DD5\.1|DD\+|DTS-HD|MA|7\.1|5\.1|2\.0)\b" "\n\n"
-        "# 3. 方括号技术标签过滤\n"
-        r"\[[^\]]*?(?:Raws?|Sub|Team|Group|@|Lilith|DBD|Baha|bit|Audio|AAC|MP4|CHT|CHS|WEB|AVC|HEVC|x264|x265)[^\]]*?\]" "\n\n"
-        "# 4. 花括号标签过滤\n"
-        r"\{[^\}]+\}" "\n\n"
-        "# 5. 广告词过滤\n"
-        r"(澳门首家|最新地址|更多资源|高清下载|在线观看|www\.|http|\.com|\.net|\.org|\.cn|更多精彩|精彩推荐|免费下载|BT下载|磁力链接)" "\n\n"
-        "# 6. 音频/视频特性标签过滤\n"
-        r"\b(Dual\.Audio|Multi\.Audio|HDR|HDR10|HDR10\+|DV|Dolby\.Vision|10bit|10-bit|8bit|8-bit|SDR|HLG|IMAX|Extended|Unrated|Directors\.Cut|Remastered|3D|Half-SBS|Half-OU)\b" "\n\n"
-        "# 7. 语言标签过滤\n"
-        r"\b(中英|英中|简繁|繁简|国粤|粤语|国语|中字|英字|双语|双字|CHT|CHS|BIG5|GB|Mandarin|Cantonese)\b" "\n\n"
-        "# 8. 制作组后缀过滤\n"
-        r"-[A-Z0-9]+$" "\n\n"
-        "# 9. 年份过滤\n"
-        r"[\(\[\. \t]+(19\d{2}|20\d{2})[\)\]\.\s]+|\b(19\d{2}|20\d{2})\b" "\n\n"
-        "# --- 规则 10-15：仅提取用，clean_name 不执行删除 ---\n"
-        "# 10. [EXTRACT] 季集-S01E01格式（含空格变体 S01 E01）\n"
-        r"[Ss](\d{1,2})[\s\._-]*[Ee](\d{1,3})" "\n\n"
-        "# 11. [EXTRACT] 季集-Season格式\n"
-        r"[Ss]eason[\s\._-]*(\d{1,2})[\s\._-]*[Ee](?:pisode)?[\s\._-]*(\d{1,3})" "\n\n"
-        "# 12. [EXTRACT] 季集-1x01格式\n"
-        r"(\d{1,2})x(\d{1,3})" "\n\n"
-        "# 13. [EXTRACT] 季集-EP01格式\n"
-        r"[Ee][Pp]?[\s\._-]*(\d{1,3})" "\n\n"
-        "# 14. [EXTRACT] 季集-中文格式\n"
-        r"第[\s\._-]*(\d{1,3})[\s\._-]*[集话話]" "\n\n"
-        "# 15. [EXTRACT] 动漫番剧特殊格式\n"
-        r"[-\s](\d{2,4})(?=\s*\[)"
     ),
 
     "supported_video_exts": ".mkv, .mp4, .avi, .ts, .m2ts, .mov, .wmv, .flv, .rmvb, .webm, .iso, .vob, .mpg, .mpeg, .m4v",

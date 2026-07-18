@@ -1,3 +1,36 @@
+/**
+ * NeuralPrimitives - 赛博朋克风格的 UI 原子组件库
+ * 
+ * 核心职责：
+ * 提供一套可复用的基础 UI 组件，统一应用的视觉风格和交互体验。
+ * 所有组件都遵循神经网络/赛博朋克的设计语言。
+ * 
+ * 组件清单：
+ * 1. NeuralSection - 分区容器（左边框、悬浮效果）
+ * 2. NeuralLabel - 标签文本（青色、大写、字间距）
+ * 3. NeuralHint - 提示文本（更淡的青色、小号）
+ * 4. NeuralInput - 输入框（左边框、focus 发光效果）
+ * 5. NeuralTextarea - 多行文本框（同 NeuralInput 风格）
+ * 6. NeuralSelect - 下拉选择器（同风格）
+ * 7. NeuralToggle - 开关按钮（切换激活状态）
+ * 8. NeuralCoreSwitch - 核心开关（用于语言切换、启用/禁用等）
+ * 
+ * 设计规范：
+ * - 主色：青色（#06b6d4 / var(--cyber-cyan)）
+ * - 背景：黑色半透明（bg-black/40）
+ * - 边框：左侧竖线（border-l-2）
+ * - Focus 效果：发光 + 背景加深
+ * - 过渡：所有状态变化使用 transition-all
+ * 
+ * Props 模式：
+ * - label：可选的标签文本
+ * - hint：可选的提示文本
+ * - wrapperClassName：容器的自定义类名
+ * - 继承原生 HTML 属性（HTMLAttributes）
+ * 
+ * @component
+ */
+
 'use client';
 
 import type React from 'react';

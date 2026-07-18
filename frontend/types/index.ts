@@ -1,3 +1,14 @@
+/**
+ * types - 前端共享类型定义
+ *
+ * 这里集中声明前端与后端 API 交互时使用的数据结构，包括任务、统计、配置、认证、
+ * AI 对话和日志等类型。把类型集中管理可以避免在各个组件里重复定义接口。
+ *
+ * 新手提示：
+ * - 修改后端响应字段时，优先同步更新这里的类型。
+ * - 组件中的 `Task`、`SettingsConfig`、`ChatResponse` 等都来自本文件。
+ * - 类型字段要尽量与后端数据契约保持一致，避免运行时字段不存在。
+ */
 // ============================================================================
 // Type Definitions - Extracted from api.ts for better organization
 // ============================================================================
@@ -7,12 +18,12 @@ export interface Task {
   file_path: string;
   file_name?: string;
   clean_name?: string;
-  media_type: 'movie' | 'tv';
+  media_type: 'movie' | 'tv' | 'mixed';
   status: 'pending' | 'archived' | 'failed' | 'ignored' | 'scraped';
   tmdb_id?: number;
   imdb_id?: string;
   title?: string;
-  year?: number | string;  // DB 存储为 TEXT，后端未做类型转换，前端兼容两种类型
+  year?: string;
   poster_path?: string;
   local_poster_path?: string;
   target_path?: string;
@@ -94,7 +105,6 @@ export interface LogEntry {
 export interface SystemSettings {
   ui_lang: string;
   min_size_mb: number;
-  filename_clean_regex: string;
   cron_enabled: boolean;
   cron_interval_min: number;
   auto_process_enabled: boolean;
@@ -149,29 +159,4 @@ export interface TokenResponse {
   access_token: string;
   token_type: string;
   username: string;
-}
-
-// ============================================================================
-// Task Status Interfaces - 三大后台任务状态接口
-// ============================================================================
-
-export interface ScanStatus {
-  is_running: boolean;
-  last_scan_time: number | null;
-  last_scan_count: number;
-  error: string | null;
-}
-
-export interface ScrapeStatus {
-  is_running: boolean;
-  last_run_time: number | null;
-  processed_count: number;
-  error: string | null;
-}
-
-export interface SubtitleStatus {
-  is_running: boolean;
-  last_run_time: number | null;
-  processed_count: number;
-  error: string | null;
 }

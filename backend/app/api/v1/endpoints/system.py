@@ -1,26 +1,19 @@
 """
-系统监控端点 - System API
+系统监控路由 - 统计、日志和图片代理。
 
-功能说明：
-1. 系统统计：提供控制台大屏数据
-2. 日志查询：支持按标签过滤的日志查询
-3. 图片代理：安全的图片访问代理
+职责：
+- 提供控制台统计数据、系统日志读取和本地图片安全代理。
+- 将媒体库计数、后台任务统计和日志文件解析结果转化为前端可消费的 API 响应。
+- 为海报和本地图片访问提供路径白名单、黑名单和后缀校验防线。
 
-核心特性：
-- 缓存模式：媒体库统计使用缓存，避免频繁 I/O
-- 日志过滤：支持按 SCAN、TMDB、ERROR 等标签过滤
-- 路径防御：防止路径穿越攻击，保护系统敏感目录
+安全边界：
+- `/public/image` 接收的是 URL 编码后的绝对物理路径，必须经过 `Path.resolve()` 规范化。
+- 请求路径必须落在已配置媒体库、Docker `/storage` 或项目 `data` 目录白名单内。
+- 系统敏感目录和非图片后缀一律拒绝，避免路径穿越和任意文件读取。
 
-图片代理安全机制：
-1. 路径穿越防御：使用 Path.resolve() 处理 ../
-2. 动态黑名单：根据操作系统自适应敏感目录
-3. 后缀名校验：只允许图片格式（jpg、png、webp 等）
-4. 存在性检查：确保文件存在且可读
-
-日志解析：
-- 标准格式：时间戳 - 模块 - 级别 - 消息
-- 非标准格式：兼容 print 输出，作为 INFO 级别保留
-- 时间戳格式化：ISO 8601 标准（T 分隔符，点号毫秒）
+性能边界：
+- 图片白名单使用 TTL 缓存 + singleflight 刷新，避免高并发海报请求放大数据库读取。
+- 日志接口只读取最后 1000 行，避免大日志文件全量载入内存。
 """
 import logging
 import platform
@@ -119,13 +112,6 @@ async def _get_managed_paths_cached(logger: logging.Logger) -> list[Path]:
         local_data = BASE_DIR / "data"
         if local_data.exists():
             extra_allowed.append(local_data.resolve())
-
-        from app.infra.config import settings as _settings
-        dev_mode = _settings.APP_ENV.lower() in ("development", "dev", "local")
-        if dev_mode:
-            home_path = Path.home()
-            extra_allowed.append(home_path.resolve())
-            logger.debug(f"[SECURITY] 开发模式：已追加 home 目录至白名单: {home_path}")
 
         all_allowed = allowed_paths + extra_allowed
         _managed_paths_cache = all_allowed
@@ -247,21 +233,18 @@ async def proxy_image(path: str = Query(..., description="绝对图片物理路�
     import os
     img_path = Path(os.path.normpath(str(img_path)))
 
-    # ── 手术三：白名单锚定（合法媒体库路径严苛校验）────────────────────────
-    # 优先于黑名单执行：请求的文件必须是已配置的媒体库或下载目录的子文件
-    try:
-        all_allowed = await _get_managed_paths_cached(logger)
-        if all_allowed and (not _path_is_under_any_base(img_path, all_allowed)):
-            logger.error(
-                f"❌ [SECURITY_DENIED] 访问被拒！请求路径: {img_path} | "
-                f"规范化后: {img_path.resolve()} | 当前白名单: {[str(p) for p in all_allowed]}"
-            )
-            raise HTTPException(status_code=403, detail="Forbidden: Path not in managed media directories")
-    except HTTPException:
-        raise
-    except Exception as wl_err:
-        # 白名单读取失败时降级到黑名单（不阻断服务）
-        logger.warning(f"[SECURITY] 白名单校验失败，降级到黑名单模式: {wl_err}")
+    # 白名单校验：请求路径必须在已配置的媒体库或系统数据目录下。
+    # 白名单为空（路径未配置或 data 目录不存在）时返回 503，禁止降级到黑名单模式。
+    all_allowed = await _get_managed_paths_cached(logger)
+    if not all_allowed:
+        logger.error("[SECURITY] 白名单为空，无法校验路径安全性，拒绝图片请求")
+        raise HTTPException(status_code=503, detail="Image service temporarily unavailable: no managed paths configured")
+    if not _path_is_under_any_base(img_path, all_allowed):
+        logger.error(
+            f"❌ [SECURITY_DENIED] 访问被拒！请求路径: {img_path} | "
+            f"规范化后: {img_path.resolve()} | 当前白名单: {[str(p) for p in all_allowed]}"
+        )
+        raise HTTPException(status_code=403, detail="Forbidden: Path not in managed media directories")
 
     # 2. 动态黑名单库（按当前 OS 自适应）
     current_os = platform.system()

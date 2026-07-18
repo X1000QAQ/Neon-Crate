@@ -69,7 +69,7 @@ const MIN_DISPLAY_LINES = 8;
 export default function MiniLog() {
   const { t } = useLanguage();
   const { logs, error } = useLogs();
-  const neural = useNeuralLinkStatus({ intervalMs: 2500 });
+  const neural = useNeuralLinkStatus({ intervalMs: 5000 });
   const tr = (key: string, fallback: string) => {
     const out = (t as unknown as (k: string) => string)(key);
     return out === key ? fallback : out;

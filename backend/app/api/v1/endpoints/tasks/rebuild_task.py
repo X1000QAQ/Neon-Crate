@@ -1,3 +1,16 @@
+"""
+rebuild_task.py - 手动重构与 TMDB 候选搜索路由。
+
+职责：
+- 提供手动补录 / 资产修复入口，允许用户对已入库任务重新写入 NFO、海报、字幕或执行核级重构。
+- 提供 TMDB 关键词搜索接口，供前端补录弹窗展示候选项。
+- 将实际重构执行委托给 `AssetPatchEngine` 和 `NuclearEngine`，路由层只负责参数收集和上下文组装。
+
+安全边界：
+- `manual_rebuild` 会根据任务记录和媒体库配置推导 `metadata_dir`、`library_root`、`target_path`。
+- TV 根目录推算必须受媒体库白名单约束，避免 download 目录污染归档结构。
+- 本模块不恢复旧版文件名物理正则清洗能力，补录依据来自任务记录、TMDB 和用户显式选择。
+"""
 import logging
 import os
 import re
@@ -16,6 +29,17 @@ router = APIRouter()
 
 
 class ManualRebuildRequest(BaseModel):
+    """
+    手动重构请求模型。
+
+    字段说明：
+    - `task_id` / `is_archive`：共同定位热表或冷表中的任务记录。
+    - `tmdb_id` / `keyword_hint`：用户在补录弹窗中选择或输入的 TMDB 线索。
+    - `media_type`：决定电影或剧集修复路径。
+    - `refix_nfo` / `refix_poster` / `refix_subtitle`：控制资产补丁范围。
+    - `nuclear_reset`：切换到核级重构引擎，高风险操作。
+    - `season` / `episode` / `scope`：剧集级修复范围，默认只修复单集。
+    """
     task_id: int
     is_archive: bool = True
     tmdb_id: Optional[int] = None
@@ -32,6 +56,19 @@ class ManualRebuildRequest(BaseModel):
 
 @router.post("/manual_rebuild")
 async def manual_rebuild(body: ManualRebuildRequest, background_tasks: BackgroundTasks) -> Dict[str, Any]:
+    """
+    手动补录 / 资产重构入口。
+
+    业务链路：
+    1. 根据 `task_id + is_archive` 定位任务记录。
+    2. 解析目标视频路径、元数据目录和媒体库根目录。
+    3. 根据显式 `tmdb_id` 或任务已有 TMDB ID 拉取元数据详情。
+    4. 组装重构上下文，按 `nuclear_reset` 选择普通资产补丁或核级重构引擎。
+
+    注意：
+    - 该端点会触发文件系统写入，路由层只做参数与上下文准备。
+    - 具体 NFO、海报、字幕和目录重构由服务层引擎执行。
+    """
     db = get_db_manager()
 
     # 读取任务记录

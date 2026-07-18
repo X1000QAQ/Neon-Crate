@@ -1,3 +1,13 @@
+/**
+ * tailwind.config - Tailwind CSS 主题配置
+ *
+ * 定义前端项目使用的字体、扫描路径和赛博朋克主题色。
+ * 颜色主要引用 `globals.css` 中的 CSS 变量，保证主题色在 Tailwind 类和原生 CSS 中保持一致。
+ *
+ * 新手提示：
+ * - 新增组件目录时，需要确认 `content` 数组能扫描到对应文件。
+ * - 主题色不要在组件中随意硬编码，优先使用这里定义的 `cyber-*` 颜色。
+ */
 import type { Config } from 'tailwindcss';
 
 /**

@@ -1,3 +1,15 @@
+/**
+ * APISettings - 第三方服务 API 配置页
+ *
+ * 负责编辑 TMDB、OpenSubtitles、Radarr、Sonarr 等外部服务的密钥与地址。
+ * 为避免输入时频繁触发 SettingsContext 全树重渲染，本组件采用本地缓冲策略：
+ * 输入过程只更新组件本地 state，失焦时再同步到全局配置。
+ *
+ * 新手提示：
+ * - 密钥输入框聚焦时显示明文，失焦后恢复密码样式。
+ * - `localValues` 的优先级高于全局 config，确保用户输入时不会被外部刷新覆盖。
+ * - 修改后仍需点击 SettingsHub 的保存按钮，才会持久化到后端。
+ */
 'use client';
 
 import { useState } from 'react';

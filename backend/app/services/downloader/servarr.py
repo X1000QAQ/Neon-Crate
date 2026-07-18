@@ -1,18 +1,21 @@
 """
-Servarr 核心通信组件 - v1.0.0 "寻猎者"计划
+Servarr 通信组件 - Radarr / Sonarr 下载任务分发。
 
-功能：
-1. 与 Radarr 对接实现电影自动下载
-2. 与 Sonarr 对接实现剧集自动下载
-3. TMDB 侦察兵：基于 TMDB ID 的精准匹配
-4. 物理映射信任：tmdb:ID 搜索结果 100% 可信，无需人工校验
-5. 完整的 API 调用链路（TMDB Recon -> Lookup -> RootFolder -> QualityProfile -> Add）
+职责：
+- 对接 Radarr 添加电影下载任务。
+- 对接 Sonarr 添加剧集下载任务。
+- 通过 TMDB 预侦察获取稳定 TMDB ID，再使用 `tmdb:{id}` 与 Servarr 做精准 lookup。
+- 在下载前执行库内查重审计，避免重复添加已监控资源。
 
-技术特性：
-- 异步 HTTP 通信（httpx）
-- 配置动态读取（从 db_manager）
-- TMDB 预侦察 + 物理 ID 映射
-- 工业级错误处理与日志记录
+调用边界：
+- 本模块只负责向外部 Servarr 服务发起 API 请求，不直接写本地媒体库文件。
+- 下载意图必须先经过 AI Agent 候选确认和 `/confirm` 授权端点，不能直接由模型输出触发。
+- Radarr / Sonarr 的根目录、质量档案和 API Key 均从配置读取，不在代码中硬编码。
+
+容错策略：
+- 未配置服务时返回失败字典，不抛出异常。
+- 400 already added 视为幂等成功，并返回 exists 状态。
+- 其他 HTTP 或网络异常转为 `{success: False, msg, data}`，由调用方展示给用户。
 """
 import httpx
 import logging
@@ -22,7 +25,17 @@ logger = logging.getLogger(__name__)
 
 
 class ServarrClient:
-    """Servarr 通信客户端 - 统一管理 Radarr 和 Sonarr 下载请求"""
+    """
+    Servarr 通信客户端。
+
+    统一封装 Radarr 和 Sonarr 的下载相关 API：
+    - TMDB 预侦察。
+    - 库内查重审计。
+    - 添加电影。
+    - 添加剧集。
+
+    本类的返回值保持字典协议，便于 API 路由直接转换为前端反馈。
+    """
     
     def __init__(self, db_manager):
         """
@@ -34,9 +47,9 @@ class ServarrClient:
         self.db = db_manager
         logger.info("[Servarr] 寻猎者引擎已启动 (V9.3 AI原生版)")
     
-    def _tmdb_recon(self, name: str, media_type: str, year: str = "") -> Optional[Dict]:
+    async def _tmdb_recon(self, name: str, media_type: str, year: str = "") -> Optional[Dict]:
         """
-        TMDB 侦察兵 - 预先获取真实的 TMDB 数据
+        TMDB 侦察兵 - 预先获取真实的 TMDB 数据（异步版）
         
         设计目标：
         - 在调用 Radarr/Sonarr 之前，先从 TMDB 获取准确的 ID
@@ -44,7 +57,7 @@ class ServarrClient:
         - 提供物理映射信任：tmdb:ID 搜索结果 100% 可信
         
         工作流程：
-        1. 调用 TMDB API 搜索影片
+        1. 调用 TMDB API 搜索影片（异步化，不阻塞事件循环）
         2. 若提供年份，优先选择年份匹配的结果
         3. 返回 TMDB ID、标题、年份
         
@@ -72,11 +85,12 @@ class ServarrClient:
             from app.services.metadata.adapters import TMDBAdapter
             tmdb = TMDBAdapter(tmdb_api_key)
             
-            # 根据类型调用对应的搜索方法
+            # 异步化同步网络调用，避免阻塞事件循环
+            import asyncio
             if media_type == "tv":
-                results = tmdb.search_tv(name, year if year else None)
+                results = await asyncio.to_thread(tmdb.search_tv, name, year if year else None)
             else:
-                results = tmdb.search_movie(name, year if year else None)
+                results = await asyncio.to_thread(tmdb.search_movie, name, year if year else None)
             
             if not results or len(results) == 0:
                 logger.warning(f"[TMDB-Recon] 未找到匹配结果: {name} ({media_type})")
@@ -227,7 +241,7 @@ class ServarrClient:
             logger.info(f"[Radarr] 使用候选 TMDB ID 直接下载: {tmdb_id} - {title}")
         else:
             logger.info(f"[Radarr] 启动 TMDB 侦察兵: {title}")
-            tmdb_info = self._tmdb_recon(title, "movie", year)
+            tmdb_info = await self._tmdb_recon(title, "movie", year)
         
         if not tmdb_info:
             return {
@@ -419,7 +433,7 @@ class ServarrClient:
             logger.info(f"[Sonarr] 使用候选 TMDB ID 直接下载: {tmdb_id} - {title}")
         else:
             logger.info(f"[Sonarr] 启动 TMDB 侦察兵: {title}")
-            tmdb_info = self._tmdb_recon(title, "tv", year)
+            tmdb_info = await self._tmdb_recon(title, "tv", year)
         
         if not tmdb_info:
             return {

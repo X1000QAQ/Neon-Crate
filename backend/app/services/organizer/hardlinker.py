@@ -1,17 +1,15 @@
 """
-智能链接引擎 - SmartLink
+智能链接引擎 - 硬链接优先、软链接兜底。
 
-核心特性：
-1. 首选硬链接（os.link）：零空间占用，性能最优
-2. 智能兜底（os.symlink）：跨分区时自动切换为软链接
-3. Windows 特性适配：自动处理 target_is_directory 参数
-4. 完整日志审计：记录每次链接操作的类型和结果
-5. 字幕同步：自动搬运同目录字幕文件
+职责：
+- 将下载目录中的媒体文件链接到媒体库目标路径。
+- 优先创建硬链接，实现零拷贝归档并保留做种能力。
+- 跨分区时自动回退为软链接，避免物理复制占用额外空间。
+- 同步同目录字幕文件，保持视频和字幕侧车文件一致。
 
-使用场景：
-- 媒体库归档：将下载目录的文件链接到媒体库
-- 跨盘归档：自动检测跨分区错误并回退到软链接
-- 零拷贝迁移：避免物理复制，节省磁盘空间
+调用边界：
+- 本模块只处理文件系统链接，不写数据库、不生成 NFO、不访问 TMDB。
+- 上游负责计算目标路径、校验媒体类型和更新任务状态。
 """
 import os
 import errno
@@ -23,12 +21,16 @@ from app.infra.constants import SUB_EXTS, SUB_LANG_SUFFIXES
 logger = logging.getLogger(__name__)
 
 
-# WARNING: 静态调用类 — 所有方法均为 @staticmethod，调用方式为 SmartLink.create_link(...)。
-# GitNexus 等 AST 静态分析工具无法识别此类调用边，图谱中 incoming 将显示为空（误报）。
-# 修改本类任何方法签名前，请务必配合 Grep 手动确认所有调用点：
-#   grep -rn 'SmartLink\.' backend/
+# 静态调用说明：本类所有方法均为 @staticmethod，调用方式为 SmartLink.create_link(...)。
+# GitNexus 等 AST 静态分析工具可能无法识别此类调用边，图谱中的 incoming 为空时可能是误报。
+# 修改本类任何方法签名前，请先用代码搜索手动确认所有调用点。
 class SmartLink:
-    """智能链接引擎"""
+    """
+    智能链接工具。
+
+    提供硬链接、软链接兜底、链接类型检测和字幕同步能力。
+    所有方法均为静态方法，调用方无需实例化。
+    """
     
     @staticmethod
     def create_link(src: str, dst: str) -> Tuple[bool, str]:
@@ -234,39 +236,52 @@ class SmartLink:
     
     @staticmethod
     def _is_flat_directory(video_path: Path) -> bool:
-        """平铺目录嗅探器"""
+        """
+        平铺目录嗅探器（增强版）
+
+        规则 A：路径深度检测 — 距根锚 ≤3 层（如 /downloads/movie.mkv）视为平铺目录
+        规则 B：异类嗅探增强 — 提取主片名（去年份/分辨率后缀）再比较，
+                同目录中出现 2 个以上不同主片名的视频文件即判定为平铺目录
+        """
         parent = video_path.parent
         try:
             if not parent.exists() or not parent.is_dir():
                 return False
         except Exception:
             return False
-        
-        dir_name = parent.name.strip().lower()
-        common_hall_names = {"downloads", "movie", "tv", "completed", "pt"}
-        
-        # 规则 A：公共大厅识别
-        if dir_name in common_hall_names:
-            return True
-        
-        # 规则 B：异类嗅探
-        current_prefix = video_path.name.lower()[:3]
-        video_exts = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".ts", ".flv"}
-        
+
+        # 规则 A：路径深度检测
         try:
-            for child in parent.iterdir():
-                if not child.is_file():
-                    continue
-                if child == video_path:
-                    continue
-                if child.suffix.lower() not in video_exts:
-                    continue
-                other_prefix = child.name.lower()[:3]
-                if other_prefix and other_prefix != current_prefix:
+            depth = len(video_path.relative_to(video_path.anchor).parts)
+            if depth <= 3:
+                return True
+        except Exception:
+            pass
+
+        # 规则 B：异类嗅探增强版
+        def _extract_stem(name: str) -> str:
+            s = re.sub(r'\.(19|20)\d{2}\..*', '', name.lower())
+            s = re.sub(r'\.(720p|1080p|2160p|4k|bluray|webrip|hdtv).*', '', s)
+            return s.strip()
+
+        current_stem = _extract_stem(video_path.stem)
+        video_exts = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".ts", ".flv"}
+
+        try:
+            siblings = [
+                c for c in parent.iterdir()
+                if c.is_file() and c.suffix.lower() in video_exts and c != video_path
+            ]
+            different_stems: set = set()
+            for sibling in siblings[:5]:
+                sib_stem = _extract_stem(sibling.stem)
+                if sib_stem and sib_stem != current_stem:
+                    different_stems.add(sib_stem)
+                if len(different_stems) >= 2:
                     return True
         except Exception:
-            return False
-        
+            pass
+
         return False
     
     @staticmethod

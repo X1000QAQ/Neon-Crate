@@ -1,3 +1,14 @@
+/**
+ * PersonaSettings - AI 人格与规则设置页
+ *
+ * 负责编辑 AI 助手的名称、人设描述、归档专家规则和总控中枢规则。
+ * 这些配置会影响后端 AI 在文件识别、归档判断和意图路由时的行为。
+ *
+ * 新手提示：
+ * - 输入框的修改通过 `updateSetting()` 写入前端内存，点击 SettingsHub 的保存按钮后才持久化。
+ * - “重置为默认值”会调用 `api.resetSettings('ai')`，并重新拉取后端默认 AI 规则。
+ * - 大段规则文本属于提示词配置，改动前应确认业务意图，避免影响识别效果。
+ */
 'use client';
 
 import { useState } from 'react';

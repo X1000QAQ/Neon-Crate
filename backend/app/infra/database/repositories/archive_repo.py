@@ -1,30 +1,19 @@
 """
-archive_repo.py - 归档仓储
+archive_repo.py - 媒体冷表归档仓储
 
-职责：管理 media_archive 表，负责任务从热存储（tasks）到冷存储（media_archive）的流转。
+职责：
+- 管理 `media_archive` 冷表，保存已经完成归档的媒体记录。
+- 在任务完成后将热表 `tasks` 记录复制到冷表，并删除热表中的原始记录。
+- 为媒体墙、归档查询、字幕状态更新和媒体库路径选择提供数据能力。
 
-迁入方法（原 db_manager.py）：
-  - archive_task              (原行 708)
-  - get_archived_data         (原行 587)
-  - get_archive_data          (原行 758)
-  - get_archive_stats         (原行 795)
-  - update_archive_sub_status (原行 808)
-  - get_active_library_path   (原行 663)
+冷热表契约：
+- 热表 `tasks.id` 是活跃任务主键。
+- 冷表 `media_archive.original_task_id` 继续作为前端可见的全局任务 ID。
+- 冷表自增 `id` 只用于内部记录，不应暴露为媒体任务的业务 ID。
 
-Impact 分析（2026-03-12）：
-  archive_task              → CRITICAL (1 direct: update_task_status → scrape + retry 流程)
-  get_active_library_path   → HIGH     (1 direct: perform_scrape_all_task_sync)
-  update_archive_sub_status → HIGH     (1 direct: download_subtitle_for_task → 字幕流程)
-  get_archived_data         → LOW      (图谱无直接调用者)
-  get_archive_data          → LOW      (图谱无直接调用者)
-  get_archive_stats         → LOW      (图谱无直接调用者)
-  迁移安全：外观层接口不变，所有调用方零感知。
-
-跨域依赖：
-  get_active_library_path 依赖 get_managed_paths（来自 PathRepo）。
-  通过构造注入 path_repo 实例解决，避免循环依赖。
-
-依赖：_get_conn()、db_lock（BaseRepository 注入）、path_repo（构造注入）
+维护提示：
+- `archive_task()` 必须保持事务原子性：复制成功和热表删除要么一起成功，要么一起回滚。
+- `get_active_library_path()` 依赖路径配置，必须维持“最多一个电影库 + 最多一个剧集库”的约束。
 """
 import os
 import logging
@@ -36,7 +25,16 @@ logger = logging.getLogger(__name__)
 
 
 class ArchiveRepo(BaseRepository):
-    """归档仓储：管理 media_archive 表及任务冷热存储流转"""
+    """
+    媒体冷表归档仓储。
+
+    管理 `media_archive` 表及冷热表流转：
+    - `archive_task()` 将已完成任务从热表复制到冷表并删除热表记录。
+    - 查询接口将 `original_task_id` 映射为前端业务 ID。
+    - 路径选择接口 enforcing 电影库 / 剧集库各一个的约束。
+
+    事务边界：归档复制和热表删除必须保持原子性。
+    """
 
     def __init__(self, get_conn_fn, db_lock, config_path: str, secure_keys_path: str, path_repo):
         """
@@ -124,9 +122,10 @@ class ArchiveRepo(BaseRepository):
                 "FROM media_archive"
             )
             if search_keyword:
+                safe_pattern = self._like(search_keyword)
                 cursor = conn.execute(
                     sql_select + " WHERE file_name LIKE ? OR clean_name LIKE ? OR title LIKE ? ORDER BY archived_at DESC",
-                    (f"%{search_keyword}%", f"%{search_keyword}%", f"%{search_keyword}%")
+                    (safe_pattern, safe_pattern, safe_pattern)
                 )
             else:
                 cursor = conn.execute(sql_select + " ORDER BY archived_at DESC")
@@ -150,6 +149,7 @@ class ArchiveRepo(BaseRepository):
         with self.db_lock:
             conn = self._get_conn()
             if search_keyword:
+                safe_pattern = self._like(search_keyword)
                 cursor = conn.execute(
                     """
                     SELECT id, task_id, path, file_name, clean_name, type,
@@ -159,7 +159,7 @@ class ArchiveRepo(BaseRepository):
                     WHERE file_name LIKE ? OR clean_name LIKE ? OR title LIKE ?
                     ORDER BY archived_at DESC
                     """,
-                    (f"%{search_keyword}%", f"%{search_keyword}%", f"%{search_keyword}%")
+                    (safe_pattern, safe_pattern, safe_pattern)
                 )
             else:
                 cursor = conn.execute(

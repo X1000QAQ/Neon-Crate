@@ -1,28 +1,20 @@
 """
-逻辑分发器（Dispatcher）
+AI 指令分发器 - 意图白名单、参数校验与冷却管控。
 
-设计目标：
-  实现「意图」与「执行」的物理隔离
-  所有 AI 产生的指令必须经过此分发器完成参数校验与频率管控
+职责：
+- 定义 `AIActionEnum`，所有模型可执行动作必须先进入白名单。
+- 使用 `AIIntentModel` 对 LLM 结构化输出做字段长度、年份和媒体类型校验。
+- 使用 `Dispatcher` 执行 DOWNLOAD 片名非空校验和扫描 / 刮削 / 字幕动作冷却检查。
 
-在 AI 控制链路中的定位：
-  协议校验层：llm_client.py     - force_json 强制结构化输出
-  逻辑分发层：dispatcher.py    - 白名单校验 + 参数强校验（本文件）
-  人工授权机制：前端 ActionConfirmCard - 用户显式授权后才触发执行
+控制链路位置：
+- 协议校验层：`llm_client.py` 负责尽量让模型输出 JSON。
+- 逻辑分发层：本文件负责把 JSON 收敛为可信意图模型。
+- 授权执行层：路由和前端确认卡负责真正分发后台任务或下载动作。
 
-核心职责：
-  1. AIActionEnum   白名单枚举：非白名单 action 直接丢弃
-  2. AIIntentModel  Pydantic 强校验：对 LLM 提取的参数进行类型与长度校验
-  3. Dispatcher     物理校验 + 频率管控：片名合法性、年份格式、操作冷却限制
-
-使用方式：
-  from app.services.ai.dispatcher import Dispatcher, AIActionEnum, AIIntentModel
-
-  # 校验 LLM 返回的原始 dict
-  result = Dispatcher.validate_intent(raw_dict)
-  if result is None:
-      # 校验未通过，已记录日志，调用方直接返回错误提示
-      ...
+重要语义：
+- `validate_intent()` 只做只读预检，不写冷却时间戳。
+- `record_execution()` 才是冷却计时唯一写入口，必须在任务真正分发后调用。
+- 非白名单 action 会被 Pydantic 枚举校验阻断，不会传递到执行层。
 """
 import re
 import time

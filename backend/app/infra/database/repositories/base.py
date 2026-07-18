@@ -1,16 +1,15 @@
 """
-base.py - Repository 基类
+base.py - Repository 基类与共享依赖容器
 
-所有 Repository 继承此基类，通过构造注入共享：
-  - _get_conn: DatabaseManager 的线程级连接池方法
-  - db_lock:   DatabaseManager 的全局写锁
-  - config_path: config.json 文件路径
-  - secure_keys_path: secure_keys.json 文件路径
+职责：
+- 为所有仓储类保存 `DatabaseManager` 注入的连接获取函数、全局锁和配置文件路径。
+- 提供 `_like()` 工具方法，对 SQL LIKE 搜索词进行通配符转义。
+- 保持仓储层的依赖形态一致，避免每个 Repository 重复声明连接和锁字段。
 
-设计原则：
-  - 基类本身不包含任何业务逻辑
-  - 不自行管理数据库连接，完全依赖注入的 _get_conn
-  - 线程安全由注入的 db_lock 保证
+设计边界：
+- 基类不包含业务 SQL，不直接创建 SQLite 连接。
+- 线程安全由注入的 `db_lock` 和 `DatabaseManager._get_conn()` 共同保证。
+- 子类负责具体表、配置文件或业务查询逻辑。
 """
 import sqlite3
 import threading
@@ -39,3 +38,9 @@ class BaseRepository:
         self.db_lock = db_lock
         self.config_path = config_path
         self.secure_keys_path = secure_keys_path
+
+    @staticmethod
+    def _like(keyword: str) -> str:
+        """将搜索词转义为安全的 LIKE 模式，防止 % 和 _ 被解释为通配符。"""
+        escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return f"%{escaped}%"

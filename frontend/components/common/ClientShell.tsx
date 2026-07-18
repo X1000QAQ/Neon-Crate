@@ -1,3 +1,33 @@
+/**
+ * ClientShell - 客户端容器和全局 Provider 嵌套
+ * 
+ * 核心职责：
+ * 1. 组织整个应用的 React Provider 层次结构
+ * 2. 实现错误边界捕获意外崩溃
+ * 3. 鉴权检查和条件化 Provider 挂载
+ * 4. 提供全局背景粒子效果
+ * 5. 实时网络状态监控
+ * 
+ * 架构层次（从内到外）：
+ * ClientShell（最外层容器）
+ *  └─ ErrorBoundary（全局错误捕获）
+ *      └─ NetworkProvider（网络状态监控）
+ *          ├─ CyberParticles（背景粒子效果）
+ *          ├─ AuthGuard（鉴权检查）
+ *          │   └─ AuthenticatedShell（仅在认证后挂载）
+ *          │       ├─ SettingsProvider（全局配置）
+ *          │       ├─ LogProvider（系统日志）
+ *          │       └─ AiSidebar（AI 助手侧栏）
+ *          └─ NeuralLinkAlert（网络离线警告横幅）
+ * 
+ * Provider 挂载策略：
+ * - 登录页（/auth/login）：仅挂载 NetworkProvider，跳过其他 Provider
+ * - 已认证页面：挂载完整的 Provider 层次
+ * 原因：避免登录页的 SettingsProvider/LogProvider 发起周期性 API 请求导致 401 错误
+ * 
+ * @component
+ */
+
 'use client';
 
 import React, { ReactNode } from 'react';
@@ -9,6 +39,21 @@ import AuthGuard from '@/components/common/AuthGuard';
 import AiSidebar from '@/components/ai/AiSidebar';
 import CyberParticles from '@/components/common/CyberParticles';
 
+/**
+ * ErrorBoundary - React 错误边界组件
+ * 
+ * 职责：
+ * - 捕获子组件树中的任何 JavaScript 错误
+ * - 防止错误向上传播导致整个应用崩溃
+ * - 显示友好的错误界面和刷新按钮
+ * 
+ * 工作流程：
+ * 1. 捕获错误时 → 保存到 state
+ * 2. getDerivedStateFromError 同步更新状态
+ * 3. componentDidCatch 记录错误到控制台
+ * 4. render 显示错误界面（替代原 children）
+ * 5. 用户点击"刷新页面"按钮 → window.location.reload()
+ */
 class ErrorBoundary extends React.Component<
   { children: ReactNode },
   { hasError: boolean; error: Error | null }

@@ -1,3 +1,15 @@
+/**
+ * SecureImage - 带鉴权的安全图片组件
+ *
+ * 负责统一处理本地海报、外部海报和后端图片代理路径。
+ * 本地物理路径会通过 `/public/image` 代理接口加载，并用 fetch 携带 JWT，
+ * 解决普通 `<img src>` 无法附加 Authorization Header 的问题。
+ *
+ * 新手提示：
+ * - 外部图片（如 TMDB）会直接显示，不走后端代理。
+ * - 本地路径必须走代理，否则 AIO 模式下可能因为缺少 token 返回 401。
+ * - 组件会把图片响应转为 Blob URL，卸载时释放，避免内存泄漏。
+ */
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
