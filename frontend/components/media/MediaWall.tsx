@@ -50,7 +50,9 @@ const PAGE_SIZE = 20;
 export default function MediaWall() {
   const { t } = useLanguage();
   const { config } = useSettings();
-  const configPaths = config?.paths ?? [];
+  // useMemo 稳定引用：config?.paths 每次渲染可能是同内容但不同引用的新数组，
+  // 若直接用 ?? [] 则每次渲染都会产生新的 [] 对象，导致依赖它的 useMemo/useCallback 无谓失效
+  const configPaths = useMemo(() => config?.paths ?? [], [config?.paths]);
   // React Hooks 死循环止血点：useLanguage 每次渲染都会返回新引用的 `t` 函数，
   // 若把 `t` 放入 loadTasks 的依赖数组，会导致 loadTasks 身份每渲染变化 -> useEffect 重复发包。
   const tRef = useRef(t);
@@ -183,7 +185,7 @@ export default function MediaWall() {
     }
     // map 会自然保持首次插入的顺序（即组内最新 created_at 的任务顺序）
     return Array.from(map.values());
-  }, [filteredTasks]);
+  }, [filteredTasks, configPaths]);
 
   const totalWorks = groupedWorks.length;
 
