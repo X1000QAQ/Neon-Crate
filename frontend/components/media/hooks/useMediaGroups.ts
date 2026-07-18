@@ -32,7 +32,21 @@ export function useMediaGroups(tasks: Task[]): MediaGroup[] {
     const map = new Map<string, MediaGroup>();
     for (const task of tasks) {
       const mtype = task.media_type || 'movie';
-      const key = `${mtype}::${(task.title || task.clean_name || task.file_name || String(task.id)).trim()}`;
+      // TV 任务优先从文件路径提取剧集根目录作为 key，避免 title/clean_name 为空时
+      // 退化为逐文件分组导致无法折叠的问题。
+      // 路径结构示例：/storage/media/tv/咒术回战 (2020)/Season 1/xxx.mkv
+      // 提取规则：取路径倒数第三段（剧集根目录名），作为跨季聚合的稳定 key。
+      let groupName: string;
+      if (mtype === 'tv') {
+        const pathForKey = task.target_path || task.file_path || '';
+        const parts = pathForKey.replace(/\\/g, '/').split('/').filter(Boolean);
+        // 路径至少需要 3 段：.../{series}/{season}/{file}
+        const seriesDir = parts.length >= 3 ? parts[parts.length - 3] : null;
+        groupName = (task.title || task.clean_name || seriesDir || task.file_name || String(task.id)).trim();
+      } else {
+        groupName = (task.title || task.clean_name || task.file_name || String(task.id)).trim();
+      }
+      const key = `${mtype}::${groupName}`;
       if (!map.has(key)) {
         map.set(key, {
           key,
