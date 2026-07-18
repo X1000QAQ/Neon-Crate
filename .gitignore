@@ -218,3 +218,4 @@ frontend/app/demo/
 
 # 本地测试工具 — 树状图确认：backend/tests/ 真实存在
 backend/tests/
+docs/06_当前报告/
