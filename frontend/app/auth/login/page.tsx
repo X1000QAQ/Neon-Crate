@@ -45,16 +45,21 @@ export default function LoginPage() {
     const checkInit = async () => {
       try {
         const status = await api.authStatus();
+        console.log('[LoginPage] Auth status:', status);
         setIsInit(status.initialized);
         
         // 如果系统未初始化，3秒后自动重定向到 /setup
         if (!status.initialized) {
+          console.log('[LoginPage] System not initialized, redirecting to /setup in 3s...');
           setTimeout(() => {
+            console.log('[LoginPage] Redirecting to /setup');
             router.replace('/setup');
           }, 3000);
+        } else {
+          console.log('[LoginPage] System initialized, staying on login page');
         }
       } catch (err) {
-        console.error('Failed to check init status:', err);
+        console.error('[LoginPage] Failed to check init status:', err);
         setIsInit(true); // 默认认为已初始化
       }
     };
