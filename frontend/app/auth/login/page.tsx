@@ -42,8 +42,25 @@ export default function LoginPage() {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    api.authStatus().then(s => setIsInit(s.initialized)).catch(() => setIsInit(true));
-  }, []);
+    const checkInit = async () => {
+      try {
+        const status = await api.authStatus();
+        setIsInit(status.initialized);
+        
+        // 如果系统未初始化，3秒后自动重定向到 /setup
+        if (!status.initialized) {
+          setTimeout(() => {
+            router.replace('/setup');
+          }, 3000);
+        }
+      } catch (err) {
+        console.error('Failed to check init status:', err);
+        setIsInit(true); // 默认认为已初始化
+      }
+    };
+
+    checkInit();
+  }, [router]);
 
   useEffect(() => {
     const t = setInterval(() => setBootPct(p => { if (p >= 100) { clearInterval(t); return 100; } return p + 5; }), 120);
