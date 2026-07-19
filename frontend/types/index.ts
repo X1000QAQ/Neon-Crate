@@ -13,13 +13,21 @@
 // Type Definitions - Extracted from api.ts for better organization
 // ============================================================================
 
+export interface IgnoreRule {
+  id: string;
+  scope: 'file' | 'directory';
+  path: string;
+  created_at: string;
+  matched_task_count?: number;
+}
+
 export interface Task {
   id: number;
   file_path: string;
   file_name?: string;
   clean_name?: string;
   media_type: 'movie' | 'tv' | 'mixed';
-  status: 'pending' | 'archived' | 'failed' | 'ignored' | 'scraped';
+  status: 'pending' | 'archived' | 'failed' | 'ignored' | 'scraped' | 'duplicate';
   tmdb_id?: number;
   imdb_id?: string;
   title?: string;
@@ -32,6 +40,7 @@ export interface Task {
   episode?: number | null;
   created_at: string;
   is_archive?: boolean;
+  ignore_rule?: IgnoreRule | null;
 }
 
 export interface TasksResponse {

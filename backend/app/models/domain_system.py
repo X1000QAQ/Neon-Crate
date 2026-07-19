@@ -17,7 +17,7 @@
 - 操作模型：`DeleteBatchRequest`、`PurgeRequest`、`ResetSettingsRequest`。
 - AI 对话模型：`ChatRequest`、`PendingActionPayload`、`CandidateItem`、`ChatResponse`。
 """
-from typing import Optional, List
+from typing import Optional, List, Literal
 from pydantic import BaseModel, Field
 
 
@@ -198,14 +198,15 @@ class DeleteBatchRequest(BaseModel):
     ids: List[int]
 
 
-class IgnorePathRequest(BaseModel):
-    """单路径忽略/取消忽略请求。"""
-    path: str
+class CreateIgnoreRuleRequest(BaseModel):
+    """创建手动忽略规则；目录规则由服务端从视频文件路径计算。"""
+    scope: Literal["file", "directory"]
+    paths: List[str] = Field(..., min_length=1)
 
 
-class IgnorePathBatchRequest(BaseModel):
-    """批量路径忽略请求。"""
-    paths: List[str]
+class ClearIgnoreRulesRequest(BaseModel):
+    """清空全部手动忽略规则的二次确认请求。"""
+    confirm: str
 
 
 class PurgeRequest(BaseModel):

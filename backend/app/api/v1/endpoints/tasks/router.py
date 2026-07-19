@@ -28,10 +28,10 @@ from app.api.v1.endpoints.tasks.media_router import (
     delete_task_by_id,
     purge_all_tasks,
     retry_task,
-    ignore_path,
-    ignore_path_batch,
-    unignore_path,
-    get_ignore_list,
+    create_ignore_rule,
+    get_ignore_rules,
+    delete_ignore_rule,
+    clear_ignore_rules,
 )
 
 router = APIRouter()
@@ -49,7 +49,7 @@ router.post("/delete_batch")(delete_tasks_batch)
 router.delete("/{task_id}")(delete_task_by_id)
 router.post("/purge")(purge_all_tasks)
 router.post("/{task_id}/retry")(retry_task)
-router.post("/ignore")(ignore_path)
-router.post("/ignore_batch")(ignore_path_batch)
-router.post("/unignore")(unignore_path)
-router.get("/ignore_list")(get_ignore_list)
+router.post("/ignore-rules")(create_ignore_rule)
+router.get("/ignore-rules")(get_ignore_rules)
+router.delete("/ignore-rules/{rule_id}")(delete_ignore_rule)
+router.post("/ignore-rules/clear")(clear_ignore_rules)

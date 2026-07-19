@@ -104,6 +104,7 @@ function getStatusColor(status: string) {
   if (s === 'archived') return 'border-cyber-cyan text-cyber-cyan bg-cyber-cyan/10';
   if (s === 'failed') return 'border-cyber-red text-cyber-red bg-cyber-red/10';
   if (s === 'ignored') return 'border-orange-400 text-orange-400 bg-orange-400/10 font-mono';
+  if (s === 'duplicate') return 'border-cyber-red text-cyber-red bg-cyber-red/10 font-mono';
   return 'border-cyber-cyan/30 text-cyber-cyan/70 bg-cyber-cyan/5';
 }
 

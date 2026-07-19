@@ -128,6 +128,11 @@ def perform_find_subtitles_task_sync():
                 _is_arc = task.get("is_archive", False)
                 _task_id = task.get("id")
 
+                # 规则可在字幕任务启动后新增；调用外部 API 前再次确认。
+                if file_path and db.match_ignore_rule(file_path):
+                    logger.info(f"[SUBTITLE] 忽略规则命中，跳过: {file_path}")
+                    continue
+
                 # ==========================================
                 # 🎁 字幕白嫖前置拦截（Local Subtitle Detection）
                 # ==========================================

@@ -1,145 +1,175 @@
-"""
-ignore_repo.py - 持久化忽略清单管理器
+"""Persistent, scoped manual-ignore rules.
 
-职责：
-- 读写 data/ignore_paths.txt，每行一个规范化路径。
-- 提供 add / remove / contains / list 四个展面方法。
-- 文件不存在时自动创建；写入时原子替换（tmp → rename），防止写入半途崩溃。
-
-设计原则：
-- 与数据库完全解耦，数据库重置不影响此文件。
-- 路径规范化使用 os.path.normcase(os.path.normpath(...))，跨平台一致。
-- 线程安全：用 threading.Lock 保护读写，与 DatabaseManager 共享同一进程。
+The ignore-rule file is intentionally independent from SQLite so a database reset
+never re-enqueues files the user deliberately excluded.
 """
+from __future__ import annotations
+
+import json
+import logging
 import os
 import threading
-import logging
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import Any, Iterable, Literal, Optional
 
 logger = logging.getLogger(__name__)
 
-_IGNORE_FILE_NAME = "ignore_paths.txt"
+RuleScope = Literal["file", "directory"]
+_RULE_FILE_NAME = "ignore_rules.json"
+_RULE_FILE_VERSION = 1
 
 
 class IgnoreRepo:
-    """
-    持久化忽略清单仓储。
-
-    文件格式：UTF-8 纯文本，每行一个规范化绝对路径，# 开头为注释行。
-    典型路径：data/ignore_paths.txt（与 config.json 同级）。
-    """
+    """Owns canonicalization, matching, folding, and atomic persistence of ignore rules."""
 
     def __init__(self, data_dir: str = "data"):
-        self._path = os.path.join(data_dir, _IGNORE_FILE_NAME)
-        self._lock = threading.Lock()
+        self._path = os.path.join(data_dir, _RULE_FILE_NAME)
+        self._lock = threading.RLock()
         os.makedirs(data_dir, exist_ok=True)
         if not os.path.exists(self._path):
-            Path(self._path).write_text(
-                "# Neon-Crate 持久化忽略清单\n"
-                "# 每行一个绝对路径，扫描时将永久跳过这些文件。\n"
-                "# 此文件独立于数据库，数据库重置后仍然生效。\n",
-                encoding="utf-8",
-            )
-
-    # ── 内部工具 ──────────────────────────────────────────────────────
+            self._write_rules([])
 
     @staticmethod
-    def _normalize(path: str) -> str:
-        return os.path.normcase(os.path.normpath(path))
+    def normalize_path(path: str) -> str:
+        if not isinstance(path, str) or not path.strip() or "\x00" in path:
+            raise ValueError("路径不能为空且不得包含 NUL 字符")
+        if not os.path.isabs(path):
+            raise ValueError("忽略规则路径必须是绝对路径")
+        normalized = os.path.normcase(os.path.normpath(path.strip()))
+        if normalized != os.path.sep:
+            normalized = normalized.rstrip("/\\")
+        return normalized
 
-    def _read_entries(self) -> tuple[set, list]:
-        """返回 (规范化路径集合, 原始行列表（含注释））"""
-        if not os.path.exists(self._path):
-            return set(), []
-        lines = Path(self._path).read_text(encoding="utf-8").splitlines()
-        norm_set: set = set()
-        for line in lines:
-            stripped = line.strip()
-            if stripped and not stripped.startswith("#"):
-                norm_set.add(self._normalize(stripped))
-        return norm_set, lines
+    @classmethod
+    def _is_same_or_descendant(cls, path: str, directory: str) -> bool:
+        try:
+            return os.path.commonpath([path, directory]) == directory
+        except ValueError:
+            return False
 
-    def _write_lines(self, lines: list):
-        """原子写入：先写 .tmp，再 replace。"""
-        tmp = self._path + ".tmp"
-        Path(tmp).write_text("\n".join(lines) + "\n", encoding="utf-8")
-        os.replace(tmp, self._path)
+    @classmethod
+    def _matches(cls, rule: dict[str, Any], candidate_path: str) -> bool:
+        if rule["scope"] == "file":
+            return candidate_path == rule["path"]
+        return cls._is_same_or_descendant(candidate_path, rule["path"])
 
-    # ── 公开接口 ──────────────────────────────────────────────────────
+    @staticmethod
+    def _utc_now() -> str:
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-    def contains(self, path: str) -> bool:
-        """判断路径是否在忽略清单中（O(1)）。"""
+    def _read_rules(self) -> list[dict[str, Any]]:
+        try:
+            with open(self._path, encoding="utf-8") as rule_file:
+                payload = json.load(rule_file)
+        except (FileNotFoundError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"忽略规则文件不可读取: {exc}") from exc
+
+        if payload.get("version") != _RULE_FILE_VERSION or not isinstance(payload.get("rules"), list):
+            raise RuntimeError("忽略规则文件格式无效")
+
+        rules: list[dict[str, Any]] = []
+        for item in payload["rules"]:
+            if not isinstance(item, dict) or item.get("scope") not in {"file", "directory"}:
+                raise RuntimeError("忽略规则文件包含无效规则")
+            rules.append({
+                "id": str(item["id"]),
+                "scope": item["scope"],
+                "path": self.normalize_path(item["path"]),
+                "created_at": str(item["created_at"]),
+            })
+        return rules
+
+    def _write_rules(self, rules: Iterable[dict[str, Any]]) -> None:
+        payload = {"version": _RULE_FILE_VERSION, "rules": list(rules)}
+        tmp_path = f"{self._path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as rule_file:
+            json.dump(payload, rule_file, ensure_ascii=False, indent=2)
+            rule_file.write("\n")
+        os.replace(tmp_path, self._path)
+
+    def _derive_rule_path(self, scope: RuleScope, paths: Iterable[str]) -> str:
+        canonical_paths = list(dict.fromkeys(self.normalize_path(path) for path in paths))
+        if not canonical_paths:
+            raise ValueError("至少提供一个文件路径")
+        if scope == "file":
+            if len(canonical_paths) != 1:
+                raise ValueError("文件规则必须且只能指定一个文件路径")
+            return canonical_paths[0]
+        if scope != "directory":
+            raise ValueError("规则作用域必须是 file 或 directory")
+        directories = [os.path.dirname(path) for path in canonical_paths]
+        try:
+            return self.normalize_path(os.path.commonpath(directories))
+        except ValueError as exc:
+            raise ValueError("目录规则不能跨越不同文件系统根目录") from exc
+
+    def create_rule(self, scope: RuleScope, paths: Iterable[str]) -> dict[str, Any]:
+        """Create the minimal rule covering paths, or return its existing cover rule."""
         with self._lock:
-            norm_set, _ = self._read_entries()
-            return self._normalize(path) in norm_set
+            rule_path = self._derive_rule_path(scope, paths)
+            rules = self._read_rules()
 
-    def add(self, path: str) -> bool:
-        """
-        将路径加入忽略清单。
+            for rule in rules:
+                if self._matches(rule, rule_path):
+                    return {"created": False, "rule": rule, "removed_rule_ids": []}
 
-        Returns:
-            True  — 新增成功
-            False — 路径已存在，无需重复写入
-        """
+            removed_rule_ids: list[str] = []
+            if scope == "directory":
+                remaining_rules: list[dict[str, Any]] = []
+                for rule in rules:
+                    if self._is_same_or_descendant(rule["path"], rule_path):
+                        removed_rule_ids.append(rule["id"])
+                    else:
+                        remaining_rules.append(rule)
+                rules = remaining_rules
+
+            rule = {
+                "id": str(uuid.uuid4()),
+                "scope": scope,
+                "path": rule_path,
+                "created_at": self._utc_now(),
+            }
+            rules.append(rule)
+            self._write_rules(rules)
+            logger.info("[IGNORE] 创建 %s 规则: %s", scope, rule_path)
+            return {"created": True, "rule": rule, "removed_rule_ids": removed_rule_ids}
+
+    def list_rules(self) -> list[dict[str, Any]]:
         with self._lock:
-            norm_set, lines = self._read_entries()
-            norm = self._normalize(path)
-            if norm in norm_set:
+            return sorted(self._read_rules(), key=lambda rule: (rule["path"], rule["scope"]))
+
+    def delete_rule(self, rule_id: str) -> bool:
+        with self._lock:
+            rules = self._read_rules()
+            remaining_rules = [rule for rule in rules if rule["id"] != rule_id]
+            if len(remaining_rules) == len(rules):
                 return False
-            lines.append(path)
-            self._write_lines(lines)
-            logger.info(f"[IGNORE] 已加入忽略清单: {path}")
+            self._write_rules(remaining_rules)
+            logger.info("[IGNORE] 删除规则: %s", rule_id)
             return True
 
-    def add_batch(self, paths: List[str]) -> int:
-        """批量加入忽略清单，返回实际新增数量。"""
+    def clear_rules(self) -> int:
         with self._lock:
-            norm_set, lines = self._read_entries()
-            added = 0
-            for path in paths:
-                norm = self._normalize(path)
-                if norm not in norm_set:
-                    lines.append(path)
-                    norm_set.add(norm)
-                    added += 1
-            if added:
-                self._write_lines(lines)
-                logger.info(f"[IGNORE] 批量加入忽略清单: {added} 条")
-            return added
+            rules = self._read_rules()
+            self._write_rules([])
+            logger.info("[IGNORE] 清空 %s 条规则", len(rules))
+            return len(rules)
 
-    def remove(self, path: str) -> bool:
-        """
-        从忽略清单移除路径（取消忽略）。
-
-        Returns:
-            True  — 移除成功
-            False — 路径不存在于清单
-        """
+    def match(self, path: str) -> Optional[dict[str, Any]]:
+        candidate_path = self.normalize_path(path)
         with self._lock:
-            norm_set, lines = self._read_entries()
-            norm = self._normalize(path)
-            if norm not in norm_set:
-                return False
-            new_lines = [
-                l for l in lines
-                if l.strip().startswith("#") or self._normalize(l.strip()) != norm
-            ]
-            self._write_lines(new_lines)
-            logger.info(f"[IGNORE] 已移出忽略清单: {path}")
-            return True
+            rules = self._read_rules()
+        matching_rules = [rule for rule in rules if self._matches(rule, candidate_path)]
+        if not matching_rules:
+            return None
+        return min(matching_rules, key=lambda rule: (len(rule["path"]), rule["scope"] == "file"))
 
-    def list_all(self) -> List[str]:
-        """返回所有被忽略的路径列表（不含注释行）。"""
-        with self._lock:
-            _, lines = self._read_entries()
-            return [
-                l.strip() for l in lines
-                if l.strip() and not l.strip().startswith("#")
-            ]
-
-    def load_set(self) -> frozenset:
-        """返回规范化路径的 frozenset，供扫描时 O(1) 查找。"""
-        with self._lock:
-            norm_set, _ = self._read_entries()
-            return frozenset(norm_set)
+    def filter_matched(self, paths: Iterable[str]) -> dict[str, dict[str, Any]]:
+        matches: dict[str, dict[str, Any]] = {}
+        for path in paths:
+            rule = self.match(path)
+            if rule:
+                matches[path] = rule
+        return matches

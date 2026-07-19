@@ -600,7 +600,7 @@ def _step_tmdb_search_and_dup_check(
         #   1) 跨表查找同源已归档任务的 `local_poster_path`
         #   2) 将 `ignored` 状态 + `local_poster_path` 一次性写回 DB
         # 若拆分/内联/省略此调用，前端将出现破图（ignored 的 VHS 故障层失去本地海报锚点 → 白板空图）。
-        db.mark_task_as_ignored_and_inherit(
+        db.mark_task_as_duplicate_and_inherit(
             task_id=task_id,
             imdb_id=imdb_id,
             media_type=refined_type,
@@ -787,7 +787,7 @@ def _step_archive_and_metadata(
         # 就地补录：目标路径是文件自身，check_task_exists_by_path 命中的是这条任务本身，
         # 不是真正的重复，应保持 archived 语义。
         # 归档全链路：目标路径被另一条任务占用，是真正的物理重复，标记 ignored。
-        final_skip_status = "archived" if _is_library_file else "ignored"
+        final_skip_status = "archived" if _is_library_file else "duplicate"
         db.update_task_status(
             task_id=task_id, status=final_skip_status,
             tmdb_id=int(tmdb_id) if tmdb_id else None,
@@ -1040,6 +1040,11 @@ def _process_single_task(
         task_id    = task.get("id")
         media_type = task.get("type", "movie")
         logger.info(f"[TMDB] 正在处理: {clean_name or file_name} (ID: {task_id})")
+
+        # 手动规则可在扫描完成后新增；在消耗 AI/TMDB 前再做一次权威检查。
+        if file_path and db.match_ignore_rule(file_path):
+            logger.info(f"[SCRAPE] 忽略规则命中，跳过 AI/TMDB: {file_path}")
+            return True, False
 
         # 1. Mixed 瞬态拦截：AI 裁决真实类型 -> 原子回写热表 -> 洗白后并入标准管线
         if media_type == "mixed":

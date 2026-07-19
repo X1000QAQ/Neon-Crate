@@ -605,7 +605,7 @@ class TaskRepo(BaseRepository):
                 logger.warning(f"[TaskRepo] reset_orphan_pending_tasks 失败: {e}")
                 return 0
 
-    def mark_task_as_ignored_and_inherit(
+    def mark_task_as_duplicate_and_inherit(
         self,
         task_id: int,
         is_archive: bool,
@@ -668,7 +668,7 @@ class TaskRepo(BaseRepository):
                 pk_field = "original_task_id" if is_archive else "id"
                 
                 # 1. 初始化 UPDATE 字段列表（必须包含 status='ignored'）
-                updates = ["status = 'ignored'"]
+                updates = ["status = 'duplicate'"]
                 params = []
                 
                 # 2. 若有继承的海报路径，添加到 UPDATE 列表
@@ -697,7 +697,7 @@ class TaskRepo(BaseRepository):
                 # ── Step 3: 提交事务 ──
                 conn.commit()
                 logger.info(
-                    f"[TaskRepo] 🚨 原子操作：标记任务 {task_id} 为 ignored，"
+                    f"[TaskRepo] 原子操作：标记任务 {task_id} 为 duplicate，"
                     f"继承海报: {inherited_poster}, imdb_id: {imdb_id}"
                 )
                 # ── Step 4: 返回操作结果 ──

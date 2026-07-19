@@ -237,9 +237,9 @@ export default function MediaWall() {
     }
   }, [loadTasks, showToast, t]);
 
-  const handleIgnore = useCallback(async (filePath: string) => {
+  const handleIgnore = useCallback(async (scope: 'file' | 'directory', paths: string[]) => {
     try {
-      await api.ignorePath(filePath);
+      await api.createIgnoreRule(scope, paths);
       await loadTasks();
       showToast(t('msg_task_ignored'));
     } catch (error) {
@@ -248,9 +248,9 @@ export default function MediaWall() {
     }
   }, [loadTasks, showToast, t]);
 
-  const handleUnignore = useCallback(async (filePath: string) => {
+  const handleUnignore = useCallback(async (ruleId: string) => {
     try {
-      await api.unignorePath(filePath);
+      await api.deleteIgnoreRule(ruleId);
       await loadTasks();
       showToast(t('msg_task_unignored'));
     } catch (error) {

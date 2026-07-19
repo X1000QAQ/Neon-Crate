@@ -22,7 +22,12 @@ from typing import Optional, Any, Dict
 from fastapi import APIRouter, HTTPException
 
 from app.api.v1.deps import DbDep
-from app.models.domain_system import DeleteBatchRequest, PurgeRequest, IgnorePathRequest, IgnorePathBatchRequest
+from app.models.domain_system import (
+    ClearIgnoreRulesRequest,
+    CreateIgnoreRuleRequest,
+    DeleteBatchRequest,
+    PurgeRequest,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -71,9 +76,8 @@ async def get_all_tasks(
             for t in tasks:
                 t["status"] = "archived"
         elif status == "ignored":
-            # 专属查询：只返回 ignored 记录
-            all_tasks = db.get_all_data(search_keyword=search, include_ignored=True)
-            tasks = [t for t in all_tasks if (t.get("status") or "").lower() == "ignored"]
+            # 手动忽略是规则投影，不依赖 tasks.status 的历史值。
+            tasks = db.get_all_data(search_keyword=search, include_ignored=True)
         elif status is None or status == "all":
             # 合并 tasks 表 + media_archive 表，并去重（严格排除 ignored）
             active_tasks = db.get_all_data(search_keyword=search, include_ignored=False)
@@ -159,6 +163,22 @@ async def get_all_tasks(
             normalized_task.pop("last_sub_check", None)
 
             normalized_tasks.append(normalized_task)
+
+        # 规则命中在最终合并结果后裁决，保证热表与归档表的 all/ignored 视图互斥。
+        projected_tasks = []
+        for task in normalized_tasks:
+            try:
+                matched_rule = db.match_ignore_rule(task.get("file_path") or "")
+            except ValueError:
+                matched_rule = None
+            if matched_rule:
+                task["ignore_rule"] = matched_rule
+                if status == "ignored":
+                    task["status"] = "ignored"
+                    projected_tasks.append(task)
+            elif status != "ignored":
+                projected_tasks.append(task)
+        normalized_tasks = projected_tasks
 
         # media_type 过滤（archived 模式下也生效）
         if media_type and media_type != "all":
@@ -317,57 +337,68 @@ async def retry_task(task_id: int, db: DbDep = None):
 
 
 # ==========================================
-# 持久化忽略清单接口
+# 作用域忽略规则接口
 # ==========================================
 
-@router.post("/ignore")
-async def ignore_path(body: IgnorePathRequest, db: DbDep = None):
-    """将单个文件路径加入持久化忽略清单，同时将数据库中对应任务标记为 ignored。"""
+def _count_rule_matches(db, rule: Dict[str, Any]) -> int:
+    all_tasks = db.get_all_data(include_ignored=True)
+    return sum(1 for task in all_tasks if db.match_ignore_rule(task.get("path") or "") == rule)
+
+
+@router.post("/ignore-rules")
+async def create_ignore_rule(body: CreateIgnoreRuleRequest, db: DbDep = None):
+    """从文件路径创建最小化的 file 或 directory 手动忽略规则。"""
     try:
-        db.ignore_path_add(body.path)
-        # 同步更新数据库：找到对应任务并标记 ignored（可能不存在，静默处理）
-        task_id = db.get_task_id_by_path(body.path)
-        if task_id:
-            db.update_task_status(task_id, "ignored")
-        logger.info(f"[API] 路径已加入忽略清单: {body.path}")
-        return {"success": True, "message": "已加入忽略清单"}
-    except Exception as e:
-        logger.error(f"[API] 忽略路径失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        result = db.create_ignore_rule(body.scope, body.paths)
+        result["matched_task_count"] = _count_rule_matches(db, result["rule"])
+        logger.info("[API] 创建忽略规则 scope=%s path=%s", body.scope, result["rule"]["path"])
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("[API] 创建忽略规则失败: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@router.post("/ignore_batch")
-async def ignore_path_batch(body: IgnorePathBatchRequest, db: DbDep = None):
-    """批量将文件路径加入持久化忽略清单。"""
+@router.get("/ignore-rules")
+async def get_ignore_rules(db: DbDep = None):
+    """列出全部手动忽略规则及其当前命中的任务数量。"""
     try:
-        added = db.ignore_path_add_batch(body.paths)
-        logger.info(f"[API] 批量忽略: 新增 {added} 条")
-        return {"success": True, "added": added}
-    except Exception as e:
-        logger.error(f"[API] 批量忽略失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        rules = db.get_ignore_rules()
+        return {
+            "rules": [{**rule, "matched_task_count": _count_rule_matches(db, rule)} for rule in rules],
+            "total": len(rules),
+        }
+    except Exception as exc:
+        logger.error("[API] 获取忽略规则失败: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@router.post("/unignore")
-async def unignore_path(body: IgnorePathRequest, db: DbDep = None):
-    """从持久化忽略清单移除路径，并将数据库中对应任务重置为 pending。"""
+@router.delete("/ignore-rules/{rule_id}")
+async def delete_ignore_rule(rule_id: str, db: DbDep = None):
+    """按规则 ID 删除规则；任务数据库状态保持原样。"""
     try:
-        removed = db.ignore_path_remove(body.path)
-        task_id = db.get_task_id_by_path(body.path)
-        if task_id:
-            db.update_task_status(task_id, "pending")
-        logger.info(f"[API] 路径已从忽略清单移除: {body.path}")
-        return {"success": True, "removed": removed}
-    except Exception as e:
-        logger.error(f"[API] 取消忽略失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        removed = db.delete_ignore_rule(rule_id)
+        if not removed:
+            raise HTTPException(status_code=404, detail="忽略规则不存在")
+        logger.info("[API] 删除忽略规则: %s", rule_id)
+        return {"removed": True, "rule_id": rule_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("[API] 删除忽略规则失败: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@router.get("/ignore_list")
-async def get_ignore_list(db: DbDep = None):
-    """获取完整的持久化忽略清单。"""
+@router.post("/ignore-rules/clear")
+async def clear_ignore_rules(body: ClearIgnoreRulesRequest, db: DbDep = None):
+    """清空全部手动忽略规则，必须使用专用确认口令。"""
+    if body.confirm != "CLEAR_IGNORE_RULES":
+        raise HTTPException(status_code=400, detail="确认口令不正确")
     try:
-        paths = db.ignore_path_list()
-        return {"paths": paths, "total": len(paths)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        removed = db.clear_ignore_rules()
+        logger.info("[API] 清空忽略规则: %s 条", removed)
+        return {"removed": removed}
+    except Exception as exc:
+        logger.error("[API] 清空忽略规则失败: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

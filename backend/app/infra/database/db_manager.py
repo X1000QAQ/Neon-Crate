@@ -382,15 +382,23 @@ class DatabaseManager:
     def delete_managed_path(self, path_id: int):                         return self._path_repo.delete_managed_path(path_id)
 
     # ==========================================
-    # 忽略清单方法（委托给 IgnoreRepo）
+    # 作用域忽略规则（委托给 IgnoreRepo）
     # ==========================================
 
-    def ignore_path_add(self, path: str) -> bool:                        return self._ignore_repo.add(path)
-    def ignore_path_add_batch(self, paths: List[str]) -> int:            return self._ignore_repo.add_batch(paths)
-    def ignore_path_remove(self, path: str) -> bool:                     return self._ignore_repo.remove(path)
-    def ignore_path_contains(self, path: str) -> bool:                   return self._ignore_repo.contains(path)
-    def ignore_path_list(self) -> List[str]:                             return self._ignore_repo.list_all()
-    def ignore_path_load_set(self) -> frozenset:                         return self._ignore_repo.load_set()
+    def create_ignore_rule(self, scope: str, paths: List[str]) -> Dict[str, Any]:
+        return self._ignore_repo.create_rule(scope, paths)
+
+    def get_ignore_rules(self) -> List[Dict[str, Any]]:
+        return self._ignore_repo.list_rules()
+
+    def delete_ignore_rule(self, rule_id: str) -> bool:
+        return self._ignore_repo.delete_rule(rule_id)
+
+    def clear_ignore_rules(self) -> int:
+        return self._ignore_repo.clear_rules()
+
+    def match_ignore_rule(self, path: str) -> Optional[Dict[str, Any]]:
+        return self._ignore_repo.match(path)
 
     # ==========================================
     # 任务管理方法（委托给 TaskRepo）
@@ -443,7 +451,7 @@ class DatabaseManager:
     def get_sibling_poster(self, imdb_id: str, media_type: str, season: int = None, episode: int = None):          return self._stats_repo.get_sibling_poster(imdb_id, media_type, season, episode)
     def check_media_exists(self, imdb_id: str, media_type: str, season: int = None, episode: int = None) -> bool:   return self._stats_repo.check_media_exists(imdb_id, media_type, season, episode)
 
-    def mark_task_as_ignored_and_inherit(self, task_id: int, imdb_id: str, media_type: str,
+    def mark_task_as_duplicate_and_inherit(self, task_id: int, imdb_id: str, media_type: str,
                                           season: int = None, episode: int = None,
                                           tmdb_id: int = None):
         """
@@ -470,10 +478,10 @@ class DatabaseManager:
             import logging as _log
             _log.getLogger(__name__).info(f"[DB][IGNORE] 未找到同源海报 (imdb={imdb_id}, type={media_type}, S{season}E{episode})")
 
-        # 2. 原子写入：status=ignored + local_poster_path + imdb_id + tmdb_id
+        # 2. 原子写入：status=duplicate + local_poster_path + imdb_id + tmdb_id
         self._task_repo.update_task_status(
             task_id=task_id,
-            status="ignored",
+            status="duplicate",
             local_poster_path=sibling_poster,
             tmdb_id=tmdb_id,
             imdb_id=imdb_id if imdb_id else None,

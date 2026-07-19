@@ -433,41 +433,33 @@ export const api = {
     return safeJson(res);
   },
 
-  async ignorePath(path: string): Promise<{ success: boolean; message: string }> {
-    const res = await secureFetch(`${API_BASE}/tasks/ignore`, {
-      method: 'POST',
-      headers: getHeaders(),
-      body: JSON.stringify({ path }),
+  async createIgnoreRule(scope: 'file' | 'directory', paths: string[]) {
+    const res = await secureFetch(`${API_BASE}/tasks/ignore-rules`, {
+      method: 'POST', headers: getHeaders(), body: JSON.stringify({ scope, paths }),
     });
-    if (!res.ok) throw new Error('Failed to ignore path');
+    if (!res.ok) throw new Error('Failed to create ignore rule');
     return safeJson(res);
   },
 
-  async ignorePathBatch(paths: string[]): Promise<{ success: boolean; added: number }> {
-    const res = await secureFetch(`${API_BASE}/tasks/ignore_batch`, {
-      method: 'POST',
-      headers: getHeaders(),
-      body: JSON.stringify({ paths }),
-    });
-    if (!res.ok) throw new Error('Failed to ignore paths');
+  async getIgnoreRules(): Promise<{ rules: import('@/types').IgnoreRule[]; total: number }> {
+    const res = await secureFetch(`${API_BASE}/tasks/ignore-rules`, { headers: getHeaders() });
+    if (!res.ok) throw new Error('Failed to fetch ignore rules');
     return safeJson(res);
   },
 
-  async unignorePath(path: string): Promise<{ success: boolean; removed: boolean }> {
-    const res = await secureFetch(`${API_BASE}/tasks/unignore`, {
-      method: 'POST',
-      headers: getHeaders(),
-      body: JSON.stringify({ path }),
+  async deleteIgnoreRule(ruleId: string): Promise<{ removed: boolean; rule_id: string }> {
+    const res = await secureFetch(`${API_BASE}/tasks/ignore-rules/${encodeURIComponent(ruleId)}`, {
+      method: 'DELETE', headers: getHeaders(),
     });
-    if (!res.ok) throw new Error('Failed to unignore path');
+    if (!res.ok) throw new Error('Failed to delete ignore rule');
     return safeJson(res);
   },
 
-  async getIgnoreList(): Promise<{ paths: string[]; total: number }> {
-    const res = await secureFetch(`${API_BASE}/tasks/ignore_list`, {
-      headers: getHeaders(),
+  async clearIgnoreRules(): Promise<{ removed: number }> {
+    const res = await secureFetch(`${API_BASE}/tasks/ignore-rules/clear`, {
+      method: 'POST', headers: getHeaders(), body: JSON.stringify({ confirm: 'CLEAR_IGNORE_RULES' }),
     });
-    if (!res.ok) throw new Error('Failed to fetch ignore list');
+    if (!res.ok) throw new Error('Failed to clear ignore rules');
     return safeJson(res);
   },
 
